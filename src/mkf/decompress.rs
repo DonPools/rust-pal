@@ -1,4 +1,3 @@
-
 #[derive(Debug)]
 struct YJ1Header {
     signature: String,
@@ -142,6 +141,7 @@ fn yj1_get_count(src: &[u8], bitptr: &mut u32, header: &YJ1BlockHeader) -> u16 {
 pub fn decompress(data: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     let header = YJ1Header::from(data.as_slice());
     if header.signature != "YJ_1" {
+        print!("Invalid signature: {}", header.signature);
         return Err("Invalid signature");
     }
 
@@ -178,31 +178,28 @@ pub fn decompress(data: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     } << 1;
 
     let mut block_offset = 16 + tree_len + t;
-    for i in 0..header.block_count as usize {
+    for _ in 0..header.block_count as usize {
         let block_header = YJ1BlockHeader::from(&data[block_offset..]);
-        let mut header_length = 4;
 
         if block_header.compressed_length == 0 {
             dst_data[dst_offset..dst_offset + block_header.uncompressed_length as usize]
                 .copy_from_slice(
-                    &data[block_offset..block_offset + block_header.uncompressed_length as usize],
+                    &data[block_offset + 4
+                        ..block_offset + 4 + block_header.uncompressed_length as usize],
                 );
             block_offset += block_header.uncompressed_length as usize;
             dst_offset += block_header.uncompressed_length as usize;
             continue;
         }
 
-        header_length += 20;        
         bitptr = 0;
-        let block_data = &data[block_offset+header_length..];
-        
-        let mut i = 0;
+        let block_data = &data[block_offset + 24..];
+
         loop {
             let mut loop_count = yj1_get_loop(block_data, &mut bitptr, &block_header);
             if loop_count == 0 {
                 break;
             }
-            i += 1;
 
             for _ in 0..loop_count {
                 let mut node = &root[0];
@@ -230,13 +227,13 @@ pub fn decompress(data: Vec<u8>) -> Result<Vec<u8>, &'static str> {
                     &mut bitptr,
                     block_header.lzss_offset_code_length_table[pos as usize] as u32,
                 );
-                for _ in 0..count {                    
+                for _ in 0..count {
                     dst_data[dst_offset] = dst_data[dst_offset - pos as usize];
                     dst_offset += 1;
                 }
             }
         }
-        
+
         block_offset += block_header.compressed_length as usize;
     }
 
