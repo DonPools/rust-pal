@@ -138,11 +138,11 @@ fn yj1_get_count(src: &[u8], bitptr: &mut u32, header: &YJ1BlockHeader) -> u16 {
     }
 }
 
-pub fn decompress(data: Vec<u8>) -> Result<Vec<u8>, &'static str> {
+pub fn decompress(data: Vec<u8>) -> Result<Vec<u8>, String> {
     let header = YJ1Header::from(data.as_slice());
     if header.signature != "YJ_1" {
-        print!("Invalid signature: {}", header.signature);
-        return Err("Invalid signature");
+        let err_msg = format!("Invalid signature: {}", header.signature);
+        return Err(err_msg);
     }
 
     let mut dst_data = vec![0; header.uncompressed_length as usize];

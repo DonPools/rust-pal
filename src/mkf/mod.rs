@@ -97,7 +97,6 @@ impl MKF {
         let mut data = vec![0; chunk_size as usize];
 
         let chunk_offset = offset + sub_offset;
-        println!("i: {} sub_offset: {} chunk_size: {}", frame_index, chunk_offset, chunk_size);
         self.file.seek(SeekFrom::Start(chunk_offset.into()))?;
         self.file.read_exact(&mut data)?;
 
