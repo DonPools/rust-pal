@@ -9,10 +9,6 @@ pub fn decode_rng(src: &[u8], dst: &mut [u8], i: u32) {
         let data = src[ptr];
         ptr += 1;
 
-        if i == 44 {
-            println!("data: {:02x} ptr: {}", data, ptr);
-        }
-
         match data {
             0x00 | 0x13 => {
                 break;
