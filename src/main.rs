@@ -10,8 +10,8 @@ use std::time::Duration;
 
 mod mkf;
 mod rng;
-mod common;
-use common::*;
+mod sprite;
+use sprite::*;
 
 
 const BASE_PATH: &str = "/home/rocky/Code/Game/PAL95/";
@@ -144,6 +144,13 @@ impl Pal {
     }
 
     fn splash_screen(&mut self) -> Result<()> {
+        #[derive(Clone)]
+        struct Crane {
+            x: isize,
+            y: isize,
+            sprite_id: u32,
+        }
+
         let mut surface = Pal::create_surface()?;
 
         let colors = self.get_colors(1)?;
@@ -154,16 +161,31 @@ impl Pal {
         let splash_up = self.fbp_mkf.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;        
         let splash_title = self.mgo_mkf.read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
         let splash_crane = self.mgo_mkf.read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
+        
+        let mut crane_sprites = Vec::<Sprite>::new();
+        for i in 0..8 {
+            let crane_sprite = sprite_get_frame(&splash_crane, i)?;
+            crane_sprites.push(crane_sprite);
+        }
 
         let title_sprite = sprite_get_frame(&splash_title, 0)?;
-        println!("title_sprite: {:?}", title_sprite.len());
-        let title_height = rle_get_width(title_sprite);
-        println!("title_height: {:?}", title_height);           
+        //let title_height = rle_get_width(title_sprite);
+        
+        let mut cranes = Vec::<Crane>::with_capacity(9);
+        for _ in 0..cranes.capacity() {
+            cranes.push(Crane {
+                x: (rand::random::<usize>() % 300 + 300) as isize,
+                y: (rand::random::<usize>() % 80 + 80) as isize,
+                sprite_id: rand::random::<u32>() % 8,
+            });
+        }
 
         let begin_time = self.timer_subsys.ticks();
         let mut h_offset = 0;
-
+        
+        let mut i = 0;
         'running: loop {
+            i += 1;
             let elapsed_time = self.timer_subsys.ticks() - begin_time;
 
             if elapsed_time < 15000 {
@@ -178,6 +200,7 @@ impl Pal {
                 let palette = Palette::with_colors(&cur_colors)?;
                 surface.set_palette(&palette)?;
             }
+            //self.set_palette(&mut surface, 1)?;
 
             if h_offset < 200 {
                 h_offset += 1;
@@ -188,11 +211,22 @@ impl Pal {
                     .copy_from_slice(&splash_up[(200 - h_offset) * 320..200 * 320]);
                 pixels[h_offset * 320..200 * 320]
                     .copy_from_slice(&splash_down[0..((200 - h_offset) * 320)]);
-
-                //decode_rle(&crane_sprite, pixels, 320, 200, 100, 150);
-                decode_rle(&title_sprite, pixels, 320, 200, 250, 5);
+                
+                for crane in cranes.iter() {
+                    let sprite = &crane_sprites[crane.sprite_id as usize];
+                    draw_sprite(sprite, pixels, 320, 200, crane.x, crane.y);                    
+                }
+                draw_sprite(&title_sprite, pixels, 320, 200, 250, 5);
             });
 
+
+            if i % 5 == 0 {
+                for crane in cranes.iter_mut() {
+                    crane.x -= 1;
+                    crane.sprite_id = (crane.sprite_id + 1) % 8;
+                }
+            }
+            
             let texture = surface.as_texture(&self.texture_creator)?;
             self.canvas.copy(&texture, None, None)?;
             self.canvas.present();
@@ -212,7 +246,7 @@ impl Pal {
     }
 
     fn run(&mut self) {
-        //self.trademark_screen().unwrap();
+        self.trademark_screen().unwrap();
         self.splash_screen().unwrap();
 
         /*
