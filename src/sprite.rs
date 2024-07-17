@@ -22,7 +22,7 @@ pub fn sprite_get_frame(sprite_data: &[u8], frame_index: u32) -> Result<Sprite> 
 
 pub struct Sprite {
     width: u32,
-    height: u32,
+    pub height: u32,
     data: Vec<u16>,
 }
 
