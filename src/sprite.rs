@@ -1,7 +1,8 @@
+
+use crate::utils::*;
+
 use std::vec;
 
-pub type Error = Box<dyn std::error::Error>;
-pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn sprite_get_frame(sprite_data: &[u8], frame_index: u32) -> Result<Sprite> {
     let image_count = sprite_data[0] as u32 | ((sprite_data[1] as u32) << 8);
@@ -40,7 +41,6 @@ fn decode_rle_sprite(src_rle: &[u8]) -> Result<Sprite> {
     let mut data = vec![0 as u16; (width * height) as usize];
     let mut ptr = 0;
     let mut dst_ptr = 0;
-
 
     while ptr < src_rle.len() {
         let mut count = src_rle[ptr];        

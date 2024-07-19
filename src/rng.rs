@@ -1,6 +1,5 @@
 use core::panic;
 
-
 pub fn decode_rng(src: &[u8], dst: &mut [u8], i: u32) {
     let mut ptr = 0;
     let mut dst_ptr = 0;
