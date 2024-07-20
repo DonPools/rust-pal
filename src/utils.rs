@@ -6,6 +6,16 @@ use crate::mkf;
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+// Direction
+pub enum Dir
+{
+   South = 0,
+   West,
+   North,
+   East,
+   Unknown
+}
+
 const BASE_PATH: &str = "/home/rocky/Code/Game/PAL95/";
 
 pub fn open_file(filename: &str) -> Result<File> {

@@ -1,39 +1,47 @@
 use sdl2::event::Event;
+use sdl2::mixer::InitFlag;
 use sdl2::mixer::LoaderRWops;
 use sdl2::mixer::AUDIO_S16LSB;
 use sdl2::pixels::{Color, Palette, PixelFormatEnum};
 use sdl2::surface::Surface;
 use sdl2::TimerSubsystem;
-use sdl2::mixer::InitFlag;
 
+use crate::input::InputState;
+use crate::input::PalKey;
 use crate::mkf;
-use crate::utils::*;
 use crate::sprite::*;
-use crate::rng::*;
-use crate::text::*;
+use crate::textmgr::*;
+use crate::ui::*;
+use crate::utils::*;
 
+// RNG
 const BITMAPNUM_SPLASH_UP: u32 = 0x26;
 const BITMAPNUM_SPLASH_DOWN: u32 = 0x27;
+
+// RLE SPRITE
 const SPRITENUM_SPLASH_TITLE: u32 = 0x47;
 const SPRITENUM_SPLASH_CRANE: u32 = 0x49;
+
+// MIDI
 const NUM_RIX_TITLE: u32 = 0x05;
 
-
 pub struct Pal {
-    sdl: sdl2::Sdl,
-    video: sdl2::VideoSubsystem,    
-    timer: TimerSubsystem,
+    pub sdl: sdl2::Sdl,
+    pub video: sdl2::VideoSubsystem,
+    pub timer: TimerSubsystem,
 
-    text: Text,
-    event_pump: sdl2::EventPump,
-    canvas: sdl2::render::Canvas<sdl2::video::Window>,
-    texture_creator: sdl2::render::TextureCreator<sdl2::video::WindowContext>,
+    pub textmgr: TextMgr,
+    pub event_pump: sdl2::EventPump,
+    pub canvas: sdl2::render::Canvas<sdl2::video::Window>,
+    pub texture_creator: sdl2::render::TextureCreator<sdl2::video::WindowContext>,
 
-    rng_mkf: mkf::MKF,  // RNG动画
-    pat_mkf: mkf::MKF,  // 调色板
-    fbp_mkf: mkf::MKF,  // 战斗背景sprites
-    mgo_mkf: mkf::MKF,  // 场景sprites
-    midi_mkf: mkf::MKF, // MIDI音乐
+    pub input_state: InputState,
+
+    pub rng_mkf: mkf::MKF,  // RNG动画
+    pub pat_mkf: mkf::MKF,  // 调色板
+    pub fbp_mkf: mkf::MKF,  // 战斗背景sprites
+    pub mgo_mkf: mkf::MKF,  // 场景sprites
+    pub midi_mkf: mkf::MKF, // MIDI音乐
 }
 
 impl Pal {
@@ -44,7 +52,7 @@ impl Pal {
         let window = video_subsys
             .window("PAL95", 640, 400)
             .position_centered()
-            .build()?;        
+            .build()?;
 
         let canvas = window.into_canvas().build()?;
         let texture_creator = canvas.texture_creator();
@@ -59,7 +67,7 @@ impl Pal {
 
         sdl2::mixer::allocate_channels(8);
 
-        let text = Text::load()?;
+        let text = TextMgr::load()?;
 
         let rng_mkf = open_mkf("RNG.MKF")?;
         let pat_mkf = open_mkf("PAT.MKF")?;
@@ -72,10 +80,12 @@ impl Pal {
             video: video_subsys,
             timer: timer_subsys,
 
-            text,
+            textmgr: text,
             canvas,
             event_pump,
             texture_creator,
+
+            input_state: InputState::new(),
 
             rng_mkf,
             pat_mkf,
@@ -83,9 +93,9 @@ impl Pal {
             mgo_mkf,
             midi_mkf,
         })
-    }    
+    }
 
-    fn get_colors(&mut self, palette_id: u32) -> Result<Vec<Color>> {
+    pub fn get_colors(&mut self, palette_id: u32) -> Result<Vec<Color>> {
         let buf = self.pat_mkf.read_chunk(palette_id)?;
         let mut colors = Vec::with_capacity(256);
         for i in 0..256 {
@@ -99,7 +109,7 @@ impl Pal {
         Ok(colors)
     }
 
-    fn set_palette(&mut self, surface: &mut Surface, palette_id: u32) -> Result<()> {
+    pub fn set_palette(&mut self, surface: &mut Surface, palette_id: u32) -> Result<()> {
         let colors = self.get_colors(palette_id)?;
         let palette = Palette::with_colors(&colors)?;
         surface.set_palette(&palette)?;
@@ -107,7 +117,7 @@ impl Pal {
         Ok(())
     }
 
-    fn create_surface() -> Result<Surface<'static>> {
+    pub fn create_surface() -> Result<Surface<'static>> {
         let surface = Surface::new(320, 200, PixelFormatEnum::Index8)?;
         Ok(surface)
     }
@@ -121,38 +131,10 @@ impl Pal {
         Ok(music)
     }
     */
-    fn blit_surface(&mut self, surface: &mut Surface) -> Result<()> {
+    pub fn blit_surface(&mut self, surface: &mut Surface) -> Result<()> {
         let texture = surface.as_texture(&self.texture_creator)?;
         self.canvas.copy(&texture, None, None)?;
         self.canvas.present();
-
-        Ok(())
-    }
-
-    fn play_rng(&mut self, palette_id: u32, rng_id: u32) -> Result<()> {
-        let mut surface = Pal::create_surface()?;
-        self.set_palette(&mut surface, palette_id)?;
-
-        let rng_frame_count = self.rng_mkf.read_rng_sub_count(rng_id)?;
-
-        for i in 0..rng_frame_count {
-            let rng = self.rng_mkf.read_rng_chunk(rng_id, i)?;
-            surface.with_lock_mut(|pixels: &mut [u8]| {
-                decode_rng(&rng, pixels, i);
-            });            
-            self.blit_surface(&mut surface)?;
-
-            for event in self.event_pump.poll_iter() {
-                match event {
-                    Event::Quit { .. } => {
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-
-            self.timer.delay(30);
-        }
 
         Ok(())
     }
@@ -176,10 +158,16 @@ impl Pal {
         let mut fadein_colors = vec![Color::RGB(0, 0, 0); 256];
 
         // 开场的那个从下往上的山是由两个图片拼接的，一个在上面，一个在下面。尺寸是320x200
-        let splash_down = self.fbp_mkf.read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
+        let splash_down = self
+            .fbp_mkf
+            .read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
         let splash_up = self.fbp_mkf.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;
-        let splash_title = self.mgo_mkf.read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
-        let splash_crane = self.mgo_mkf.read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
+        let splash_title = self
+            .mgo_mkf
+            .read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
+        let splash_crane = self
+            .mgo_mkf
+            .read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
 
         let mut crane_sprites = Vec::<Sprite>::new();
         for i in 0..8 {
@@ -199,13 +187,13 @@ impl Pal {
                 sprite_id: rand::random::<u32>() % 8,
             });
         }
-        
+
         let begin_time = self.timer.ticks();
         let mut h_offset = 0;
 
         let chunk = self.midi_mkf.read_chunk(NUM_RIX_TITLE)?;
         let rw = sdl2::rwops::RWops::from_bytes(&chunk)?;
-        let music= rw.load_music()?;
+        let music = rw.load_music()?;
         music.play(-1)?;
 
         let mut i = 0;
@@ -257,7 +245,7 @@ impl Pal {
                 draw_sprite(&title_sprite, pixels, 320, 200, 250, 5);
             });
 
-            self.blit_surface(&mut surface)?;            
+            self.blit_surface(&mut surface)?;
 
             for event in self.event_pump.poll_iter() {
                 match event {
@@ -273,40 +261,75 @@ impl Pal {
         Ok(())
     }
 
-    fn text_screen(&mut self) -> Result<()> {
+    fn opening_menu_screen(&mut self) -> Result<()> {
         let mut surface = Pal::create_surface()?;
-        self.set_palette(&mut surface, 1)?;
+        self.set_palette(&mut surface, 0)?;
+
+        let menu_items = [
+            MenuItem {
+                value: 0,
+                num_word: MAINMENU_LABEL_NEWGAME,
+                enabled: true,
+                x: 125,
+                y: 95,
+            },
+            MenuItem {
+                value: 1,
+                num_word: MAINMENU_LABEL_LOADGAME,
+                enabled: true,
+                x: 125,
+                y: 112,
+            },
+        ];
+
+        let bg_bitmap = self
+            .fbp_mkf
+            .read_chunk_decompressed(MAINMENU_BACKGROUND_FBPNUM)?;
+
+        let mut menu_selected = 0;
 
         loop {
             surface.with_lock_mut(|pixels: &mut [u8]| {
-                pixels.fill(0);
-                for i in 0..20 {
-                    let c = self.text.font_chars[i];                    
-                    self.text.draw_char(pixels, 320, 200, (i*16) as i32, 0, c, 0x88).unwrap();
+                pixels.copy_from_slice(&bg_bitmap);
+
+                for item in menu_items.iter() {
+                    let color = if item.value == menu_selected {
+                        self.menu_color_selected()
+                    } else {
+                        MENUITEM_COLOR
+                    };
+
+                    if item.enabled {
+                        self.draw_word(
+                            pixels,
+                            320,
+                            200,
+                            item.x as i32,
+                            item.y as i32,
+                            item.num_word as usize,
+                            color
+                        );
+                    }
                 }
             });
-    
-            self.blit_surface(&mut surface)?;
 
-            for event in self.event_pump.poll_iter() {
-                match event {
-                    Event::Quit { .. } => {
-                        return Ok(());
-                    }
-                    _ => {}
-                }
+            self.blit_surface(&mut surface)?;
+            self.process_event();
+            
+            if self.input_state.is_press(PalKey::Up) || self.input_state.is_press(PalKey::Down) {
+                menu_selected = (menu_selected + 1) % menu_items.len() as u16;
             }
 
-            self.timer.delay(30);
+            self.clear_keyboard_state();
+
+            self.timer.delay(50);
         }
-        
     }
 
-    pub fn run(&mut self) -> Result<()> {        
-        self.trademark_screen()?;
-        self.splash_screen()?;
-        self.text_screen()?;        
-        
+    pub fn run(&mut self) -> Result<()> {
+        //self.trademark_screen()?;
+        //self.splash_screen()?;
+        self.opening_menu_screen()?;
         /*
         loop {
             for event in self.event_pump.poll_iter() {
@@ -319,7 +342,7 @@ impl Pal {
             }
         }
         */
-        
+
         Ok(())
     }
 }
