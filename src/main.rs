@@ -1,9 +1,8 @@
 
 
-use pal::pal::Pal;
+use pal::game::Game;
 
 fn main() {
-    let mut pal = Pal::init().unwrap();
+    let mut pal = Game::init().unwrap();
     pal.run().unwrap();
-    //test_encoding();
 }

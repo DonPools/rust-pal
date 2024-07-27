@@ -6,7 +6,7 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 
-use crate::pal::Pal;
+use crate::game::Game;
 
 pub struct TextMgr {
     pub font_chars: Vec<char>,
@@ -135,7 +135,7 @@ impl TextMgr {
     }
 }
 
-impl Pal {
+impl Game {
     pub fn draw_text(
         &self,
         pixels: &mut [u8],

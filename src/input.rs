@@ -1,7 +1,6 @@
+use minifb::{Key, KeyRepeat};
 
-
-
-use crate::pal::Pal;
+use crate::game::{Game, GameState};
 use crate::utils::*;
 
 #[derive(Debug, Clone, Copy)]
@@ -26,50 +25,147 @@ pub enum PalKey {
     Home = 1 << 16,
     End = 1 << 17,
 }
-/*
+
 struct KeyCode {
-    pub code: Scancode,
+    pub code: Key,
     pub key: PalKey,
 }
 const KEY_COUNT: usize = 33;
- */
-/*
+
 const KEY_MAP: [KeyCode; KEY_COUNT] = [
-    KeyCode { code: Scancode::Up, key: PalKey::Up },
-    KeyCode { code: Scancode::Kp8, key: PalKey::Up },
-    KeyCode { code: Scancode::Down, key: PalKey::Down },
-    KeyCode { code: Scancode::Kp2, key: PalKey::Down },
-    KeyCode { code: Scancode::Left, key: PalKey::Left },
-    KeyCode { code: Scancode::Kp4, key: PalKey::Left },
-    KeyCode { code: Scancode::Right, key: PalKey::Right },
-    KeyCode { code: Scancode::Kp6, key: PalKey::Right },
-    KeyCode { code: Scancode::Escape, key: PalKey::Menu },
-    KeyCode { code: Scancode::Insert, key: PalKey::Menu },
-    KeyCode { code: Scancode::LAlt, key: PalKey::Menu },
-    KeyCode { code: Scancode::RAlt, key: PalKey::Menu },
-    KeyCode { code: Scancode::Kp0, key: PalKey::Menu },
-    KeyCode { code: Scancode::Return, key: PalKey::Search },
-    KeyCode { code: Scancode::Space, key: PalKey::Search },
-    KeyCode { code: Scancode::KpEnter, key: PalKey::Search },
-    KeyCode { code: Scancode::LCtrl, key: PalKey::Search },
-    KeyCode { code: Scancode::PageUp, key: PalKey::PgUp },
-    KeyCode { code: Scancode::Kp9, key: PalKey::PgUp },
-    KeyCode { code: Scancode::PageDown, key: PalKey::PgDn },
-    KeyCode { code: Scancode::Kp3, key: PalKey::PgDn },
-    KeyCode { code: Scancode::Home, key: PalKey::Home },
-    KeyCode { code: Scancode::Kp7, key: PalKey::Home },
-    KeyCode { code: Scancode::End, key: PalKey::End },
-    KeyCode { code: Scancode::Kp1, key: PalKey::End },
-    KeyCode { code: Scancode::R, key: PalKey::Repeat },
-    KeyCode { code: Scancode::A, key: PalKey::Auto },
-    KeyCode { code: Scancode::D, key: PalKey::Defend },
-    KeyCode { code: Scancode::E, key: PalKey::UseItem },
-    KeyCode { code: Scancode::W, key: PalKey::ThrowItem },
-    KeyCode { code: Scancode::Q, key: PalKey::Flee },
-    KeyCode { code: Scancode::F, key: PalKey::Force },
-    KeyCode { code: Scancode::S, key: PalKey::Status }
+    KeyCode {
+        code: Key::Up,
+        key: PalKey::Up,
+    },
+    KeyCode {
+        code: Key::NumPad8,
+        key: PalKey::Up,
+    },
+    KeyCode {
+        code: Key::Down,
+        key: PalKey::Down,
+    },
+    KeyCode {
+        code: Key::NumPad2,
+        key: PalKey::Down,
+    },
+    KeyCode {
+        code: Key::Left,
+        key: PalKey::Left,
+    },
+    KeyCode {
+        code: Key::NumPad4,
+        key: PalKey::Left,
+    },
+    KeyCode {
+        code: Key::Right,
+        key: PalKey::Right,
+    },
+    KeyCode {
+        code: Key::NumPad6,
+        key: PalKey::Right,
+    },
+    KeyCode {
+        code: Key::Escape,
+        key: PalKey::Menu,
+    },
+    KeyCode {
+        code: Key::Insert,
+        key: PalKey::Menu,
+    },
+    KeyCode {
+        code: Key::LeftAlt,
+        key: PalKey::Menu,
+    },
+    KeyCode {
+        code: Key::RightAlt,
+        key: PalKey::Menu,
+    },
+    KeyCode {
+        code: Key::NumPad0,
+        key: PalKey::Menu,
+    },
+    KeyCode {
+        code: Key::Enter,
+        key: PalKey::Search,
+    },
+    KeyCode {
+        code: Key::Space,
+        key: PalKey::Search,
+    },
+    KeyCode {
+        code: Key::NumPadEnter,
+        key: PalKey::Search,
+    },
+    KeyCode {
+        code: Key::LeftCtrl,
+        key: PalKey::Search,
+    },
+    KeyCode {
+        code: Key::PageUp,
+        key: PalKey::PgUp,
+    },
+    KeyCode {
+        code: Key::NumPad9,
+        key: PalKey::PgUp,
+    },
+    KeyCode {
+        code: Key::PageDown,
+        key: PalKey::PgDn,
+    },
+    KeyCode {
+        code: Key::NumPad3,
+        key: PalKey::PgDn,
+    },
+    KeyCode {
+        code: Key::Home,
+        key: PalKey::Home,
+    },
+    KeyCode {
+        code: Key::NumPad7,
+        key: PalKey::Home,
+    },
+    KeyCode {
+        code: Key::End,
+        key: PalKey::End,
+    },
+    KeyCode {
+        code: Key::NumPad1,
+        key: PalKey::End,
+    },
+    KeyCode {
+        code: Key::R,
+        key: PalKey::Repeat,
+    },
+    KeyCode {
+        code: Key::A,
+        key: PalKey::Auto,
+    },
+    KeyCode {
+        code: Key::D,
+        key: PalKey::Defend,
+    },
+    KeyCode {
+        code: Key::E,
+        key: PalKey::UseItem,
+    },
+    KeyCode {
+        code: Key::W,
+        key: PalKey::ThrowItem,
+    },
+    KeyCode {
+        code: Key::Q,
+        key: PalKey::Flee,
+    },
+    KeyCode {
+        code: Key::F,
+        key: PalKey::Force,
+    },
+    KeyCode {
+        code: Key::S,
+        key: PalKey::Status,
+    },
 ];
- */
 
 pub struct InputState {
     pub dir: Dir,
@@ -77,7 +173,7 @@ pub struct InputState {
     pub key_press: u32,
     pub key_order: [u32; 4],
     pub key_max_count: u32,
-    //pub key_last_time: [u32; KEY_COUNT],
+    pub key_last_time: [u32; KEY_COUNT],
 }
 
 impl InputState {
@@ -88,7 +184,7 @@ impl InputState {
             key_press: 0,
             key_order: [0; 4],
             key_max_count: 0,
-            //key_last_time: [0; KEY_COUNT],
+            key_last_time: [0; KEY_COUNT],
         }
     }
 
@@ -101,29 +197,39 @@ impl InputState {
     }
 }
 
-impl Pal {
+impl Game {
     pub fn update_keyboard_state(&mut self) {
-        /*
-        let cur_time = self.timer.ticks();
+        let cur_time = self.ticks();
 
-        let keyboard_state = sdl2::keyboard::KeyboardState::new(&self.event_pump);
         //println!("keyboard_state: {:?}", keyboard_state);
-        for key_code in KEY_MAP.iter() {
-            if keyboard_state.is_scancode_pressed(key_code.code) {
-                self.input_state.key_press |= key_code.key as u32;               
+        for i in 0..KEY_COUNT {
+            let key_code = &KEY_MAP[i];
+            if self.window.is_key_pressed(key_code.code, KeyRepeat::Yes) {
+                if cur_time > self.input_state.key_last_time[i] {
+                    self.input_state.key_press |= key_code.key as u32;
+                    let is_repeat = self.input_state.key_last_time[i] != 0;
+                    let delay = if self.input_state.key_last_time[i] == 0 {
+                        200 as u32
+                    } else {
+                        75 as u32
+                    };
+                    self.input_state.key_last_time[i] = cur_time + delay;
+                    if !is_repeat {                        
+                        // TODO
+                    }
+                }                 
             } else {
-
+                self.input_state.key_last_time[i] = 0;
             }
         }
-         */
-    }
-
-    pub fn clear_keyboard_state(&mut self) {
-        self.input_state.key_press = 0;
     }
 
     pub fn process_event(&mut self) {
-        
-        self.update_keyboard_state();
+        if !self.window.is_open() {
+            std::process::exit(0);
+        }                
+        self.input_state.key_press = 0;
+        self.update_keyboard_state();        
+        //println!("key_press: {}", self.input_state.key_press);
     }
 }

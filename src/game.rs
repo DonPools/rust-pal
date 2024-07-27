@@ -26,13 +26,22 @@ const NUM_RIX_TITLE: u32 = 0x05;
 const WIDTH: usize = 320;
 const HEIGHT: usize = 200;
 
-pub struct Pal {
+#[derive(PartialEq)]
+pub enum GameState {
+    TRADEMARK,
+    SPLASH,
+    OPENINGMENU,
+    GAMELOOP,
+}
+
+pub struct Game {
     pub window: Window,
     pub canvas: Canvas,
     pub text: TextMgr,
     pub input_state: InputState,
 
     pub start_time: Instant,
+    pub game_state: GameState,
 
     pub rng_mkf: mkf::MKF,  // RNG动画
     pub pat_mkf: mkf::MKF,  // 调色板
@@ -41,13 +50,13 @@ pub struct Pal {
     pub midi_mkf: mkf::MKF, // MIDI音乐
 }
 
-impl Pal {
+impl Game {
     pub fn init() -> Result<Self> {
         let window = Window::new(
             "PAL95 - Rust Edition",
             WIDTH,
             HEIGHT,
-            WindowOptions{
+            WindowOptions {
                 resize: true,
                 scale: minifb::Scale::X2,
                 ..WindowOptions::default()
@@ -67,8 +76,9 @@ impl Pal {
             canvas: Canvas::new(WIDTH, HEIGHT),
             text,
             input_state: InputState::new(),
-
             start_time: Instant::now(),
+
+            game_state: GameState::TRADEMARK,
 
             rng_mkf,
             pat_mkf,
@@ -80,11 +90,11 @@ impl Pal {
 
     pub fn get_palette(&mut self, palette_id: u32) -> Result<Palette> {
         let buf = self.pat_mkf.read_chunk(palette_id)?;
-        let mut colors = Vec::<Color>::with_capacity(256);  
+        let mut colors = Vec::<Color>::with_capacity(256);
         for i in 0..256 {
             let r = buf[i * 3] << 2;
             let g = buf[i * 3 + 1] << 2;
-            let b = buf[i * 3 + 2] << 2;            
+            let b = buf[i * 3 + 2] << 2;
 
             colors.push(Color::from_rgb(r, g, b));
         }
@@ -99,13 +109,16 @@ impl Pal {
         Ok(())
     }
 
-    pub fn blit_to_screen(&mut self) {
+    pub fn blit_to_screen(&mut self) -> Result<()> {
         self.window
-            .update_with_buffer(self.canvas.refresh_buffer(), WIDTH, HEIGHT);
+            .update_with_buffer(self.canvas.get_buffer(), WIDTH, HEIGHT)?;
+
+        Ok(())
     }
 
     fn trademark_screen(&mut self) -> Result<()> {
         self.play_rng(3, 6)?;
+        self.game_state = GameState::SPLASH;
         Ok(())
     }
 
@@ -212,13 +225,13 @@ impl Pal {
                 draw_sprite(&title_sprite, pixels, 320, 200, 250, 5);
             });
 
-            self.blit_to_screen();
-            self.process_event();
-            if self.input_state.is_any_pressed() {
+            self.blit_to_screen()?;
+            self.process_event();            
+
+            if self.input_state.is_any_pressed() {                
+                self.game_state = GameState::OPENINGMENU;
                 break 'running;
             }
-
-            self.clear_keyboard_state();
 
             std::thread::sleep(Duration::from_millis(30));
         }
@@ -250,31 +263,41 @@ impl Pal {
             .fbp_mkf
             .read_chunk_decompressed(MAINMENU_BACKGROUND_FBPNUM)?;
 
-        self.canvas.set_pixels(|pixels: &mut [u8]| {
-            pixels.copy_from_slice(&bg_bitmap);
-        });
+        loop {
+            self.canvas.set_pixels(|pixels: &mut [u8]| {
+                pixels.copy_from_slice(&bg_bitmap);
+            });
 
-        self.read_menu(&menu_items)?;
+            let menu_selected = self.read_menu(&menu_items)?;
+            if menu_selected == 1 {
+                let mut menu_items = Vec::<MenuItem>::new();
+                for i in 0..5 {
+                    menu_items.push(MenuItem {
+                        value: i + 1,
+                        num_word: LOADMENU_LABEL_SLOT_FIRST + i as u32,
+                        enabled: true,
+                        x: 210,
+                        y: 17 + 38 * i,
+                    });
+                }
+                self.read_menu(&menu_items)?;
+            }
+        }
+
+        self.game_state = GameState::GAMELOOP;
 
         Ok(())
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.trademark_screen()?;
-        self.splash_screen()?;
-        self.opening_menu_screen()?;
-        /*
         loop {
-            for event in self.event_pump.poll_iter() {
-                match event {
-                    Event::Quit {..} => {
-                        break;
-                    },
-                    _ => {}
-                }
+            match self.game_state {
+                GameState::TRADEMARK => self.trademark_screen()?,
+                GameState::SPLASH => self.splash_screen()?,
+                GameState::OPENINGMENU => self.opening_menu_screen()?,
+                _ => break,
             }
         }
-        */
 
         Ok(())
     }

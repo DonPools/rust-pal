@@ -2,7 +2,7 @@ pub mod utils;
 pub mod mkf;
 pub mod sprite;
 pub mod rng;
-pub mod pal;
+pub mod game;
 pub mod textmgr;
 pub mod ui;
 pub mod input;

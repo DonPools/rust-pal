@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use crate::{input::PalKey, pal::Pal, utils::*};
+use crate::{
+    game::Game,
+    input::PalKey,
+    utils::*,
+};
 
 pub struct MenuItem {
     pub value: u16,
@@ -12,31 +16,32 @@ pub struct MenuItem {
 
 pub const MAINMENU_BACKGROUND_FBPNUM: u32 = 60;
 pub const RIX_NUM_OPENINGMENU: u32 = 4;
+
 pub const MAINMENU_LABEL_NEWGAME: u32 = 7;
 pub const MAINMENU_LABEL_LOADGAME: u32 = 8;
+pub const LOADMENU_LABEL_SLOT_FIRST: u32 =43;
+
 pub const MENUITEM_COLOR: u8 = 0x4f;
+
 
 pub const MENUITEM_COLOR_SELECTED_FIRST: u32 = 0xF9;
 pub const MENUITEM_COLOR_SELECTED_TOTALNUM: u32 = 6;
 
-impl Pal {
+impl Game {
     pub fn menu_color_selected(&self) -> u8 {
-        let ticks = self.start_time.elapsed().as_millis() as u32;
+        let ticks = self.ticks();
         let ticks = ticks / (600 / MENUITEM_COLOR_SELECTED_TOTALNUM);
         let ticks = ticks % MENUITEM_COLOR_SELECTED_TOTALNUM;
         ticks as u8 + MENUITEM_COLOR_SELECTED_FIRST as u8
     }
 
     pub fn read_menu(&mut self, menu_items: &[MenuItem]) -> Result<u16> {
-        let mut menu_selected = 0;
-        let mut pixels = [0; 320 * 200];
-        self.canvas.set_pixels(|_pixels: &mut [u8]| {
-            pixels.copy_from_slice(_pixels);
-        });
-
+        let mut selected_index = 0;
+        let mut pixels = self.canvas.get_pixels().to_vec();
         loop {
-            for item in menu_items.iter() {
-                let color = if item.value == menu_selected {
+            for i in 0..menu_items.len() {
+                let item = &menu_items[i];
+                let color = if i == selected_index {
                     self.menu_color_selected()
                 } else {
                     MENUITEM_COLOR
@@ -59,17 +64,20 @@ impl Pal {
                 _pixels.copy_from_slice(&pixels);
             });
 
-            self.blit_to_screen();
-            self.process_event();
+            self.blit_to_screen()?;
+            self.process_event();            
 
-            if self.input_state.is_pressed(PalKey::Up) || self.input_state.is_pressed(PalKey::Down)
-            {
-                menu_selected = (menu_selected + 1) % menu_items.len() as u16;
+            if self.input_state.is_pressed(PalKey::Down) || self.input_state.is_pressed(PalKey::Right) {
+                selected_index = (menu_items.len() + selected_index + 1) % menu_items.len();
+            } else if self.input_state.is_pressed(PalKey::Up) || self.input_state.is_pressed(PalKey::Left) {
+                selected_index = (menu_items.len() + selected_index - 1) % menu_items.len();
             }
 
-            self.clear_keyboard_state();
+            if self.input_state.is_pressed(PalKey::Search) {                
+                return Result::Ok(menu_items[selected_index].value);
+            }
 
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(30));
         }
     }
 }

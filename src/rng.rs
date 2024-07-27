@@ -1,6 +1,6 @@
 use core::panic;
 
-use crate::pal::Pal;
+use crate::game::Game;
 use crate::utils::*;
 
 pub fn decode_rng(src: &[u8], dst: &mut [u8], i: u32) {
@@ -88,7 +88,7 @@ pub fn decode_rng(src: &[u8], dst: &mut [u8], i: u32) {
     }
 }
 
-impl Pal {
+impl Game {
     pub fn play_rng(&mut self, palette_id: u32, rng_id: u32) -> Result<()> {
         self.set_palette(palette_id)?;
 
@@ -98,9 +98,10 @@ impl Pal {
             let rng = self.rng_mkf.read_rng_chunk(rng_id, i)?;
             self.canvas.set_pixels(|pixels: &mut [u8]| {
                 decode_rng(&rng, pixels, i);
-            });            
-            self.blit_to_screen();
-
+            });
+            
+            self.blit_to_screen()?;
+            self.process_event();
 
             std::thread::sleep(std::time::Duration::from_millis(30));
         }

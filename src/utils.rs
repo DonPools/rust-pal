@@ -1,6 +1,7 @@
 use std::path;
 use std::fs::File;
 
+use crate::game::Game;
 use crate::mkf;
 
 pub type Error = Box<dyn std::error::Error>;
@@ -38,4 +39,10 @@ pub fn reverse_bits(u8: u8) -> u8 {
     u8 = (u8 & 0xCC) >> 2 | (u8 & 0x33) << 2;
     u8 = (u8 & 0xAA) >> 1 | (u8 & 0x55) << 1;
     u8
+}
+
+impl Game {
+    pub fn ticks (&self) -> u32 {
+        self.start_time.elapsed().as_millis() as u32
+    }
 }

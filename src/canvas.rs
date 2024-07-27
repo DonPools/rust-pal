@@ -1,4 +1,4 @@
-use crate::pal;
+use crate::game;
 
 #[derive(Clone, Copy)]
 pub struct Color(pub u32);
@@ -38,21 +38,15 @@ impl Palette {
 }
 
 pub struct Canvas {
-    width: usize,
-    height: usize,
-
     palette: Palette,
-
     pixels: Vec<u8>,
     buffer: Vec<u32>,
-    //window: Window,
 }
 
+// INDEX8 canvas
 impl Canvas {
     pub fn new(width: usize, height: usize) -> Self {
         Self {
-            width,
-            height,
             palette: Palette::new(),
             pixels: vec![0; width * height],
             buffer: vec![0; width * height],
@@ -67,7 +61,11 @@ impl Canvas {
         f(&mut self.pixels);
     }
 
-    pub fn refresh_buffer(&mut self) -> &[u32] {
+    pub fn get_pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    pub fn get_buffer(&mut self) -> &[u32] {
         for i in 0..self.pixels.len() {
             self.buffer[i] = self.palette.colors[self.pixels[i] as usize].0;
         }
