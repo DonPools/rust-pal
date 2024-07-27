@@ -6,3 +6,4 @@ pub mod pal;
 pub mod textmgr;
 pub mod ui;
 pub mod input;
+pub mod canvas;

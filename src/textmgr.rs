@@ -148,7 +148,7 @@ impl Pal {
     ) {
         let mut x = x;
         for c in text.chars() {
-            self.textmgr
+            self.text
                 .draw_char(pixels, dest_width, dest_height, x, y, c, color);
             x += 16;
         }
@@ -164,13 +164,14 @@ impl Pal {
         index: usize,
         color: u8,
     ) {
+        let text = self.text.get_word(index);
         self.draw_text(
             pixels,
             dest_width,
             dest_height,
             x,
             y,
-            self.textmgr.get_word(index),
+            text,
             color,
         );
     }

@@ -1,6 +1,6 @@
 
-use sdl2::keyboard::Scancode;
-use sdl2::event::Event;
+
+
 use crate::pal::Pal;
 use crate::utils::*;
 
@@ -26,12 +26,14 @@ pub enum PalKey {
     Home = 1 << 16,
     End = 1 << 17,
 }
-
+/*
 struct KeyCode {
     pub code: Scancode,
     pub key: PalKey,
 }
 const KEY_COUNT: usize = 33;
+ */
+/*
 const KEY_MAP: [KeyCode; KEY_COUNT] = [
     KeyCode { code: Scancode::Up, key: PalKey::Up },
     KeyCode { code: Scancode::Kp8, key: PalKey::Up },
@@ -67,6 +69,7 @@ const KEY_MAP: [KeyCode; KEY_COUNT] = [
     KeyCode { code: Scancode::F, key: PalKey::Force },
     KeyCode { code: Scancode::S, key: PalKey::Status }
 ];
+ */
 
 pub struct InputState {
     pub dir: Dir,
@@ -74,7 +77,7 @@ pub struct InputState {
     pub key_press: u32,
     pub key_order: [u32; 4],
     pub key_max_count: u32,
-    pub key_last_time: [u32; KEY_COUNT],
+    //pub key_last_time: [u32; KEY_COUNT],
 }
 
 impl InputState {
@@ -85,17 +88,22 @@ impl InputState {
             key_press: 0,
             key_order: [0; 4],
             key_max_count: 0,
-            key_last_time: [0; KEY_COUNT],
+            //key_last_time: [0; KEY_COUNT],
         }
     }
 
-    pub fn is_press(&self, key: PalKey) -> bool {
+    pub fn is_pressed(&self, key: PalKey) -> bool {
         self.key_press & key as u32 != 0
+    }
+
+    pub fn is_any_pressed(&self) -> bool {
+        self.key_press != 0
     }
 }
 
 impl Pal {
     pub fn update_keyboard_state(&mut self) {
+        /*
         let cur_time = self.timer.ticks();
 
         let keyboard_state = sdl2::keyboard::KeyboardState::new(&self.event_pump);
@@ -107,6 +115,7 @@ impl Pal {
 
             }
         }
+         */
     }
 
     pub fn clear_keyboard_state(&mut self) {
@@ -114,18 +123,7 @@ impl Pal {
     }
 
     pub fn process_event(&mut self) {
-        for event in self.event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. } => {
-                    unsafe {
-                        sdl2::sys::SDL_Quit();
-                    }                    
-                    return;
-                }
-                _ => {}
-            }
-        }
-
+        
         self.update_keyboard_state();
     }
 }

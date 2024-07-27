@@ -13,5 +13,5 @@ path = "src/main.rs"
 [dependencies]
 chardetng = "0.1.17"
 encoding_rs = { version = "0.8.34" }
+minifb = "0.27.0"
 rand = "0.8.5"
-sdl2 = { version = "0.37.0", features = ["mixer"] }

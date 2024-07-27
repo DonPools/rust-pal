@@ -1,5 +1,4 @@
 use core::panic;
-use sdl2::event::Event;
 
 use crate::pal::Pal;
 use crate::utils::*;
@@ -91,28 +90,19 @@ pub fn decode_rng(src: &[u8], dst: &mut [u8], i: u32) {
 
 impl Pal {
     pub fn play_rng(&mut self, palette_id: u32, rng_id: u32) -> Result<()> {
-        let mut surface = Pal::create_surface()?;
-        self.set_palette(&mut surface, palette_id)?;
+        self.set_palette(palette_id)?;
 
         let rng_frame_count = self.rng_mkf.read_rng_sub_count(rng_id)?;
 
         for i in 0..rng_frame_count {
             let rng = self.rng_mkf.read_rng_chunk(rng_id, i)?;
-            surface.with_lock_mut(|pixels: &mut [u8]| {
+            self.canvas.set_pixels(|pixels: &mut [u8]| {
                 decode_rng(&rng, pixels, i);
             });            
-            self.blit_surface(&mut surface)?;
+            self.blit_to_screen();
 
-            for event in self.event_pump.poll_iter() {
-                match event {
-                    Event::Quit { .. } => {
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
 
-            self.timer.delay(30);
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
 
         Ok(())
