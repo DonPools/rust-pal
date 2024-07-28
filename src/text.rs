@@ -27,7 +27,7 @@ impl Text {
         let mut detector = EncodingDetector::new();
         detector.feed(&buf, true);
         let encoding = detector.guess(None, true);
-        println!("{:?}", encoding);
+        //println!("{:?}", encoding);
 
         let (decoded, _, _) = encoding.decode(&buf);
         let font_chars: Vec<char> = decoded.chars().collect();

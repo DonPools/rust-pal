@@ -7,3 +7,5 @@ pub mod text;
 pub mod ui;
 pub mod input;
 pub mod canvas;
+pub mod map;
+pub mod play;

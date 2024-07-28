@@ -1,11 +1,10 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use minifb::{Key, Window, WindowOptions};
+use minifb::{Window, WindowOptions};
 
 use crate::canvas::*;
 use crate::input::InputState;
-use crate::input::PalKey;
 use crate::mkf;
 use crate::sprite::*;
 use crate::text::*;
@@ -33,6 +32,8 @@ pub struct MKFs {
     pub mgo: mkf::MKF,  // 场景sprites
     pub midi: mkf::MKF, // MIDI音乐
     pub fp: mkf::MKF,   // 杂项数据文件
+    pub map: mkf::MKF,  // 地图
+    pub gop: mkf::MKF,  // tile bitmap
 }
 
 impl MKFs {
@@ -43,6 +44,8 @@ impl MKFs {
         let mgo = open_mkf("MGO.MKF")?;
         let midi = open_mkf("MIDI.MKF")?;
         let fp = open_mkf("DATA.MKF")?;
+        let map = open_mkf("MAP.MKF")?;
+        let gop = open_mkf("GOP.MKF")?;
 
         Ok(Self {
             rng,
@@ -51,6 +54,8 @@ impl MKFs {
             mgo,
             midi,
             fp,
+            map,
+            gop,
         })
     }
 }
@@ -275,7 +280,7 @@ impl Game {
             .fbp
             .read_chunk_decompressed(MAINMENU_BACKGROUND_FBPNUM)?;
 
-        loop {
+        'running: loop {
             self.canvas.set_pixels(|pixels: &mut [u8]| {
                 pixels.copy_from_slice(&bg_bitmap);
             });
@@ -299,14 +304,19 @@ impl Game {
                 }
                 
                 self.read_menu(&menu_items)?;
-            }
+            } else {
+                break 'running;
+            }            
         }
+
+        Ok(())
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.trademark_screen()?;
-        self.splash_screen()?;
-        self.opening_menu_screen()?;
+        //self.trademark_screen()?;
+        //self.splash_screen()?;
+        //self.opening_menu_screen()?;
+        self.mainloop()?;
 
         Ok(())
     }
