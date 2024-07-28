@@ -8,7 +8,7 @@ use crate::input::InputState;
 use crate::input::PalKey;
 use crate::mkf;
 use crate::sprite::*;
-use crate::textmgr::*;
+use crate::text::*;
 use crate::ui::*;
 use crate::utils::*;
 
@@ -26,34 +26,50 @@ const NUM_RIX_TITLE: u32 = 0x05;
 const WIDTH: usize = 320;
 const HEIGHT: usize = 200;
 
-#[derive(PartialEq)]
-pub enum GameState {
-    TRADEMARK,
-    SPLASH,
-    OPENINGMENU,
-    GAMELOOP,
+pub struct MKFs {
+    pub rng: mkf::MKF,  // RNG动画
+    pub pat: mkf::MKF,  // 调色板
+    pub fbp: mkf::MKF,  // 战斗背景sprites
+    pub mgo: mkf::MKF,  // 场景sprites
+    pub midi: mkf::MKF, // MIDI音乐
+    pub fp: mkf::MKF,   // 杂项数据文件
+}
+
+impl MKFs {
+    pub fn open() -> Result<Self> {
+        let rng = open_mkf("RNG.MKF")?;
+        let pat = open_mkf("PAT.MKF")?;
+        let fbp = open_mkf("FBP.MKF")?;
+        let mgo = open_mkf("MGO.MKF")?;
+        let midi = open_mkf("MIDI.MKF")?;
+        let fp = open_mkf("DATA.MKF")?;
+
+        Ok(Self {
+            rng,
+            pat,
+            fbp,
+            mgo,
+            midi,
+            fp,
+        })
+    }
 }
 
 pub struct Game {
     pub window: Window,
     pub canvas: Canvas,
-    pub text: TextMgr,
+    pub text: Text,
     pub input_state: InputState,
 
-    pub start_time: Instant,
-    pub game_state: GameState,
-
-    pub rng_mkf: mkf::MKF,  // RNG动画
-    pub pat_mkf: mkf::MKF,  // 调色板
-    pub fbp_mkf: mkf::MKF,  // 战斗背景sprites
-    pub mgo_mkf: mkf::MKF,  // 场景sprites
-    pub midi_mkf: mkf::MKF, // MIDI音乐
+    pub start_time: Instant, // for tick
+    pub mkf: MKFs,
+    pub ui_sprites: Vec<Sprite>,
 }
 
 impl Game {
-    pub fn init() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let window = Window::new(
-            "PAL95 - Rust Edition",
+            "PAL95(DOS) - Rust Edition",
             WIDTH,
             HEIGHT,
             WindowOptions {
@@ -63,13 +79,8 @@ impl Game {
             },
         )?;
 
-        let text = TextMgr::load()?;
-
-        let rng_mkf = open_mkf("RNG.MKF")?;
-        let pat_mkf = open_mkf("PAT.MKF")?;
-        let fbp_mkf = open_mkf("FBP.MKF")?;
-        let mgo_mkf = open_mkf("MGO.MKF")?;
-        let midi_mkf = open_mkf("MIDI.MKF")?;
+        let text = Text::load()?;
+        let mkf = MKFs::open()?;
 
         Ok(Self {
             window,
@@ -77,19 +88,18 @@ impl Game {
             text,
             input_state: InputState::new(),
             start_time: Instant::now(),
-
-            game_state: GameState::TRADEMARK,
-
-            rng_mkf,
-            pat_mkf,
-            fbp_mkf,
-            mgo_mkf,
-            midi_mkf,
+            mkf,
+            ui_sprites: Vec::new(),
         })
     }
 
+    pub fn init(&mut self) -> Result<()> {
+        self.init_ui()?;
+        Ok(())
+    }
+
     pub fn get_palette(&mut self, palette_id: u32) -> Result<Palette> {
-        let buf = self.pat_mkf.read_chunk(palette_id)?;
+        let buf = self.mkf.pat.read_chunk(palette_id)?;
         let mut colors = Vec::<Color>::with_capacity(256);
         for i in 0..256 {
             let r = buf[i * 3] << 2;
@@ -118,7 +128,6 @@ impl Game {
 
     fn trademark_screen(&mut self) -> Result<()> {
         self.play_rng(3, 6)?;
-        self.game_state = GameState::SPLASH;
         Ok(())
     }
 
@@ -135,14 +144,17 @@ impl Game {
 
         // 开场的那个从下往上的山是由两个图片拼接的，一个在上面，一个在下面。尺寸是320x200
         let splash_down = self
-            .fbp_mkf
+            .mkf
+            .fbp
             .read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
-        let splash_up = self.fbp_mkf.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;
+        let splash_up = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;
         let splash_title = self
-            .mgo_mkf
+            .mkf
+            .mgo
             .read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
         let splash_crane = self
-            .mgo_mkf
+            .mkf
+            .mgo
             .read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
 
         let mut crane_sprites = Vec::<Sprite>::new();
@@ -226,10 +238,9 @@ impl Game {
             });
 
             self.blit_to_screen()?;
-            self.process_event();            
+            self.process_event();
 
-            if self.input_state.is_any_pressed() {                
-                self.game_state = GameState::OPENINGMENU;
+            if self.input_state.is_any_pressed() {
                 break 'running;
             }
 
@@ -260,7 +271,8 @@ impl Game {
         ];
 
         let bg_bitmap = self
-            .fbp_mkf
+            .mkf
+            .fbp
             .read_chunk_decompressed(MAINMENU_BACKGROUND_FBPNUM)?;
 
         loop {
@@ -270,6 +282,7 @@ impl Game {
 
             let menu_selected = self.read_menu(&menu_items)?;
             if menu_selected == 1 {
+                // 存档选择
                 let mut menu_items = Vec::<MenuItem>::new();
                 for i in 0..5 {
                     menu_items.push(MenuItem {
@@ -279,25 +292,21 @@ impl Game {
                         x: 210,
                         y: 17 + 38 * i,
                     });
+                    self.draw_signle_linebox_with_shadow(
+                        Pos{x: 195, y: 7 + 38 * i as isize},
+                        6,
+                    );
                 }
+                
                 self.read_menu(&menu_items)?;
             }
         }
-
-        self.game_state = GameState::GAMELOOP;
-
-        Ok(())
     }
 
     pub fn run(&mut self) -> Result<()> {
-        loop {
-            match self.game_state {
-                GameState::TRADEMARK => self.trademark_screen()?,
-                GameState::SPLASH => self.splash_screen()?,
-                GameState::OPENINGMENU => self.opening_menu_screen()?,
-                _ => break,
-            }
-        }
+        self.trademark_screen()?;
+        self.splash_screen()?;
+        self.opening_menu_screen()?;
 
         Ok(())
     }

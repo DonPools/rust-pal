@@ -3,7 +3,7 @@ use core::panic;
 use crate::game::Game;
 use crate::utils::*;
 
-pub fn decode_rng(src: &[u8], dst: &mut [u8], i: u32) {
+pub fn decode_rng(src: &[u8], dst: &mut [u8]) {
     let mut ptr = 0;
     let mut dst_ptr = 0;
 
@@ -92,14 +92,14 @@ impl Game {
     pub fn play_rng(&mut self, palette_id: u32, rng_id: u32) -> Result<()> {
         self.set_palette(palette_id)?;
 
-        let rng_frame_count = self.rng_mkf.read_rng_sub_count(rng_id)?;
+        let rng_frame_count = self.mkf.rng.read_rng_sub_count(rng_id)?;
 
         for i in 0..rng_frame_count {
-            let rng = self.rng_mkf.read_rng_chunk(rng_id, i)?;
+            let rng = self.mkf.rng.read_rng_chunk(rng_id, i)?;
             self.canvas.set_pixels(|pixels: &mut [u8]| {
-                decode_rng(&rng, pixels, i);
+                decode_rng(&rng, pixels);
             });
-            
+
             self.blit_to_screen()?;
             self.process_event();
 

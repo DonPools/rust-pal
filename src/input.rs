@@ -1,6 +1,6 @@
 use minifb::{Key, KeyRepeat};
 
-use crate::game::{Game, GameState};
+use crate::game::Game;
 use crate::utils::*;
 
 #[derive(Debug, Clone, Copy)]

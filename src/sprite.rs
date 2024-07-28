@@ -3,6 +3,9 @@ use crate::utils::*;
 
 use std::vec;
 
+pub fn sprite_get_count(sprite_data: &[u8]) -> u32 {
+    sprite_data[0] as u32 | ((sprite_data[1] as u32) << 8)
+}
 
 pub fn sprite_get_frame(sprite_data: &[u8], frame_index: u32) -> Result<Sprite> {
     let image_count = sprite_data[0] as u32 | ((sprite_data[1] as u32) << 8);
@@ -22,7 +25,7 @@ pub fn sprite_get_frame(sprite_data: &[u8], frame_index: u32) -> Result<Sprite> 
 }
 
 pub struct Sprite {
-    width: u32,
+    pub width: u32,
     pub height: u32,
     data: Vec<u16>,
 }

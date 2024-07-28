@@ -8,15 +8,15 @@ use std::io::SeekFrom;
 
 use crate::game::Game;
 
-pub struct TextMgr {
+pub struct Text {
     pub font_chars: Vec<char>,
     pub fonts: Vec<Vec<u8>>,
     pub msgs: Vec<String>,
     pub words: Vec<String>,
 }
 
-impl TextMgr {
-    pub fn load() -> Result<TextMgr> {
+impl Text {
+    pub fn load() -> Result<Text> {
         let mut asc_file = open_file("WOR16.ASC")?;
         let bytes = asc_file.seek(SeekFrom::End(0))?;
         let mut buf = vec![0; bytes as usize];
@@ -77,7 +77,7 @@ impl TextMgr {
             msgs.push(s);
         }
 
-        Ok(TextMgr {
+        Ok(Text {
             font_chars,
             fonts,
             words,
@@ -145,11 +145,16 @@ impl Game {
         y: i32,
         text: &str,
         color: u8,
+        shadow: bool,
     ) {
         let mut x = x;
         for c in text.chars() {
-            self.text
-                .draw_char(pixels, dest_width, dest_height, x, y, c, color);
+            if shadow {
+                self.text.draw_char(pixels, dest_width, dest_height, x + 1, y + 1, c, 0);
+                self.text.draw_char(pixels, dest_width, dest_height, x + 1, y, c, 0);
+                self.text.draw_char(pixels, dest_width, dest_height, x, y + 1, c, 0);
+            }
+            self.text.draw_char(pixels, dest_width, dest_height, x, y, c, color);
             x += 16;
         }
     }
@@ -163,6 +168,7 @@ impl Game {
         y: i32,
         index: usize,
         color: u8,
+        shadow: bool,
     ) {
         let text = self.text.get_word(index);
         self.draw_text(
@@ -173,6 +179,7 @@ impl Game {
             y,
             text,
             color,
+            shadow,
         );
     }
 

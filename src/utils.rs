@@ -17,6 +17,19 @@ pub enum Dir
    Unknown
 }
 
+pub struct Pos {
+    pub x: isize,
+    pub y: isize,
+}
+
+#[derive(Clone, Copy)]
+pub struct Rect {
+    pub x: isize,
+    pub y: isize,
+    pub w: usize,
+    pub h: usize,
+}
+
 const BASE_PATH: &str = "/home/rocky/Code/Game/PAL95/";
 
 pub fn open_file(filename: &str) -> Result<File> {
