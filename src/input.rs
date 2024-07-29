@@ -243,19 +243,18 @@ impl InputState {
                     } else {
                         75 as u32
                     };
-                    //println!("key: {:?}, delay: {}, is_repeat: {}, key_last_time[i]: {}, ticks: {}", key_code.key, delay, is_repeat, self.key_last_time[i], ticks);
 
                     self.key_last_time[i] = cur_time + delay;
-                    if is_repeat {
+                    if !is_repeat {
                         let dir = InputState::key_to_dir(self, key_code.key);
 
                         if dir != Dir::Unknown {
                             self.key_max_count += 1;
                             self.key_order[dir as usize] = self.key_max_count;                            
+                            self.dir = self.get_cur_dir();
                         }
                     }
-
-                    self.dir = self.get_cur_dir();
+                    
                     self.key_press |= key_code.key as u32;
                 }
             } else {
@@ -271,7 +270,7 @@ impl InputState {
                         };
                         self.dir = cur_dir;
                     }
-                    //println!("key release: {:?}", key_code.key);
+                    
                     self.key_last_time[i] = 0;
                 }
             }

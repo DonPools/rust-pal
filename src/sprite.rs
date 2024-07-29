@@ -50,8 +50,14 @@ fn decode_rle_sprite(src_rle: &[u8]) -> Result<Sprite> {
         ptr += 1;
         let dst_data: Vec<u16>;
         if count < 0x80 {
+            count = if ptr + count as usize > src_rle.len() {
+                (src_rle.len() - ptr) as u8
+            } else {
+                count
+            };
+            //println!("ptr + cnt: {}, src_rle.len(): {}", ptr + cnt, src_rle.len());
             dst_data = src_rle[ptr..ptr + count as usize].iter().
-                map(|&x| x as u16).collect::<Vec<u16>>();
+                map(|&x| x as u16).collect::<Vec<u16>>();                
             ptr += count as usize;            
         } else {
             count = count & 0x7f;

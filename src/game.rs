@@ -313,9 +313,9 @@ impl Game {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.trademark_screen()?;
-        self.splash_screen()?;
-        self.opening_menu_screen()?;
+        //self.trademark_screen()?;
+        //self.splash_screen()?;
+        //self.opening_menu_screen()?;
         self.mainloop()?;
 
         Ok(())

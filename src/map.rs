@@ -33,6 +33,7 @@ impl Map {
         let count = sprite_get_count(&gop_chunk);
         let mut tile_sprites = Vec::with_capacity(count as usize);
         for i in 0..count {
+            println!("loading sprite: {} i: {}", map_id, i);
             let sprite = sprite_get_frame(&gop_chunk, i)?;
             tile_sprites.push(sprite);
         }
