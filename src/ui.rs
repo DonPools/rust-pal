@@ -75,17 +75,17 @@ impl Game {
             self.blit_to_screen()?;
             self.process_event();
 
-            if self.input_state.is_pressed(PalKey::Down)
-                || self.input_state.is_pressed(PalKey::Right)
+            if self.input.is_pressed(PalKey::Down)
+                || self.input.is_pressed(PalKey::Right)
             {
                 selected_index = (menu_items.len() + selected_index + 1) % menu_items.len();
-            } else if self.input_state.is_pressed(PalKey::Up)
-                || self.input_state.is_pressed(PalKey::Left)
+            } else if self.input.is_pressed(PalKey::Up)
+                || self.input.is_pressed(PalKey::Left)
             {
                 selected_index = (menu_items.len() + selected_index - 1) % menu_items.len();
             }
 
-            if self.input_state.is_pressed(PalKey::Search) {
+            if self.input.is_pressed(PalKey::Search) {
                 return Result::Ok(menu_items[selected_index].value);
             }
 

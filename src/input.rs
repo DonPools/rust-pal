@@ -1,9 +1,11 @@
-use minifb::{Key, KeyRepeat};
+use std::path::Display;
+
+use minifb::{Key, KeyRepeat, Window};
 
 use crate::game::Game;
 use crate::utils::*;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PalKey {
     None = 0,
     Menu = 1 << 0,
@@ -169,7 +171,6 @@ const KEY_MAP: [KeyCode; KEY_COUNT] = [
 
 pub struct InputState {
     pub dir: Dir,
-    pub prev_dir: Dir,
     pub key_press: u32,
     pub key_order: [u32; 4],
     pub key_max_count: u32,
@@ -180,7 +181,6 @@ impl InputState {
     pub fn new() -> Self {
         InputState {
             dir: Dir::Unknown,
-            prev_dir: Dir::Unknown,
             key_press: 0,
             key_order: [0; 4],
             key_max_count: 0,
@@ -188,48 +188,107 @@ impl InputState {
         }
     }
 
+    #[inline]
     pub fn is_pressed(&self, key: PalKey) -> bool {
         self.key_press & key as u32 != 0
     }
 
+    #[inline]
     pub fn is_any_pressed(&self) -> bool {
         self.key_press != 0
     }
-}
 
-impl Game {
-    pub fn update_keyboard_state(&mut self) {
-        let cur_time = self.ticks();
+    fn key_to_dir(&self, key: PalKey) -> Dir {
+        match key {
+            PalKey::Left => Dir::West,
+            PalKey::Right => Dir::East,
+            PalKey::Up => Dir::North,
+            PalKey::Down => Dir::South,
+            _ => Dir::Unknown,
+        }
+    }
 
-        //println!("keyboard_state: {:?}", keyboard_state);
+    fn get_max_key_count(&self) -> (u32, usize) {
+        let mut max_count = 0;
+        let mut idx = 0;
+        for i in 0..4 {
+            if self.key_order[i] > max_count {
+                max_count = self.key_order[i];
+                idx = i;
+            }
+        }
+
+        (max_count, idx)
+    }
+
+    fn get_cur_dir(&self) -> Dir {
+        let (_, idx) = self.get_max_key_count();
+        if self.key_order[idx] == 0 {
+            return Dir::Unknown;
+        }
+
+        return Dir::from_u8(idx as u8);
+    }
+
+    fn update_state(&mut self, window: &Window, ticks: u32) {
+        let cur_time = ticks;        
+
         for i in 0..KEY_COUNT {
             let key_code = &KEY_MAP[i];
-            if self.window.is_key_pressed(key_code.code, KeyRepeat::Yes) {
-                if cur_time > self.input_state.key_last_time[i] {
-                    self.input_state.key_press |= key_code.key as u32;
-                    let is_repeat = self.input_state.key_last_time[i] != 0;
-                    let delay = if self.input_state.key_last_time[i] == 0 {
+            if window.is_key_down(key_code.code) {
+                if cur_time > self.key_last_time[i] {
+                    let is_repeat = self.key_last_time[i] != 0;
+                    let delay = if self.key_last_time[i] == 0 {
                         200 as u32
                     } else {
                         75 as u32
                     };
-                    self.input_state.key_last_time[i] = cur_time + delay;
-                    if !is_repeat {                        
-                        // TODO
+                    //println!("key: {:?}, delay: {}, is_repeat: {}, key_last_time[i]: {}, ticks: {}", key_code.key, delay, is_repeat, self.key_last_time[i], ticks);
+
+                    self.key_last_time[i] = cur_time + delay;
+                    if is_repeat {
+                        let dir = InputState::key_to_dir(self, key_code.key);
+
+                        if dir != Dir::Unknown {
+                            self.key_max_count += 1;
+                            self.key_order[dir as usize] = self.key_max_count;                            
+                        }
                     }
-                }                 
+
+                    self.dir = self.get_cur_dir();
+                    self.key_press |= key_code.key as u32;
+                }
             } else {
-                self.input_state.key_last_time[i] = 0;
+                if self.key_last_time[i] != 0 {
+                    let dir = InputState::key_to_dir(self, key_code.key);
+                    if dir != Dir::Unknown {
+                        self.key_order[dir as usize] = 0;
+                        let cur_dir = self.get_cur_dir();
+                        self.key_max_count = if cur_dir == Dir::Unknown {
+                            0
+                        } else {
+                            self.key_order[cur_dir.clone() as usize]
+                        };
+                        self.dir = cur_dir;
+                    }
+                    //println!("key release: {:?}", key_code.key);
+                    self.key_last_time[i] = 0;
+                }
             }
         }
     }
+}
+
+impl Game {
+    pub fn update_keyboard_state(&mut self) {}
 
     pub fn process_event(&mut self) {
         if !self.window.is_open() {
             std::process::exit(0);
-        }                
-        self.input_state.key_press = 0;
-        self.update_keyboard_state();        
+        }
+
+        self.input.key_press = 0;
+        self.input.update_state(&self.window, self.ticks())
         //println!("key_press: {}", self.input_state.key_press);
     }
 }

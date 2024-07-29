@@ -8,6 +8,7 @@ pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
 
 // Direction
+#[derive(Debug, PartialEq, Clone)]
 pub enum Dir
 {
    South = 0,
@@ -15,6 +16,18 @@ pub enum Dir
    North,
    East,
    Unknown
+}
+
+impl Dir {
+    pub fn from_u8(u8: u8) -> Self {
+        match u8 {
+            0 => Dir::South,
+            1 => Dir::West,
+            2 => Dir::North,
+            3 => Dir::East,
+            _ => Dir::Unknown
+        }
+    }
 }
 
 pub struct Pos {

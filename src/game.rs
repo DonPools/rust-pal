@@ -64,7 +64,7 @@ pub struct Game {
     pub window: Window,
     pub canvas: Canvas,
     pub text: Text,
-    pub input_state: InputState,
+    pub input: InputState,
 
     pub start_time: Instant, // for tick
     pub mkf: MKFs,
@@ -91,7 +91,7 @@ impl Game {
             window,
             canvas: Canvas::new(WIDTH, HEIGHT),
             text,
-            input_state: InputState::new(),
+            input: InputState::new(),
             start_time: Instant::now(),
             mkf,
             ui_sprites: Vec::new(),
@@ -245,7 +245,7 @@ impl Game {
             self.blit_to_screen()?;
             self.process_event();
 
-            if self.input_state.is_any_pressed() {
+            if self.input.is_any_pressed() {
                 break 'running;
             }
 
@@ -313,9 +313,9 @@ impl Game {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        //self.trademark_screen()?;
-        //self.splash_screen()?;
-        //self.opening_menu_screen()?;
+        self.trademark_screen()?;
+        self.splash_screen()?;
+        self.opening_menu_screen()?;
         self.mainloop()?;
 
         Ok(())

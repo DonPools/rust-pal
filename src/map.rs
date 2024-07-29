@@ -67,11 +67,11 @@ impl Game {
         let sy = rect.y / 16 - 1;
         let dy = (rect.y + rect.h as isize) / 16 + 2;
         let sx = rect.x / 32 - 1;
-        let dx = (rect.x + rect.w as isize) / 32 + 2;
-
-        let mut y_pos = sy * 16 - 8 - rect.y;
+        let dx = (rect.x + rect.w as isize) / 32 + 2;        
 
         self.canvas.set_pixels(|pixels: &mut [u8]| {
+            let mut y_pos = sy * 16 - 8 - rect.y;
+            
             for y in sy..dy {
                 for h in 0..2 {
                     let mut x_pos = sx * 32 + h * 16 - 16 - rect.x;

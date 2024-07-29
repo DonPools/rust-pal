@@ -5,7 +5,7 @@ use crate::utils::*;
 impl Game {
     pub fn mainloop(&mut self) -> Result<()> {
         self.set_palette(0)?;
-        let map = Map::load(&mut self.mkf.map, &mut self.mkf.gop, 35)?;
+        let map = Map::load(&mut self.mkf.map, &mut self.mkf.gop, 1)?;
 
         let mut x = 300;
         let mut y = 300;
@@ -16,15 +16,15 @@ impl Game {
             self.blit_to_screen()?;
             self.process_event();
 
-            if self.input_state.is_pressed(crate::input::PalKey::Left) {
-                x -= 30;
-            } else if self.input_state.is_pressed(crate::input::PalKey::Right) {
-                x += 30;
-            } else if self.input_state.is_pressed(crate::input::PalKey::Up) {
-                y -= 30;
-            } else if self.input_state.is_pressed(crate::input::PalKey::Down) {
-                y += 30;
+            //println!("dir: {:?}", self.input.dir);
+            match self.input.dir {
+                Dir::North => y -= 5,
+                Dir::East => x += 5,
+                Dir::South => y += 5,
+                Dir::West => x -= 5,
+                _ => {},
             }
+
 
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
