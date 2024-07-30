@@ -1,11 +1,11 @@
 use crate::game::Game;
-use crate::sprite::{draw_sprite, sprite_get_count, sprite_get_frame};
+use crate::sprite::{draw_sprite_frame, sprite_get_frames};
 use crate::utils::{Rect, Result};
-use crate::{mkf::MKF, sprite::Sprite};
+use crate::{mkf::MKF, sprite::SpriteFrame};
 
 pub struct Map {
     pub tiles: Vec<u32>,
-    pub tile_sprites: Vec<Sprite>,
+    pub tile_sprite: Vec<SpriteFrame>,
     pub map_num: u32,
 }
 
@@ -30,17 +30,12 @@ impl Map {
         }
 
         let gop_chunk = gop_mkf.read_chunk(map_num)?;
-        let count = sprite_get_count(&gop_chunk);
-        let mut tile_sprites = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let sprite = sprite_get_frame(&gop_chunk, i)?;
-            tile_sprites.push(sprite);
-        }
+        let tile_sprite = sprite_get_frames(&gop_chunk)?;
 
-        Ok(Self { tiles, tile_sprites, map_num })
+        Ok(Self { tiles, tile_sprite, map_num })
     }
 
-    pub fn get_tile_sprite(&self, x: isize, y: isize, h: isize, layer: usize) -> Option<&Sprite> {
+    pub fn get_tile_sprite(&self, x: isize, y: isize, h: isize, layer: usize) -> Option<&SpriteFrame> {
         if x >= 64 || y >= 128 || h > 1 || h < 0 || x < 0 || y < 0 {
             return None;
         }
@@ -49,11 +44,11 @@ impl Map {
         let mut d = self.tiles[i as usize] as isize;
         if layer == 0 {
             let id = (d & 0xFF) | ((d >> 4) & 0x100);
-            self.tile_sprites.get(id as usize)
+            self.tile_sprite.get(id as usize)
         } else {
             d = d >> 16;
             d = ((d & 0xFF) | ((d >> 4) & 0x100)) - 1;
-            self.tile_sprites.get(d as usize)
+            self.tile_sprite.get(d as usize)
         }
     }
 }
@@ -77,8 +72,8 @@ impl Game {
                             None => map.get_tile_sprite(0, 0, 0, layer),
                         };
 
-                        if let Some(sprite) = sprite {
-                            draw_sprite(sprite, pixels, 320, 200, x_pos, y_pos);
+                        if let Some(frame) = sprite {
+                            draw_sprite_frame(frame, pixels, 320, 200, x_pos, y_pos);
                         }
                         x_pos += 32;
                     }

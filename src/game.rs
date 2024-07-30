@@ -37,7 +37,7 @@ pub struct Game {
     pub mkf: MKFs,
     pub data: GameData,
     pub state: GameState,
-    pub ui_sprites: Vec<Sprite>,
+    pub ui_sprite: Vec<SpriteFrame>,
 }
 
 impl Game {
@@ -61,7 +61,7 @@ impl Game {
             mkf,
             data,
             state: GameState::new(),
-            ui_sprites: Vec::new(),
+            ui_sprite: Vec::new(),
         })
     }
 
@@ -114,20 +114,20 @@ impl Game {
         let mut fadein_pal = Palette::new();
 
         // 开场的那个从下往上的山是由两个图片拼接的，一个在上面，一个在下面。尺寸是320x200
-        let splash_down = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
-        let splash_up = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;
-        let splash_title = self.mkf.mgo.read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
-        let splash_crane = self.mkf.mgo.read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
+        let splash_down_bitmap = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
+        let splash_up_bitmap = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;
+        let splash_title_chunk = self.mkf.mgo.read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
+        let splash_crane_chunk = self.mkf.mgo.read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
 
-        let mut crane_sprites = Vec::<Sprite>::new();
+        let mut crane_sprite = Vec::<SpriteFrame>::new();
         for i in 0..8 {
-            let crane_sprite = sprite_get_frame(&splash_crane, i)?;
-            crane_sprites.push(crane_sprite);
+            let crane_sprite_frame = sprite_get_frame(&splash_crane_chunk, i)?;
+            crane_sprite.push(crane_sprite_frame);
         }
 
-        let mut title_sprite = sprite_get_frame(&splash_title, 0)?;
-        let title_height = title_sprite.height;
-        title_sprite.height = 0;
+        let mut title_sprite_frame = sprite_get_frame(&splash_title_chunk, 0)?;
+        let title_height = title_sprite_frame.height;
+        title_sprite_frame.height = 0;
 
         let mut cranes = Vec::<Crane>::with_capacity(8);
         for _ in 0..cranes.capacity() {
@@ -178,27 +178,27 @@ impl Game {
                     crane.sprite_id = (crane.sprite_id + 1) % 8;
                 }
 
-                if title_sprite.height < title_height {
-                    title_sprite.height += 3;
-                    if title_sprite.height > title_height {
-                        title_sprite.height = title_height;
+                if title_sprite_frame.height < title_height {
+                    title_sprite_frame.height += 3;
+                    if title_sprite_frame.height > title_height {
+                        title_sprite_frame.height = title_height;
                     }
                 }
             }
 
             self.canvas.set_pixels(|pixels: &mut [u8]| {
                 pixels[0..h_offset * 320].copy_from_slice(
-                    &splash_up[(200 - h_offset) * 320..200 * 320]
+                    &splash_up_bitmap[(200 - h_offset) * 320..200 * 320]
                 );
                 pixels[h_offset * 320..200 * 320].copy_from_slice(
-                    &splash_down[0..(200 - h_offset) * 320]
+                    &splash_down_bitmap[0..(200 - h_offset) * 320]
                 );
 
                 for crane in cranes.iter() {
-                    let sprite = &crane_sprites[crane.sprite_id as usize];
-                    draw_sprite(sprite, pixels, 320, 200, crane.x, crane.y);
+                    let frame = &crane_sprite[crane.sprite_id as usize];
+                    draw_sprite_frame(frame, pixels, 320, 200, crane.x, crane.y);
                 }
-                draw_sprite(&title_sprite, pixels, 320, 200, 250, 5);
+                draw_sprite_frame(&title_sprite_frame, pixels, 320, 200, 250, 5);
             });
 
             self.blit_to_screen()?;
@@ -257,9 +257,9 @@ impl Game {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        //self.trademark_screen()?;
-        //self.splash_screen()?;
-        //self.opening_menu_screen()?;
+        self.trademark_screen()?;
+        self.splash_screen()?;
+        self.opening_menu_screen()?;
         self.mainloop()?;
 
         Ok(())

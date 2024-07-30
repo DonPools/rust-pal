@@ -103,7 +103,7 @@ impl Game {
             self.blit_to_screen()?;
             self.process_event();
 
-            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         Ok(())

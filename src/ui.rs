@@ -1,9 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::{
     game::Game,
     input::PalKey,
-    sprite::{draw_sprite, sprite_get_count, sprite_get_frame},
+    sprite::{draw_sprite_frame, sprite_get_count, sprite_get_frame},
     utils::*,
 };
 
@@ -34,7 +34,7 @@ impl Game {
         let count = sprite_get_count(&chunk);
         for i in 0..count {
             let sprite = sprite_get_frame(&chunk, i)?;
-            self.ui_sprites.push(sprite);
+            self.ui_sprite.push(sprite);
         }
 
         Ok(())
@@ -96,21 +96,21 @@ impl Game {
 
     // len: number of mid box sprites
     pub fn draw_signle_linebox_with_shadow(&mut self, pos: Pos, len: u32) {
-        let left_box_sprite = &self.ui_sprites[44];
-        let mid_box_sprite = &self.ui_sprites[45];
-        let right_box_sprite = &self.ui_sprites[46];
+        let left_box_frame = &self.ui_sprite[44];
+        let mid_box_frame = &self.ui_sprite[45];
+        let right_box_frame = &self.ui_sprite[46];
 
         let mut x = pos.x;
         let y = pos.y;
 
         self.canvas.set_pixels(|pixels: &mut [u8]| {
-            draw_sprite(left_box_sprite, pixels, 320, 200, x, y);
-            x += left_box_sprite.width as isize;
+            draw_sprite_frame(left_box_frame, pixels, 320, 200, x, y);
+            x += left_box_frame.width as isize;
             for _ in 0..len {
-                draw_sprite(mid_box_sprite, pixels, 320, 200, x, y);
-                x += mid_box_sprite.width as isize;
+                draw_sprite_frame(mid_box_frame, pixels, 320, 200, x, y);
+                x += mid_box_frame.width as isize;
             }
-            draw_sprite(right_box_sprite, pixels, 320, 200, x, y);
+            draw_sprite_frame(right_box_frame, pixels, 320, 200, x, y);
         });
     }
 }

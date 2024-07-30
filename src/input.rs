@@ -1,6 +1,4 @@
-use std::path::Display;
-
-use minifb::{Key, KeyRepeat, Window};
+use minifb::{Key, Window};
 
 use crate::game::Game;
 use crate::utils::*;
