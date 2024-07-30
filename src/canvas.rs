@@ -1,5 +1,3 @@
-
-
 #[derive(Clone, Copy)]
 pub struct Color(pub u32);
 impl Color {
@@ -27,9 +25,7 @@ pub struct Palette {
 
 impl Palette {
     pub fn new() -> Self {
-        Self {
-            colors: vec![Color(0); 256],
-        }
+        Self { colors: vec![Color(0); 256] }
     }
 
     pub fn with_colors(colors: Vec<Color>) -> Self {

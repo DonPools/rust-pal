@@ -1,11 +1,13 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use minifb::{Window, WindowOptions};
+use minifb::{ Window, WindowOptions };
 
 use crate::canvas::*;
+use crate::data::GameData;
+use crate::data::GameState;
+use crate::data::MKFs;
 use crate::input::InputState;
-use crate::mkf;
 use crate::sprite::*;
 use crate::text::*;
 use crate::ui::*;
@@ -25,41 +27,6 @@ const NUM_RIX_TITLE: u32 = 0x05;
 const WIDTH: usize = 320;
 const HEIGHT: usize = 200;
 
-pub struct MKFs {
-    pub rng: mkf::MKF,  // RNG动画
-    pub pat: mkf::MKF,  // 调色板
-    pub fbp: mkf::MKF,  // 战斗背景sprites
-    pub mgo: mkf::MKF,  // 场景sprites
-    pub midi: mkf::MKF, // MIDI音乐
-    pub fp: mkf::MKF,   // 杂项数据文件
-    pub map: mkf::MKF,  // 地图
-    pub gop: mkf::MKF,  // tile bitmap
-}
-
-impl MKFs {
-    pub fn open() -> Result<Self> {
-        let rng = open_mkf("RNG.MKF")?;
-        let pat = open_mkf("PAT.MKF")?;
-        let fbp = open_mkf("FBP.MKF")?;
-        let mgo = open_mkf("MGO.MKF")?;
-        let midi = open_mkf("MIDI.MKF")?;
-        let fp = open_mkf("DATA.MKF")?;
-        let map = open_mkf("MAP.MKF")?;
-        let gop = open_mkf("GOP.MKF")?;
-
-        Ok(Self {
-            rng,
-            pat,
-            fbp,
-            mgo,
-            midi,
-            fp,
-            map,
-            gop,
-        })
-    }
-}
-
 pub struct Game {
     pub window: Window,
     pub canvas: Canvas,
@@ -68,24 +35,22 @@ pub struct Game {
 
     pub start_time: Instant, // for tick
     pub mkf: MKFs,
+    pub data: GameData,
+    pub state: GameState,
     pub ui_sprites: Vec<Sprite>,
 }
 
 impl Game {
     pub fn new() -> Result<Self> {
-        let window = Window::new(
-            "PAL95(DOS) - Rust Edition",
-            WIDTH,
-            HEIGHT,
-            WindowOptions {
-                resize: true,
-                scale: minifb::Scale::X2,
-                ..WindowOptions::default()
-            },
-        )?;
+        let window = Window::new("PAL(DOS Version) - Rust Edition", WIDTH, HEIGHT, WindowOptions {
+            resize: true,
+            scale: minifb::Scale::X2,
+            ..WindowOptions::default()
+        })?;
 
         let text = Text::load()?;
-        let mkf = MKFs::open()?;
+        let mut mkf = MKFs::open()?;
+        let data = GameData::load(&mut mkf.sss, &mut mkf.data)?;
 
         Ok(Self {
             window,
@@ -94,6 +59,8 @@ impl Game {
             input: InputState::new(),
             start_time: Instant::now(),
             mkf,
+            data,
+            state: GameState::new(),
             ui_sprites: Vec::new(),
         })
     }
@@ -125,8 +92,7 @@ impl Game {
     }
 
     pub fn blit_to_screen(&mut self) -> Result<()> {
-        self.window
-            .update_with_buffer(self.canvas.get_buffer(), WIDTH, HEIGHT)?;
+        self.window.update_with_buffer(self.canvas.get_buffer(), WIDTH, HEIGHT)?;
 
         Ok(())
     }
@@ -148,19 +114,10 @@ impl Game {
         let mut fadein_pal = Palette::new();
 
         // 开场的那个从下往上的山是由两个图片拼接的，一个在上面，一个在下面。尺寸是320x200
-        let splash_down = self
-            .mkf
-            .fbp
-            .read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
+        let splash_down = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_DOWN)?;
         let splash_up = self.mkf.fbp.read_chunk_decompressed(BITMAPNUM_SPLASH_UP)?;
-        let splash_title = self
-            .mkf
-            .mgo
-            .read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
-        let splash_crane = self
-            .mkf
-            .mgo
-            .read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
+        let splash_title = self.mkf.mgo.read_chunk_decompressed(SPRITENUM_SPLASH_TITLE)?;
+        let splash_crane = self.mkf.mgo.read_chunk_decompressed(SPRITENUM_SPLASH_CRANE)?;
 
         let mut crane_sprites = Vec::<Sprite>::new();
         for i in 0..8 {
@@ -175,8 +132,8 @@ impl Game {
         let mut cranes = Vec::<Crane>::with_capacity(8);
         for _ in 0..cranes.capacity() {
             cranes.push(Crane {
-                x: (rand::random::<usize>() % 320 + 320) as isize,
-                y: (rand::random::<usize>() % 80 + 80) as isize,
+                x: ((rand::random::<usize>() % 320) + 320) as isize,
+                y: ((rand::random::<usize>() % 80) + 80) as isize,
                 sprite_id: rand::random::<u32>() % 8,
             });
         }
@@ -204,7 +161,7 @@ impl Game {
                     fadein_pal.colors[i] = Color::from_rgb(
                         ((r as f32) * ratio) as u8,
                         ((g as f32) * ratio) as u8,
-                        ((b as f32) * ratio) as u8,
+                        ((b as f32) * ratio) as u8
                     );
                 }
 
@@ -224,16 +181,18 @@ impl Game {
                 if title_sprite.height < title_height {
                     title_sprite.height += 3;
                     if title_sprite.height > title_height {
-                        title_sprite.height = title_height
+                        title_sprite.height = title_height;
                     }
                 }
             }
 
             self.canvas.set_pixels(|pixels: &mut [u8]| {
-                pixels[0..h_offset * 320]
-                    .copy_from_slice(&splash_up[(200 - h_offset) * 320..200 * 320]);
-                pixels[h_offset * 320..200 * 320]
-                    .copy_from_slice(&splash_down[0..((200 - h_offset) * 320)]);
+                pixels[0..h_offset * 320].copy_from_slice(
+                    &splash_up[(200 - h_offset) * 320..200 * 320]
+                );
+                pixels[h_offset * 320..200 * 320].copy_from_slice(
+                    &splash_down[0..(200 - h_offset) * 320]
+                );
 
                 for crane in cranes.iter() {
                     let sprite = &crane_sprites[crane.sprite_id as usize];
@@ -259,26 +218,11 @@ impl Game {
         self.set_palette(0)?;
 
         let menu_items = [
-            MenuItem {
-                value: 0,
-                num_word: MAINMENU_LABEL_NEWGAME,
-                enabled: true,
-                x: 125,
-                y: 95,
-            },
-            MenuItem {
-                value: 1,
-                num_word: MAINMENU_LABEL_LOADGAME,
-                enabled: true,
-                x: 125,
-                y: 112,
-            },
+            MenuItem { value: 0, num_word: MAINMENU_LABEL_NEWGAME, enabled: true, x: 125, y: 95 },
+            MenuItem { value: 1, num_word: MAINMENU_LABEL_LOADGAME, enabled: true, x: 125, y: 112 },
         ];
 
-        let bg_bitmap = self
-            .mkf
-            .fbp
-            .read_chunk_decompressed(MAINMENU_BACKGROUND_FBPNUM)?;
+        let bg_bitmap = self.mkf.fbp.read_chunk_decompressed(MAINMENU_BACKGROUND_FBPNUM)?;
 
         'running: loop {
             self.canvas.set_pixels(|pixels: &mut [u8]| {
@@ -292,21 +236,21 @@ impl Game {
                 for i in 0..5 {
                     menu_items.push(MenuItem {
                         value: i + 1,
-                        num_word: LOADMENU_LABEL_SLOT_FIRST + i as u32,
+                        num_word: LOADMENU_LABEL_SLOT_FIRST + (i as u32),
                         enabled: true,
                         x: 210,
                         y: 17 + 38 * i,
                     });
                     self.draw_signle_linebox_with_shadow(
-                        Pos{x: 195, y: 7 + 38 * i as isize},
-                        6,
+                        Pos { x: 195, y: 7 + 38 * (i as isize) },
+                        6
                     );
                 }
-                
+
                 self.read_menu(&menu_items)?;
             } else {
                 break 'running;
-            }            
+            }
         }
 
         Ok(())

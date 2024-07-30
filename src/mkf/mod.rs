@@ -1,6 +1,9 @@
 mod decompress;
 
-use std::{fs::{File}, io::{Read, Seek, SeekFrom}};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+};
 
 #[derive(Debug)]
 pub struct MKF {
@@ -15,7 +18,10 @@ impl MKF {
 
     fn read_chunk_offset(&mut self, index: u32) -> Result<(u32, u32), std::io::Error> {
         if index >= self.chunk_count {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Index out of bounds"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Index out of bounds",
+            ));
         }
 
         let mut buf = [0; 4];
@@ -23,12 +29,15 @@ impl MKF {
 
         self.file.read_exact(&mut buf)?;
         let offset = u32::from_le_bytes(buf);
-        
+
         self.file.read_exact(&mut buf)?;
         let next_offset = u32::from_le_bytes(buf);
 
         if next_offset <= 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Chunk is empty"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Chunk is empty",
+            ));
         }
 
         Ok((offset, next_offset))
@@ -42,7 +51,6 @@ impl MKF {
         self.file.seek(SeekFrom::Start(offset.into()))?;
         self.file.read_exact(&mut data)?;
 
-
         Ok(data)
     }
 
@@ -51,7 +59,7 @@ impl MKF {
         match decompress::decompress(data) {
             Ok(decompressed_data) => {
                 return Ok(decompressed_data);
-            },
+            }
             Err(e) => {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
             }
@@ -60,28 +68,36 @@ impl MKF {
 
     pub fn read_rng_sub_count(&mut self, index: u32) -> Result<u32, std::io::Error> {
         let (offset, _) = self.read_chunk_offset(index)?;
-        let mut buf = [0; 4];    
+        let mut buf = [0; 4];
         self.file.seek(SeekFrom::Start(offset.into()))?;
         self.file.read_exact(&mut buf)?;
-        
+
         let t = u32::from_le_bytes(buf);
         // sub chunk count
         Ok((t - 4) / 4)
     }
 
-    pub fn read_rng_chunk(&mut self, index: u32, frame_index :u32) -> Result<Vec<u8>, std::io::Error> {
+    pub fn read_rng_chunk(
+        &mut self,
+        index: u32,
+        frame_index: u32,
+    ) -> Result<Vec<u8>, std::io::Error> {
         let (offset, _) = self.read_chunk_offset(index)?;
-        let mut buf = [0; 4];    
+        let mut buf = [0; 4];
         self.file.seek(SeekFrom::Start(offset.into()))?;
         self.file.read_exact(&mut buf)?;
-        
+
         // sub chunk count
         let chunk_count = u32::from_le_bytes(buf);
         if frame_index >= chunk_count {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Index out of bounds"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Index out of bounds",
+            ));
         }
 
-        self.file.seek(SeekFrom::Start((offset + frame_index * 4) as u64))?;
+        self.file
+            .seek(SeekFrom::Start((offset + frame_index * 4) as u64))?;
 
         self.file.read_exact(&mut buf)?;
         let sub_offset = u32::from_le_bytes(buf);
@@ -103,7 +119,7 @@ impl MKF {
         match decompress::decompress(data) {
             Ok(decompressed_data) => {
                 return Ok(decompressed_data);
-            },
+            }
             Err(e) => {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
             }
@@ -111,12 +127,12 @@ impl MKF {
     }
 }
 
-pub fn open(mut file: File) -> Result<MKF, std::io::Error>{
+pub fn open(mut file: File) -> Result<MKF, std::io::Error> {
     let buf = &mut [0; 4];
 
     file.read_exact(buf)?;
     let t = u32::from_le_bytes(*buf);
     let chunk_count = (t - 4) >> 2;
 
-    Ok(MKF { file, chunk_count})
+    Ok(MKF { file, chunk_count })
 }

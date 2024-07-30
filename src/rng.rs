@@ -73,13 +73,13 @@ pub fn decode_rng(src: &[u8], dst: &mut [u8]) {
                 ptr += 2;
             }
             0x12 => {
-                let rep = (src[ptr] as u32 | ((src[ptr + 1] as u32) << 8)) as usize; 
-                ptr += 2;                
+                let rep = (src[ptr] as u32 | ((src[ptr + 1] as u32) << 8)) as usize;
+                ptr += 2;
                 for _ in 0..=rep {
                     dst[dst_ptr..dst_ptr + 2].copy_from_slice(&src[ptr..ptr + 2]);
                     dst_ptr += 2;
                 }
-                ptr += 2;        
+                ptr += 2;
             }
             _ => {
                 panic!("Unknown data: {:02X}", data);

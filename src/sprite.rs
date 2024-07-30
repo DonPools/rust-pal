@@ -1,9 +1,12 @@
-
 use crate::utils::*;
 
 use std::vec;
 
 pub fn sprite_get_count(sprite_data: &[u8]) -> u32 {
+    if sprite_data.len() == 0 {
+        return 0;
+    }
+
     sprite_data[0] as u32 | ((sprite_data[1] as u32) << 8)
 }
 
@@ -46,7 +49,7 @@ fn decode_rle_sprite(src_rle: &[u8]) -> Result<Sprite> {
     let mut dst_ptr = 0;
 
     while ptr < src_rle.len() {
-        let mut count = src_rle[ptr];        
+        let mut count = src_rle[ptr];
         ptr += 1;
         let dst_data: Vec<u16>;
         if count < 0x80 {
@@ -56,9 +59,11 @@ fn decode_rle_sprite(src_rle: &[u8]) -> Result<Sprite> {
                 count
             };
             //println!("ptr + cnt: {}, src_rle.len(): {}", ptr + cnt, src_rle.len());
-            dst_data = src_rle[ptr..ptr + count as usize].iter().
-                map(|&x| x as u16).collect::<Vec<u16>>();                
-            ptr += count as usize;            
+            dst_data = src_rle[ptr..ptr + count as usize]
+                .iter()
+                .map(|&x| x as u16)
+                .collect::<Vec<u16>>();
+            ptr += count as usize;
         } else {
             count = count & 0x7f;
             dst_data = vec![0x100 as u16; count as usize];
@@ -77,11 +82,7 @@ fn decode_rle_sprite(src_rle: &[u8]) -> Result<Sprite> {
         }
     }
 
-    Ok(Sprite {
-        width,
-        height,
-        data,
-    })
+    Ok(Sprite { width, height, data })
 }
 
 pub fn draw_sprite(

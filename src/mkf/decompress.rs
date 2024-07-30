@@ -9,15 +9,19 @@ struct YJ1Header {
 }
 
 impl YJ1Header {
-    fn from(data: &[u8]) -> YJ1Header {
-        YJ1Header {
+    fn from(data: &[u8]) -> Result<YJ1Header, String> {
+        if data.len() < 16 {
+            return Err(String::from("Invalid data length"));
+        }
+
+        Ok(YJ1Header {
             signature: String::from_utf8(data[0..4].to_vec()).unwrap(),
             uncompressed_length: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
             compressed_length: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
             block_count: u16::from_le_bytes([data[12], data[13]]),
             unknown: data[14],
             huffman_tree_length: data[15],
-        }
+        })
     }
 }
 
@@ -76,13 +80,7 @@ struct YJ1TreeNode {
 
 impl YJ1TreeNode {
     fn new() -> YJ1TreeNode {
-        YJ1TreeNode {
-            value: 0,
-            leaf: false,
-
-            left: None,
-            right: None,
-        }
+        YJ1TreeNode { value: 0, leaf: false, left: None, right: None }
     }
 }
 
@@ -139,7 +137,11 @@ fn yj1_get_count(src: &[u8], bitptr: &mut u32, header: &YJ1BlockHeader) -> u16 {
 }
 
 pub fn decompress(data: Vec<u8>) -> Result<Vec<u8>, String> {
-    let header = YJ1Header::from(data.as_slice());
+    if data.len() == 0 {
+        return Ok(Vec::new());
+    }
+
+    let header = YJ1Header::from(data.as_slice())?;
     if header.signature != "YJ_1" {
         let err_msg = format!("Invalid signature: {}", header.signature);
         return Err(err_msg);

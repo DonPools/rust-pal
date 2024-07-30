@@ -6,20 +6,20 @@ use crate::{mkf::MKF, sprite::Sprite};
 pub struct Map {
     pub tiles: Vec<u32>,
     pub tile_sprites: Vec<Sprite>,
-    pub map_id: u32,
+    pub map_num: u32,
 }
 
 impl Map {
-    pub fn load(map_mkf: &mut MKF, gop_mkf: &mut MKF, map_id: u32) -> Result<Self> {
+    pub fn load(map_mkf: &mut MKF, gop_mkf: &mut MKF, map_num: u32) -> Result<Self> {
         let mut tiles = vec![0; 128 * 64 * 2];
-        if map_id >= map_mkf.chunk_count() || map_id >= gop_mkf.chunk_count() {
+        if map_num >= map_mkf.chunk_count() || map_num >= gop_mkf.chunk_count() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Index out of bounds",
             )));
         }
 
-        let map_chunk = map_mkf.read_chunk_decompressed(map_id)?;
+        let map_chunk = map_mkf.read_chunk_decompressed(map_num)?;
         for i in 0..128 * 64 * 2 {
             tiles[i] = u32::from_le_bytes([
                 map_chunk[i * 4],
@@ -29,20 +29,15 @@ impl Map {
             ]);
         }
 
-        let gop_chunk = gop_mkf.read_chunk(map_id)?;
+        let gop_chunk = gop_mkf.read_chunk(map_num)?;
         let count = sprite_get_count(&gop_chunk);
         let mut tile_sprites = Vec::with_capacity(count as usize);
         for i in 0..count {
-            println!("loading sprite: {} i: {}", map_id, i);
             let sprite = sprite_get_frame(&gop_chunk, i)?;
             tile_sprites.push(sprite);
         }
 
-        Ok(Self {
-            tiles,
-            tile_sprites,
-            map_id,
-        })
+        Ok(Self { tiles, tile_sprites, map_num })
     }
 
     pub fn get_tile_sprite(&self, x: isize, y: isize, h: isize, layer: usize) -> Option<&Sprite> {
@@ -68,18 +63,18 @@ impl Game {
         let sy = rect.y / 16 - 1;
         let dy = (rect.y + rect.h as isize) / 16 + 2;
         let sx = rect.x / 32 - 1;
-        let dx = (rect.x + rect.w as isize) / 32 + 2;        
+        let dx = (rect.x + rect.w as isize) / 32 + 2;
 
         self.canvas.set_pixels(|pixels: &mut [u8]| {
             let mut y_pos = sy * 16 - 8 - rect.y;
-            
+
             for y in sy..dy {
                 for h in 0..2 {
                     let mut x_pos = sx * 32 + h * 16 - 16 - rect.x;
                     for x in sx..dx {
                         let sprite = match map.get_tile_sprite(x, y, h, layer) {
                             Some(sprite) => Some(sprite),
-                            None => map.get_tile_sprite(0, 0, 0, layer)
+                            None => map.get_tile_sprite(0, 0, 0, layer),
                         };
 
                         if let Some(sprite) = sprite {

@@ -1,6 +1,11 @@
 use std::time::{Duration, Instant};
 
-use crate::{game::Game, input::PalKey, sprite::{draw_sprite, sprite_get_count, sprite_get_frame}, utils::*};
+use crate::{
+    game::Game,
+    input::PalKey,
+    sprite::{draw_sprite, sprite_get_count, sprite_get_frame},
+    utils::*,
+};
 
 pub struct MenuItem {
     pub value: u16,
@@ -25,7 +30,7 @@ pub const MENUITEM_COLOR_SELECTED_TOTALNUM: u32 = 6;
 
 impl Game {
     pub fn init_ui(&mut self) -> Result<()> {
-        let chunk = self.mkf.fp.read_chunk(CHUNKNUM_SPRITEUI)?;
+        let chunk = self.mkf.data.read_chunk(CHUNKNUM_SPRITEUI)?;
         let count = sprite_get_count(&chunk);
         for i in 0..count {
             let sprite = sprite_get_frame(&chunk, i)?;
@@ -75,13 +80,9 @@ impl Game {
             self.blit_to_screen()?;
             self.process_event();
 
-            if self.input.is_pressed(PalKey::Down)
-                || self.input.is_pressed(PalKey::Right)
-            {
+            if self.input.is_pressed(PalKey::Down) || self.input.is_pressed(PalKey::Right) {
                 selected_index = (menu_items.len() + selected_index + 1) % menu_items.len();
-            } else if self.input.is_pressed(PalKey::Up)
-                || self.input.is_pressed(PalKey::Left)
-            {
+            } else if self.input.is_pressed(PalKey::Up) || self.input.is_pressed(PalKey::Left) {
                 selected_index = (menu_items.len() + selected_index - 1) % menu_items.len();
             }
 
@@ -94,7 +95,7 @@ impl Game {
     }
 
     // len: number of mid box sprites
-    pub fn draw_signle_linebox_with_shadow(&mut self, pos: Pos, len : u32) {
+    pub fn draw_signle_linebox_with_shadow(&mut self, pos: Pos, len: u32) {
         let left_box_sprite = &self.ui_sprites[44];
         let mid_box_sprite = &self.ui_sprites[45];
         let right_box_sprite = &self.ui_sprites[46];
@@ -110,6 +111,6 @@ impl Game {
                 x += mid_box_sprite.width as isize;
             }
             draw_sprite(right_box_sprite, pixels, 320, 200, x, y);
-        });        
+        });
     }
 }

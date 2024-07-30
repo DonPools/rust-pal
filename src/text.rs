@@ -77,12 +77,7 @@ impl Text {
             msgs.push(s);
         }
 
-        Ok(Text {
-            font_chars,
-            fonts,
-            words,
-            msgs,
-        })
+        Ok(Text { font_chars, fonts, words, msgs })
     }
 
     pub fn draw_char(
@@ -150,11 +145,15 @@ impl Game {
         let mut x = x;
         for c in text.chars() {
             if shadow {
-                self.text.draw_char(pixels, dest_width, dest_height, x + 1, y + 1, c, 0);
-                self.text.draw_char(pixels, dest_width, dest_height, x + 1, y, c, 0);
-                self.text.draw_char(pixels, dest_width, dest_height, x, y + 1, c, 0);
+                self.text
+                    .draw_char(pixels, dest_width, dest_height, x + 1, y + 1, c, 0);
+                self.text
+                    .draw_char(pixels, dest_width, dest_height, x + 1, y, c, 0);
+                self.text
+                    .draw_char(pixels, dest_width, dest_height, x, y + 1, c, 0);
             }
-            self.text.draw_char(pixels, dest_width, dest_height, x, y, c, color);
+            self.text
+                .draw_char(pixels, dest_width, dest_height, x, y, c, color);
             x += 16;
         }
     }
@@ -171,16 +170,6 @@ impl Game {
         shadow: bool,
     ) {
         let text = self.text.get_word(index);
-        self.draw_text(
-            pixels,
-            dest_width,
-            dest_height,
-            x,
-            y,
-            text,
-            color,
-            shadow,
-        );
+        self.draw_text(pixels, dest_width, dest_height, x, y, text, color, shadow);
     }
-
 }

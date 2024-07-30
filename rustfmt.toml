@@ -1,0 +1,2 @@
+struct_lit_width = 48
+match_block_trailing_comma = false

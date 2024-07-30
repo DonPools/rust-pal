@@ -1,5 +1,7 @@
-use std::path;
 use std::fs::File;
+use std::path;
+
+use bincode::{config, decode_from_slice, Decode};
 
 use crate::game::Game;
 use crate::mkf;
@@ -9,13 +11,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // Direction
 #[derive(Debug, PartialEq, Clone)]
-pub enum Dir
-{
-   South = 0,
-   West,
-   North,
-   East,
-   Unknown
+pub enum Dir {
+    South = 0,
+    West,
+    North,
+    East,
+    Unknown,
 }
 
 impl Dir {
@@ -25,7 +26,7 @@ impl Dir {
             1 => Dir::West,
             2 => Dir::North,
             3 => Dir::East,
-            _ => Dir::Unknown
+            _ => Dir::Unknown,
         }
     }
 }
@@ -68,7 +69,27 @@ pub fn reverse_bits(u8: u8) -> u8 {
 }
 
 impl Game {
-    pub fn ticks (&self) -> u32 {
+    pub fn ticks(&self) -> u32 {
         self.start_time.elapsed().as_millis() as u32
     }
+}
+
+pub fn decode_c_structs<T: Decode>(buf: &[u8]) -> Result<Vec<T>> {
+    let c = config::standard()
+        .with_little_endian()
+        .with_fixed_int_encoding();
+
+    let mut buf = buf;
+    let mut objects = Vec::<T>::new();
+
+    loop {
+        let (obj, size): (T, usize) = decode_from_slice(&buf, c)?;
+        objects.push(obj);
+        buf = &buf[size..];
+        if buf.len() < size {
+            break;
+        }
+    }
+
+    Ok(objects)
 }

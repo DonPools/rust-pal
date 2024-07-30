@@ -1,5 +1,3 @@
-
-
 use pal::game::Game;
 
 fn main() {

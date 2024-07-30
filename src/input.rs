@@ -35,138 +35,39 @@ struct KeyCode {
 const KEY_COUNT: usize = 33;
 
 const KEY_MAP: [KeyCode; KEY_COUNT] = [
-    KeyCode {
-        code: Key::Up,
-        key: PalKey::Up,
-    },
-    KeyCode {
-        code: Key::NumPad8,
-        key: PalKey::Up,
-    },
-    KeyCode {
-        code: Key::Down,
-        key: PalKey::Down,
-    },
-    KeyCode {
-        code: Key::NumPad2,
-        key: PalKey::Down,
-    },
-    KeyCode {
-        code: Key::Left,
-        key: PalKey::Left,
-    },
-    KeyCode {
-        code: Key::NumPad4,
-        key: PalKey::Left,
-    },
-    KeyCode {
-        code: Key::Right,
-        key: PalKey::Right,
-    },
-    KeyCode {
-        code: Key::NumPad6,
-        key: PalKey::Right,
-    },
-    KeyCode {
-        code: Key::Escape,
-        key: PalKey::Menu,
-    },
-    KeyCode {
-        code: Key::Insert,
-        key: PalKey::Menu,
-    },
-    KeyCode {
-        code: Key::LeftAlt,
-        key: PalKey::Menu,
-    },
-    KeyCode {
-        code: Key::RightAlt,
-        key: PalKey::Menu,
-    },
-    KeyCode {
-        code: Key::NumPad0,
-        key: PalKey::Menu,
-    },
-    KeyCode {
-        code: Key::Enter,
-        key: PalKey::Search,
-    },
-    KeyCode {
-        code: Key::Space,
-        key: PalKey::Search,
-    },
-    KeyCode {
-        code: Key::NumPadEnter,
-        key: PalKey::Search,
-    },
-    KeyCode {
-        code: Key::LeftCtrl,
-        key: PalKey::Search,
-    },
-    KeyCode {
-        code: Key::PageUp,
-        key: PalKey::PgUp,
-    },
-    KeyCode {
-        code: Key::NumPad9,
-        key: PalKey::PgUp,
-    },
-    KeyCode {
-        code: Key::PageDown,
-        key: PalKey::PgDn,
-    },
-    KeyCode {
-        code: Key::NumPad3,
-        key: PalKey::PgDn,
-    },
-    KeyCode {
-        code: Key::Home,
-        key: PalKey::Home,
-    },
-    KeyCode {
-        code: Key::NumPad7,
-        key: PalKey::Home,
-    },
-    KeyCode {
-        code: Key::End,
-        key: PalKey::End,
-    },
-    KeyCode {
-        code: Key::NumPad1,
-        key: PalKey::End,
-    },
-    KeyCode {
-        code: Key::R,
-        key: PalKey::Repeat,
-    },
-    KeyCode {
-        code: Key::A,
-        key: PalKey::Auto,
-    },
-    KeyCode {
-        code: Key::D,
-        key: PalKey::Defend,
-    },
-    KeyCode {
-        code: Key::E,
-        key: PalKey::UseItem,
-    },
-    KeyCode {
-        code: Key::W,
-        key: PalKey::ThrowItem,
-    },
-    KeyCode {
-        code: Key::Q,
-        key: PalKey::Flee,
-    },
-    KeyCode {
-        code: Key::F,
-        key: PalKey::Force,
-    },
-    KeyCode {
-        code: Key::S,
-        key: PalKey::Status,
-    },
+    KeyCode { code: Key::Up, key: PalKey::Up },
+    KeyCode { code: Key::NumPad8, key: PalKey::Up },
+    KeyCode { code: Key::Down, key: PalKey::Down },
+    KeyCode { code: Key::NumPad2, key: PalKey::Down },
+    KeyCode { code: Key::Left, key: PalKey::Left },
+    KeyCode { code: Key::NumPad4, key: PalKey::Left },
+    KeyCode { code: Key::Right, key: PalKey::Right },
+    KeyCode { code: Key::NumPad6, key: PalKey::Right },
+    KeyCode { code: Key::Escape, key: PalKey::Menu },
+    KeyCode { code: Key::Insert, key: PalKey::Menu },
+    KeyCode { code: Key::LeftAlt, key: PalKey::Menu },
+    KeyCode { code: Key::RightAlt, key: PalKey::Menu },
+    KeyCode { code: Key::NumPad0, key: PalKey::Menu },
+    KeyCode { code: Key::Enter, key: PalKey::Search },
+    KeyCode { code: Key::Space, key: PalKey::Search },
+    KeyCode { code: Key::NumPadEnter, key: PalKey::Search },
+    KeyCode { code: Key::LeftCtrl, key: PalKey::Search },
+    KeyCode { code: Key::PageUp, key: PalKey::PgUp },
+    KeyCode { code: Key::NumPad9, key: PalKey::PgUp },
+    KeyCode { code: Key::PageDown, key: PalKey::PgDn },
+    KeyCode { code: Key::NumPad3, key: PalKey::PgDn },
+    KeyCode { code: Key::Home, key: PalKey::Home },
+    KeyCode { code: Key::NumPad7, key: PalKey::Home },
+    KeyCode { code: Key::End, key: PalKey::End },
+    KeyCode { code: Key::NumPad1, key: PalKey::End },
+    KeyCode { code: Key::R, key: PalKey::Repeat },
+    KeyCode { code: Key::A, key: PalKey::Auto },
+    KeyCode { code: Key::D, key: PalKey::Defend },
+    KeyCode { code: Key::E, key: PalKey::UseItem },
+    KeyCode { code: Key::W, key: PalKey::ThrowItem },
+    KeyCode { code: Key::Q, key: PalKey::Flee },
+    KeyCode { code: Key::F, key: PalKey::Force },
+    KeyCode { code: Key::S, key: PalKey::Status },
 ];
 
 pub struct InputState {
@@ -190,7 +91,7 @@ impl InputState {
 
     #[inline]
     pub fn is_pressed(&self, key: PalKey) -> bool {
-        self.key_press & key as u32 != 0
+        (self.key_press & (key as u32)) != 0
     }
 
     #[inline]
@@ -231,7 +132,7 @@ impl InputState {
     }
 
     fn update_state(&mut self, window: &Window, ticks: u32) {
-        let cur_time = ticks;        
+        let cur_time = ticks;
 
         for i in 0..KEY_COUNT {
             let key_code = &KEY_MAP[i];
@@ -250,11 +151,11 @@ impl InputState {
 
                         if dir != Dir::Unknown {
                             self.key_max_count += 1;
-                            self.key_order[dir as usize] = self.key_max_count;                            
+                            self.key_order[dir as usize] = self.key_max_count;
                             self.dir = self.get_cur_dir();
                         }
                     }
-                    
+
                     self.key_press |= key_code.key as u32;
                 }
             } else {
@@ -270,7 +171,7 @@ impl InputState {
                         };
                         self.dir = cur_dir;
                     }
-                    
+
                     self.key_last_time[i] = 0;
                 }
             }
