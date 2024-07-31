@@ -51,6 +51,7 @@ impl Game {
         let text = Text::load()?;
         let mut mkf = MKFs::open()?;
         let data = GameData::load(&mut mkf.sss, &mut mkf.data)?;
+        let state = GameState::load_new_game(&mut mkf.sss)?;
 
         Ok(Self {
             window,
@@ -60,7 +61,7 @@ impl Game {
             start_time: Instant::now(),
             mkf,
             data,
-            state: GameState::new(),
+            state,
             ui_sprite: Vec::new(),
         })
     }

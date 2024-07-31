@@ -10,20 +10,17 @@ impl Game {
         self.set_palette(0)?;
 
         let i = (self.state.scene_num as usize) - 1;
-        let scene = &self.data.scenes[i];
+        let scene = &self.state.scenes[i];
         let map = Map::load(&mut self.mkf.map, &mut self.mkf.gop, scene.map_num as u32)?;
 
-        let index = self.data.scenes[i].event_object_index;
-        let event_objects_count = self.data.scenes[i + 1].event_object_index - index;
-
-        let event_objects =
-            self.data.event_objects[
-                index as usize..(index + event_objects_count) as usize
-            ].to_vec();
+        let index = self.state.scenes[i].event_object_index;
+        let event_objects_count = self.state.scenes[i + 1].event_object_index - index;
 
         let mut event_object_sprites: Vec<Vec<SpriteFrame>> = Vec::new();
 
-        for event_object in event_objects.iter() {
+        for event_object in self.state.event_objects[
+            index as usize..(index + event_objects_count) as usize
+        ].iter() {
             let sprite_num = event_object.sprite_num;
 
             let chunk = self.mkf.mgo.read_chunk_decompressed(sprite_num as u32)?;
@@ -38,7 +35,7 @@ impl Game {
             self.draw_map(&map, &viewport, 1);
             self.canvas.set_pixels(|pixels: &mut [u8]| {
                 for i in 0..event_objects_count {
-                    let event_object = &event_objects[i as usize];
+                    let event_object = &self.state.event_objects[(index + i) as usize];
                     let sprites = &event_object_sprites[i as usize];
 
                     if event_object.state != (ObjectState::Hidden as u16) || sprites.len() == 0 {
@@ -50,7 +47,10 @@ impl Game {
                     if x < -(frame.width as isize) || x >= 320 {
                         continue;
                     }
-                    let y = (event_object.y as isize) - viewport.y + ((event_object.layer as isize) * 8 + 9);
+                    let y =
+                        (event_object.y as isize) -
+                        viewport.y +
+                        ((event_object.layer as isize) * 8 + 9);
                     let vy = y - (frame.height as isize) - (event_object.layer as isize) * 8 + 2;
                     if vy >= 200 || vy < -(frame.height as isize) {
                         continue;
