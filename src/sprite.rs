@@ -7,6 +7,8 @@ pub struct SpriteFrame {
     data: Vec<u16>,
 }
 
+pub type Sprite = Vec<SpriteFrame>;
+
 pub fn sprite_get_count(sprite_data: &[u8]) -> u32 {
     if sprite_data.len() == 0 {
         return 0;
@@ -28,16 +30,25 @@ pub fn sprite_get_frame(sprite_data: &[u8], frame_index: u32) -> Result<SpriteFr
         ((sprite_data[(frame_index as usize) + 1] as u32) << 8)) <<
         1) as usize;
 
+    if offset >= sprite_data.len() {
+        return Err(
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Index out of bounds"))
+        );
+    }
+
     decode_rle_sprite_frame(&sprite_data[offset..])
 }
 
 // Get all frames of a sprite
-pub fn sprite_get_frames(sprite_data: &[u8]) -> Result<Vec<SpriteFrame>> {
+pub fn sprite_get_frames(sprite_data: &[u8]) -> Result<Sprite> {
     let mut sprites = Vec::new();
     let count = sprite_get_count(&sprite_data);
     for j in 0..count {
-        let sprite = sprite_get_frame(sprite_data, j)?;
-        sprites.push(sprite);
+        if let Ok(sprite) = sprite_get_frame(sprite_data, j) {
+            sprites.push(sprite);
+        } else {
+            break;
+        }
     }
 
     Ok(sprites)
@@ -97,13 +108,12 @@ fn decode_rle_sprite_frame(src_rle: &[u8]) -> Result<SpriteFrame> {
 
 pub fn draw_sprite_frame(
     frame: &SpriteFrame,
-    dest: &mut [u8], // 目标图像缓冲区
+    pixels: &mut [u8], // 目标图像缓冲区
     dest_width: usize, // 目标图像宽度
     dest_height: usize, // 目标图像高度
     x: isize, // 目标图像起始x坐标
     y: isize // 目标图像起始y坐标
 ) {
-    // 图像是否能被正确显示在目标图像中
     if
         dest_width == 0 ||
         dest_height == 0 ||
@@ -128,7 +138,7 @@ pub fn draw_sprite_frame(
 
             let src_pixel = frame.data[src_index];
             if src_pixel < 0x100 {
-                dest[dest_index] = src_pixel as u8;
+                pixels[dest_index] = src_pixel as u8;
             }
         }
     }

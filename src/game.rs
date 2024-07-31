@@ -8,8 +8,8 @@ use crate::data::GameData;
 use crate::data::GameState;
 use crate::data::MKFs;
 use crate::input::InputState;
+use crate::play::Resource;
 use crate::sprite::*;
-use crate::text::*;
 use crate::ui::*;
 use crate::utils::*;
 
@@ -30,13 +30,14 @@ const HEIGHT: usize = 200;
 pub struct Game {
     pub window: Window,
     pub canvas: Canvas,
-    pub text: Text,
+    pub ui: UI,
     pub input: InputState,
 
     pub start_time: Instant, // for tick
     pub mkf: MKFs,
     pub data: GameData,
     pub state: GameState,
+    pub resource: Option<Resource>,
     pub ui_sprite: Vec<SpriteFrame>,
 }
 
@@ -47,28 +48,24 @@ impl Game {
             scale: minifb::Scale::X2,
             ..WindowOptions::default()
         })?;
-
-        let text = Text::load()?;
+        
         let mut mkf = MKFs::open()?;
+        let ui = UI::load(&mut mkf.data)?;
         let data = GameData::load(&mut mkf.sss, &mut mkf.data)?;
         let state = GameState::load_new_game(&mut mkf.sss)?;
 
         Ok(Self {
             window,
             canvas: Canvas::new(WIDTH, HEIGHT),
-            text,
+            ui,
             input: InputState::new(),
             start_time: Instant::now(),
             mkf,
             data,
             state,
+            resource: None,
             ui_sprite: Vec::new(),
         })
-    }
-
-    pub fn init(&mut self) -> Result<()> {
-        self.init_ui()?;
-        Ok(())
     }
 
     pub fn get_palette(&mut self, palette_id: u32) -> Result<Palette> {
@@ -258,9 +255,9 @@ impl Game {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.trademark_screen()?;
-        self.splash_screen()?;
-        self.opening_menu_screen()?;
+        //self.trademark_screen()?;
+        //self.splash_screen()?;
+        //self.opening_menu_screen()?;
         self.mainloop()?;
 
         Ok(())

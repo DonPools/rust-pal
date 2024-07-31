@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use crate::utils::{ decode_c_structs, Result };
+use crate::utils::{ decode_c_structs, Pos, Result };
 use crate::{ mkf::MKF, utils::open_mkf };
 use bincode::Decode;
 
@@ -174,6 +174,7 @@ pub struct GameState {
 
     pub entering_scene: bool,
     pub scene_num: u16,
+    pub viewport: Pos,
 }
 
 impl GameState {
@@ -192,7 +193,8 @@ impl GameState {
             scenes,
             event_objects: events,
             entering_scene: true,
-            scene_num: 1,
+            scene_num: 21,
+            viewport: Pos { x: 0, y: 0 },
         })
     }
 }

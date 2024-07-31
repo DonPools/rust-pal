@@ -2,7 +2,7 @@ pub mod canvas;
 pub mod data;
 pub mod game;
 pub mod input;
-pub mod map;
+pub mod scene;
 pub mod mkf;
 pub mod play;
 pub mod rng;
