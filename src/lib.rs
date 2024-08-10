@@ -7,6 +7,6 @@ pub mod mkf;
 pub mod play;
 pub mod rng;
 pub mod sprite;
-pub mod text;
 pub mod ui;
 pub mod utils;
+pub mod script;

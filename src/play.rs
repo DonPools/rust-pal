@@ -1,8 +1,7 @@
-use crate::data::ObjectState;
 use crate::game::Game;
 use crate::input::PalKey;
 use crate::scene::Map;
-use crate::sprite::{ draw_sprite_frame, sprite_get_frames, Sprite, SpriteFrame };
+use crate::sprite::{ sprite_get_frames, Sprite, SpriteFrame };
 use crate::utils::*;
 
 pub struct Resource {
@@ -46,6 +45,15 @@ impl Game {
         self.set_palette(0)?;
         loop {
             self.load_resource()?;
+            if self.state.entering_scene {
+                self.state.entering_scene = false;
+                let i = (self.state.scene_num as usize) - 1;
+                println!("i:{} run trigger script:{}", i, self.state.scenes[i].script_on_enter);
+                self.state.scenes[i].script_on_enter = self.run_trigger_script(
+                    self.state.scenes[i].script_on_enter,
+                    0xffff
+                );
+            }
 
             loop {
                 self.make_scence();
@@ -78,7 +86,5 @@ impl Game {
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
         }
-
-        Ok(())
     }
 }

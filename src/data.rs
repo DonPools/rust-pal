@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use crate::utils::{ decode_c_structs, Pos, Result };
 use crate::{ mkf::MKF, utils::open_mkf };
 use bincode::Decode;
@@ -126,10 +126,16 @@ pub struct Object {
     data: [u16; 6],
 }
 
-#[derive(Decode, Debug)]
+#[derive(Decode)]
 pub struct ScriptEntry {
     pub operation: u16, // operation code
     pub operands: [u16; 3], // operands
+}
+
+impl Display for ScriptEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04x} {:04x} {:04x} {:04x}", self.operation, self.operands[0], self.operands[1], self.operands[2])
+    }
 }
 
 impl Object {
@@ -158,7 +164,7 @@ pub struct GameData {
 
 impl GameData {
     pub fn load(sss: &mut MKF, data: &mut MKF) -> Result<GameData> {
-        let buf = sss.read_chunk(3)?;
+        let buf = sss.read_chunk(4)?;
         let script_entries = decode_c_structs::<ScriptEntry>(&buf)?;
 
         Ok(GameData {
@@ -175,6 +181,7 @@ pub struct GameState {
     pub entering_scene: bool,
     pub scene_num: u16,
     pub viewport: Pos,
+    pub last_object_id: u16,
 }
 
 impl GameState {
@@ -193,8 +200,9 @@ impl GameState {
             scenes,
             event_objects: events,
             entering_scene: true,
-            scene_num: 21,
+            scene_num: 1,
             viewport: Pos { x: 0, y: 0 },
+            last_object_id: 0,
         })
     }
 }
