@@ -1,6 +1,4 @@
 //! pal-assets - 仙剑奇侠传 Rust 版资源解析
-//! 负责读取 PAL 资源文件（MAP, RGM, SSG, 等）
+//! 负责读取 PAL 资源文件（MKF 包、图片、地图、音频等）
 
-pub fn load_assets() {
-    println!("pal-assets loaded");
-}
+pub mod mkf;

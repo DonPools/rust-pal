@@ -99,10 +99,10 @@ cd data && ./sdlpal
 
 ## 开发路线
 
-### Phase 1 — 资源层 ✅ 当前阶段
+### Phase 1 — 资源层 ✅ 已完成
 - [x] 项目骨架搭建
 - [x] Cargo workspace 结构
-- [ ] MKF 包解析器 (pal-assets)
+- [x] MKF 包解析器 (pal-assets)
 - [ ] RLE 解压缩
 - [ ] 调色板 (palette) 解析
 - [ ] 位图 (bitmap) 解码
