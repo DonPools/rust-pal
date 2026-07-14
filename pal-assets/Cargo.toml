@@ -1,0 +1,7 @@
+[package]
+name = "pal-assets"
+version = "0.1.0"
+edition = "2021"
+description = "仙剑奇侠传 Rust 版 - 资源加载与解析"
+
+[dependencies]

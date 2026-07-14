@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "pal-core",
+    "pal-assets",
+    "pal-desktop",
+    "pal-launcher",
+]

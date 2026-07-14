@@ -1,0 +1,7 @@
+[package]
+name = "pal-core"
+version = "0.1.0"
+edition = "2021"
+description = "仙剑奇侠传 Rust 版 - 核心游戏引擎"
+
+[dependencies]

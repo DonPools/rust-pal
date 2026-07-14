@@ -1,0 +1,9 @@
+[package]
+name = "pal-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "仙剑奇侠传 Rust 版 - 桌面端入口"
+
+[dependencies]
+pal-core = { path = "../pal-core" }
+pal-assets = { path = "../pal-assets" }

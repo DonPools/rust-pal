@@ -1,0 +1,6 @@
+//! pal-core - 仙剑奇侠传 Rust 版核心引擎
+//! 负责游戏逻辑、地图、战斗、剧情等
+
+pub fn init() {
+    println!("pal-core initialized");
+}
