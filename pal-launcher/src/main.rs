@@ -1,82 +1,20 @@
-//! pal-launcher - 仙剑奇侠传 Rust 版启动入口
-//!
-//! 第一阶段：用 MKF 解析器读取游戏数据文件，验证解析正确性。
-
 use std::path::PathBuf;
-
-fn find_data_dir() -> PathBuf {
-    // 从 manifest 目录向上找 data/
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.pop(); // 从 pal-launcher 到 workspace 根
-    dir.push("data");
-    if dir.exists() {
-        return dir;
-    }
-    // 回退到当前目录
-    PathBuf::from("data")
-}
+use pal_assets::mkf::MkfArchive;
+use pal_assets::palette::Palette;
+use pal_assets::bitmap::Bitmap;
 
 fn main() {
-    let data_dir = find_data_dir();
-    println!("📂 游戏数据目录: {}", data_dir.display());
-    println!();
+    let data_dir = { let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR")); d.pop(); d.push("data"); d };
+    let palette = Palette::from_bytes(&MkfArchive::new(&std::fs::read(data_dir.join("DATA.MKF")).unwrap()).unwrap().read_chunk(1).unwrap()).unwrap();
 
-    // 列出要解析的 MKF 文件
-    let mkf_files = [
-        "ABC.MKF",
-        "DATA.MKF",
-        "MAP.MKF",
-        "F.MKF",
-        "FBP.MKF",
-        "FIRE.MKF",
-        "GOP.MKF",
-        "MIDI.MKF",
-        "MUS.MKF",
-        "RGM.MKF",
-        "RNG.MKF",
-        "SSS.MKF",
-        "VOC.MKF",
-        "PAT.MKF",
-        "BALL.MKF",
-    ];
-
-    for filename in &mkf_files {
-        let path = data_dir.join(filename);
-        if !path.exists() {
-            println!("⚠️    {} - 文件不存在", filename);
-            continue;
-        }
-
-        let data = match std::fs::read(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("❌    {} - 读取失败: {}", filename, e);
-                continue;
-            }
-        };
-
-        match pal_assets::mkf::MkfArchive::new(&data) {
-            Some(archive) => {
-                let count = archive.chunk_count();
-                let total_size = archive
-                    .chunk_sizes()
-                    .iter()
-                    .sum::<usize>();
-                let first_size = archive
-                    .read_chunk(0)
-                    .map(|c| c.len())
-                    .unwrap_or(0);
-                println!(
-                    "✅    {:<12}  {} chunks,  {} bytes (首 chunk: {} bytes)",
-                    filename,
-                    count,
-                    total_size,
-                    first_size,
-                );
-            }
-            None => {
-                println!("❌    {} - 解析失败", filename);
+    // 导出 BALL.MKF 前 3 个图标
+    if let Some(arc) = MkfArchive::new(&std::fs::read(data_dir.join("BALL.MKF")).unwrap()) {
+        for i in 0..3.min(arc.chunk_count()) {
+            if let Some(bmp) = Bitmap::from_rle(arc.read_chunk(i).unwrap(), &palette) {
+                pal_desktop::save_png(&bmp, &format!("{}/item_{}.png", data_dir.display(), i)).ok();
+                println!("item_{}.png: {}x{}", i, bmp.width, bmp.height);
             }
         }
     }
+    println!("Phase 2 complete!");
 }

@@ -2,3 +2,6 @@
 //! 负责读取 PAL 资源文件（MKF 包、图片、地图、音频等）
 
 pub mod mkf;
+pub mod palette;
+pub mod rle;
+pub mod bitmap;

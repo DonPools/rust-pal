@@ -6,3 +6,4 @@ description = "仙剑奇侠传 Rust 版 - 资源加载与解析"
 
 [dependencies]
 binrw = "0.14"
+glam = "0.29"

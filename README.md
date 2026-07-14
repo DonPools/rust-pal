@@ -103,9 +103,9 @@ cd data && ./sdlpal
 - [x] 项目骨架搭建
 - [x] Cargo workspace 结构
 - [x] MKF 包解析器 (pal-assets)
-- [ ] RLE 解压缩
-- [ ] 调色板 (palette) 解析
-- [ ] 位图 (bitmap) 解码
+- [x] RLE 解压缩
+- [x] 调色板 (palette) 解析
+- [x] 位图 (bitmap) 解码
 
 ### Phase 2 — 显示层
 - [ ] winit 窗口 + pixels 像素缓冲区
