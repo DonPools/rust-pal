@@ -101,7 +101,7 @@ impl MkfArchive {
 | `MGO.MKF` | 中等 | 迷宫全局对象 |
 | `MIDI.MKF` | 几十 | MIDI 背景音乐 |
 | `MUS.MKF` | 少量 | 音效/音乐？ |
-| `PAT.MKF` | 少量 | 行走路径数据 |
+| `PAT.MKF` | 少量 | 256 色调色板（日间及可选夜间颜色） |
 | `RGM.MKF` | 大量 | 随机迷宫生成数据 |
 | `RNG.MKF` | 大量 | 随机迷宫地图 |
 | `SSS.MKF` | 少量 | 片头/片尾动画 |

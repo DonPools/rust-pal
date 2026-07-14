@@ -50,16 +50,15 @@ rust-pal/
 |------|-------|----------|------|
 | 启动入口 | `pal-launcher` | `pal-desktop` | 解析命令行、初始化、启动游戏 |
 | 窗口/渲染 | `pal-desktop` | `winit` + `pixels` + `rodio` | 窗口管理、像素渲染、音频播放、输入处理 |
-| 游戏逻辑 | `pal-core` | `glam` (不依赖其他) | 场景、战斗、对话、背包等游戏状态机 |
-| 资源解析 | `pal-assets` | `binrw` | MKF 包解析、RLE 解压、PNG/WAV 解码 |
+| 游戏逻辑 | `pal-core` | `pal-assets` | 地图、场景、战斗、对话、背包等游戏状态机 |
+| 资源解析 | `pal-assets` | 纯 Rust | MKF、YJ_1、RLE、sprite 与 palette 解析 |
 
 ### 选型理由
 
 - **`winit`** — Rust 生态最轻量的跨平台窗口库，无引擎包袱
 - **`pixels`** — 直接操作像素缓冲区，适合 256 色 palette 的逐帧渲染
 - **`rodio`** — 最简单的跨平台音频播放库，支持 WAV/OGG/Vorbis
-- **`binrw`** — 声明式二进制结构体解析，一行代码定义一个 MKF header
-- **`glam`** — 轻量 2D 数学库，游戏逻辑中处理坐标、碰撞等
+- **纯 Rust YJ_1** — 不依赖参考实现中的平台对象文件，便于跨平台构建和边界检查
 
 ---
 
@@ -108,9 +107,9 @@ cd data && ./sdlpal
 - [x] 位图 (bitmap) 解码
 
 ### Phase 2 — 显示层
-- [ ] winit 窗口 + pixels 像素缓冲区
-- [ ] 256 色 palette 渲染管线
-- [ ] 场景瓦片地图渲染
+- [x] winit 窗口 + pixels 像素缓冲区
+- [x] 256 色 palette 渲染管线
+- [x] 场景瓦片地图渲染
 - [ ] 角色精灵渲染
 
 ### Phase 3 — 交互层

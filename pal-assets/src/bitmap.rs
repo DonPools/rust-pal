@@ -27,12 +27,7 @@ impl Bitmap {
     }
 
     /// 从索引像素数据 + 调色板创建 RGBA 位图
-    pub fn from_indexed(
-        pixels: Vec<u8>,
-        width: u16,
-        height: u16,
-        palette: &Palette,
-    ) -> Self {
+    pub fn from_indexed(pixels: Vec<u8>, width: u16, height: u16, palette: &Palette) -> Self {
         let rgba = palette.apply_to_pixels(&pixels);
         Bitmap {
             width,

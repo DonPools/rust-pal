@@ -1,164 +1,105 @@
-//! RLE 位图解码器
-//!
-//! 仙剑的角色精灵、物品图标、瓦片贴图使用 RLE 压缩格式存储。
-//! 这是 8-bpp（8 位每像素，256 色）的位图，用索引色值指向调色板。
+//! Decoder for PAL's 8-bit indexed RLE bitmaps.
 
 use crate::palette::Palette;
 
-/// RLE 压缩的位图
 #[derive(Debug, Clone)]
 pub struct RleBitmap {
-    /// 位图宽度（像素）
     pub width: u16,
-    /// 位图高度（像素）
     pub height: u16,
-    /// 解码后的像素数据（每个像素 1 字节索引色值）
+    /// Decoded indexed pixels. Index 0 represents transparent pixels.
     pub pixels: Vec<u8>,
 }
 
 impl RleBitmap {
-    /// 从原始 RLE 数据解码
-    ///
-    /// # 参数
-    /// * `data` - RLE 压缩的原始字节数据（可能以 0x00000002 magic 开头）
-    ///
-    /// # 返回
-    /// * `Some(RleBitmap)` - 解码成功
-    /// * `None` - 数据无效
+    /// Decode one complete bitmap. Truncated or overflowing commands fail.
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < 4 {
-            return None;
-        }
+        let mut offset = if data.get(..4) == Some([0x02, 0, 0, 0].as_slice()) {
+            4
+        } else {
+            0
+        };
 
-        let mut offset = 0;
-
-        // 跳过可选的 0x00000002 magic 头
-        if data.len() >= 4 && data[0] == 0x02 && data[1] == 0x00
-            && data[2] == 0x00 && data[3] == 0x00
-        {
-            offset = 4;
-        }
-
-        // 剩余长度不足以读取宽高
-        if data.len() < offset + 4 {
-            return None;
-        }
-
-        let width = u16::from_le_bytes([data[offset], data[offset + 1]]);
-        let height = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
+        let width = read_u16(data, offset)?;
+        let height = read_u16(data, offset + 2)?;
         offset += 4;
-
         if width == 0 || height == 0 {
             return None;
         }
 
-        let total_pixels = width as usize * height as usize;
-        let mut pixels = Vec::with_capacity(total_pixels);
+        let total_pixels = (width as usize).checked_mul(height as usize)?;
+        let mut pixels = vec![0; total_pixels];
+        let mut destination = 0usize;
 
-        // 初始化为透明色（索引 0）
-        pixels.resize(total_pixels, 0);
-
-        let mut src_x: usize = 0;
-        let mut dst_i: usize = 0;
-
-        while dst_i < total_pixels && offset < data.len() {
-            let cmd = data[offset];
+        while destination < total_pixels {
+            let command = *data.get(offset)?;
             offset += 1;
 
-            if cmd > 0x80 && cmd <= 0x80 + (width as u8) {
-                // 透明跳过命令：跳过 (cmd - 0x80) 个像素
-                let skip = (cmd - 0x80) as usize;
-                dst_i += skip;
-                src_x += skip;
-                if src_x >= width as usize {
-                    src_x -= width as usize;
-                    // y 增加，但 dst_i 已经包含这个变化
+            if command & 0x80 != 0 && command as usize <= 0x80 + width as usize {
+                destination = destination.checked_add((command - 0x80) as usize)?;
+                if destination > total_pixels {
+                    return None;
                 }
             } else {
-                // 绘制命令：读取 cmd 个像素字节
-                let count = cmd as usize;
-                if offset + count > data.len() {
-                    break;
+                let count = command as usize;
+                let source_end = offset.checked_add(count)?;
+                let destination_end = destination.checked_add(count)?;
+                if destination_end > total_pixels {
+                    return None;
                 }
-
-                for _ in 0..count {
-                    if dst_i < total_pixels {
-                        pixels[dst_i] = data[offset];
-                    }
-                    offset += 1;
-                    dst_i += 1;
-                    src_x += 1;
-                    if src_x >= width as usize {
-                        src_x = 0;
-                    }
-                }
+                pixels[destination..destination_end].copy_from_slice(data.get(offset..source_end)?);
+                offset = source_end;
+                destination = destination_end;
             }
         }
 
-        Some(RleBitmap {
+        Some(Self {
             width,
             height,
             pixels,
         })
     }
 
-    /// 将索引像素数据转换为 RGBA 缓冲区
     pub fn to_rgba(&self, palette: &Palette) -> Vec<u8> {
-        let mut rgba = Vec::with_capacity(self.pixels.len() * 4);
-        for &index in &self.pixels {
-            if index == 0 {
-                // 透明色
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                let (r, g, b) = palette.get_rgb(index);
-                rgba.extend_from_slice(&[r, g, b, 255]);
-            }
-        }
-        rgba
+        palette.apply_to_pixels(&self.pixels)
     }
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::palette::Palette;
 
     #[test]
-    fn test_invalid_data() {
+    fn decodes_literals_and_transparency() {
+        let data = [
+            3, 0, 2, 0, // 3x2
+            2, 1, 2,    // two literal pixels
+            0x82, // two transparent pixels
+            2, 3, 4, // two literal pixels
+        ];
+        let bitmap = RleBitmap::decode(&data).unwrap();
+        assert_eq!(bitmap.pixels, [1, 2, 0, 0, 3, 4]);
+    }
+
+    #[test]
+    fn skips_optional_magic() {
+        let data = [2, 0, 0, 0, 2, 0, 1, 0, 2, 7, 8];
+        let bitmap = RleBitmap::decode(&data).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (2, 1));
+        assert_eq!(bitmap.pixels, [7, 8]);
+    }
+
+    #[test]
+    fn rejects_invalid_data() {
         assert!(RleBitmap::decode(&[]).is_none());
-        assert!(RleBitmap::decode(&[0; 3]).is_none());
-    }
-
-    #[test]
-    fn test_simple_rle() {
-        // 2x2 像素：绘制 4 个像素（全是非透明）
-        let data = &[
-            0x02, 0x00, 0x00, 0x00, // magic
-            0x02, 0x00, // width = 2
-            0x02, 0x00, // height = 2
-            0x04,       // 绘制 4 个像素
-            0x01, 0x02, 0x03, 0x04, // 像素值
-        ];
-        let bmp = RleBitmap::decode(data).unwrap();
-        assert_eq!(bmp.width, 2);
-        assert_eq!(bmp.height, 2);
-        assert_eq!(bmp.pixels, vec![0x01, 0x02, 0x03, 0x04]);
-    }
-
-    #[test]
-    fn test_rle_with_skip() {
-        // 3x1 像素：绘制 1 个，跳过 1 个，绘制 1 个
-        let data = &[
-            0x03, 0x00, // width = 3
-            0x01, 0x00, // height = 1
-            0x01, 0xAA, // 绘制 1 个像素 AA
-            0x82,       // 跳过 2 个像素（但后面只剩 1 个位置）
-        ];
-        let bmp = RleBitmap::decode(data).unwrap();
-        assert_eq!(bmp.width, 3);
-        assert_eq!(bmp.height, 1);
-        assert_eq!(bmp.pixels[0], 0xAA);
-        assert_eq!(bmp.pixels[1], 0);
-        assert_eq!(bmp.pixels[2], 0);
+        assert!(RleBitmap::decode(&[0; 4]).is_none());
+        assert!(RleBitmap::decode(&[1, 0, 1, 0, 1]).is_none());
+        assert!(RleBitmap::decode(&[1, 0, 1, 0, 2, 1, 2]).is_none());
+        assert!(RleBitmap::decode(&[1, 0, 1, 0, 0x82]).is_none());
     }
 }

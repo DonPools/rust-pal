@@ -8,6 +8,6 @@ description = "仙剑奇侠传 Rust 版 - 桌面端入口"
 pal-core = { path = "../pal-core" }
 pal-assets = { path = "../pal-assets" }
 image = "0.24"
-winit = "0.30"
+winit = { version = "0.29", default-features = false, features = ["rwh_05"] }
 pixels = "0.14"
 rodio = "0.19"
