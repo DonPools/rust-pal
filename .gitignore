@@ -13,3 +13,9 @@ Cargo.lock
 
 # Misc
 *.bak
+
+# Game data (copyrighted)
+data/
+
+# Reference implementations (standalone repos)
+reference/
