@@ -4,6 +4,7 @@
 pub mod bitmap;
 pub mod mkf;
 pub mod palette;
+pub mod player_roles;
 pub mod rle;
 pub mod sprite;
 pub mod yj1;

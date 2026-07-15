@@ -13,6 +13,13 @@ pub struct RleBitmap {
 impl RleBitmap {
     /// Decode one complete bitmap. Truncated or overflowing commands fail.
     pub fn decode(data: &[u8]) -> Option<Self> {
+        Self::decode_with_size(data).map(|(bm, _)| bm)
+    }
+
+    /// Decode one complete bitmap and also return the number of bytes consumed.
+    ///
+    /// Useful when an RLE bitmap is embedded in a larger byte buffer.
+    pub fn decode_with_size(data: &[u8]) -> Option<(Self, usize)> {
         let mut offset = if data.get(..4) == Some([0x02, 0, 0, 0].as_slice()) {
             4
         } else {
@@ -52,11 +59,14 @@ impl RleBitmap {
             }
         }
 
-        Some(Self {
-            width,
-            height,
-            pixels,
-        })
+        Some((
+            Self {
+                width,
+                height,
+                pixels,
+            },
+            offset,
+        ))
     }
 
     pub fn to_rgba(&self, palette: &Palette) -> Vec<u8> {

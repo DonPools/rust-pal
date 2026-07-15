@@ -8,7 +8,31 @@ use pal_assets::yj1;
 pub const MAP_ROWS: usize = 128;
 pub const MAP_COLUMNS: usize = 64;
 pub const MAP_HALVES: usize = 2;
+pub const MAP_PIXEL_WIDTH: i32 = MAP_COLUMNS as i32 * 32;
+pub const MAP_PIXEL_HEIGHT: i32 = MAP_ROWS as i32 * 16 + 8;
 const MAP_DATA_LEN: usize = MAP_ROWS * MAP_COLUMNS * MAP_HALVES * 4;
+
+/// Convert an interleaved map tile coordinate to a logical world position.
+pub fn tile_to_world(x: usize, y: usize, h: usize) -> Option<(i32, i32)> {
+    if x >= MAP_COLUMNS || y >= MAP_ROWS || h >= MAP_HALVES {
+        return None;
+    }
+    Some((x as i32 * 32 + h as i32 * 16, y as i32 * 16 + h as i32 * 8))
+}
+
+/// Convert an aligned logical world position to an interleaved map tile.
+pub fn world_to_tile(world_x: i32, world_y: i32) -> Option<(usize, usize, usize)> {
+    if world_x < 0 || world_y < 0 || world_x % 16 != 0 {
+        return None;
+    }
+    let h = usize::from(world_x % 32 != 0);
+    if world_y % 16 != h as i32 * 8 {
+        return None;
+    }
+    let x = usize::try_from(world_x / 32).ok()?;
+    let y = usize::try_from(world_y / 16).ok()?;
+    (x < MAP_COLUMNS && y < MAP_ROWS).then_some((x, y, h))
+}
 
 /// A loaded map and its tile sprite sheet.
 pub struct Map {
@@ -87,6 +111,14 @@ impl Map {
             .unwrap_or(true)
     }
 
+    /// Check collision at an aligned logical world position.
+    pub fn is_world_blocked(&self, world_x: i32, world_y: i32) -> bool {
+        let Some((x, y, h)) = world_to_tile(world_x, world_y) else {
+            return true;
+        };
+        self.is_tile_blocked(x, y, h)
+    }
+
     pub fn tile_height(&self, x: usize, y: usize, h: usize, top: bool) -> Option<u8> {
         let mut word = self.tile_word(x, y, h)?;
         if top {
@@ -103,5 +135,26 @@ impl Map {
     pub fn decode_top_tile(&self, x: usize, y: usize, h: usize) -> Option<RleBitmap> {
         self.tile_sprite
             .decode_frame(self.get_top_tile_index(x, y, h)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tile_and_world_coordinates_round_trip() {
+        for coordinate in [(0, 0, 0), (1, 2, 1), (MAP_COLUMNS - 1, MAP_ROWS - 1, 1)] {
+            let world = tile_to_world(coordinate.0, coordinate.1, coordinate.2).unwrap();
+            assert_eq!(world_to_tile(world.0, world.1), Some(coordinate));
+        }
+    }
+
+    #[test]
+    fn world_coordinates_reject_bounds_and_unaligned_positions() {
+        assert_eq!(world_to_tile(-16, 0), None);
+        assert_eq!(world_to_tile(1, 0), None);
+        assert_eq!(world_to_tile(16, 0), None);
+        assert_eq!(world_to_tile(MAP_PIXEL_WIDTH, 0), None);
     }
 }
