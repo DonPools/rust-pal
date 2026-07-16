@@ -3,6 +3,7 @@
 
 pub mod bitmap;
 pub mod mkf;
+pub mod objects;
 pub mod palette;
 pub mod player_roles;
 pub mod rle;

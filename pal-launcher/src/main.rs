@@ -3,13 +3,15 @@
 use std::path::{Path, PathBuf};
 
 use pal_assets::mkf::MkfArchive;
+use pal_assets::objects::{GlobalObjects, ObjectLayout};
 use pal_assets::palette::Palette;
-use pal_assets::player_roles::PlayerRoleGraphics;
+use pal_assets::player_roles::PlayerRoles;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::GameState;
 use pal_core::map::{tile_to_world, Map};
+use pal_core::party::Party;
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
 use pal_core::script::{ScriptEvent, ScriptRuntime};
@@ -26,20 +28,25 @@ fn main() {
     let data_dir = workspace_data_dir();
     let check_only = std::env::args().any(|argument| argument == "--check-assets");
 
-    println!("Rust-PAL M2 interaction groundwork");
+    println!("Rust-PAL M3 story groundwork");
     println!("data: {}", data_dir.display());
 
     let palette = load_palette(&data_dir, DEFAULT_PALETTE).expect("failed to load palette");
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
+    let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
+    let global_objects =
+        load_global_objects(&data_dir).expect("failed to load global object definitions");
+    let party = Party::single(0, &player_roles).expect("failed to create initial party");
     let scene = scene_data
         .scene(DEFAULT_SCENE)
         .expect("default scene is missing");
     let map = load_map(&data_dir, scene.scene.map_num as usize).expect("failed to load map");
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
-    let (role_sprite_index, walk_frames) =
-        load_default_role_settings(&data_dir).expect("failed to load player role settings");
+    let leader = party.leader().expect("initial party has no leader");
+    let role_sprite_index = leader.attributes.scene_sprite_num as usize;
+    let walk_frames = leader.attributes.frames_per_direction();
     let player = create_player(
         &role_sprites,
         role_sprite_index,
@@ -52,7 +59,8 @@ fn main() {
         .expect("failed to create current scene event objects");
     let mut game = GameState::new(map, player, SCREEN_WIDTH, SCREEN_HEIGHT)
         .with_scene_number(scene.number as u16)
-        .with_scene_objects(scene_objects);
+        .with_scene_objects(scene_objects)
+        .with_party(party);
     let viewport = Viewport::from(game.camera);
     println!(
         "scene {} loaded: map {}, {} event objects, {} tile frames, palette {}, viewport ({}, {})",
@@ -67,6 +75,18 @@ fn main() {
 
     let mut renderer = Renderer::new(palette, SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize);
     if check_only {
+        let leader = game.party.leader().expect("loaded party has no leader");
+        assert!(leader.attributes.hp <= leader.attributes.max_hp);
+        assert!(leader.attributes.mp <= leader.attributes.max_mp);
+        assert!(
+            text.word(usize::from(leader.attributes.name_word_id))
+                .is_some_and(|name| !name.is_empty()),
+            "party leader references an unavailable name"
+        );
+        assert!(
+            global_objects.get(99).is_some(),
+            "item 99 has no object definition"
+        );
         assert!(
             scene.event_objects.iter().all(|event| event.sprite_num == 0
                 || role_sprites
@@ -341,6 +361,13 @@ fn main() {
             script_count,
         );
         println!(
+            "M3 data passed: {} party member, {} role definitions, {} {:?} object definitions",
+            game.party.members().len(),
+            player_roles.iter().len(),
+            global_objects.len(),
+            global_objects.layout(),
+        );
+        println!(
             "M2 flow passed: {intro_messages} intro messages, {intro_actions} intro actions, item 99 acquired, scene 3 loaded"
         );
         println!(
@@ -450,14 +477,16 @@ fn load_runtime_scene(
     })
 }
 
-fn load_default_role_settings(data_dir: &Path) -> Option<(usize, u8)> {
+fn load_player_roles(data_dir: &Path) -> Option<PlayerRoles> {
     let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
-    let graphics = PlayerRoleGraphics::parse(archive.read_chunk(3)?, 0)?;
-    Some((
-        graphics.sprite_num as usize,
-        if graphics.walk_frames == 4 { 4 } else { 3 },
-    ))
+    PlayerRoles::parse(archive.read_chunk(3)?)
+}
+
+fn load_global_objects(data_dir: &Path) -> Option<GlobalObjects> {
+    let data = std::fs::read(data_dir.join("SSS.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    GlobalObjects::parse(archive.read_chunk(2)?, ObjectLayout::Dos)
 }
 
 fn create_player(

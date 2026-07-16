@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::map::tile_to_world;
 use crate::map::{Map, MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
+use crate::party::Party;
 use crate::role::{Direction, Role};
 use crate::scene::{
     blocks_position, find_search_trigger, find_touch_trigger, SceneObject, TriggerRequest,
@@ -69,6 +70,7 @@ pub struct GameState<M = Map> {
     pub player: Role,
     pub scene_objects: Vec<SceneObject>,
     pub pending_trigger: Option<TriggerRequest>,
+    pub party: Party,
     inventory: BTreeMap<u16, u16>,
     pub camera: Camera,
 }
@@ -81,6 +83,7 @@ impl<M: CollisionMap> GameState<M> {
             player,
             scene_objects: Vec::new(),
             pending_trigger: None,
+            party: Party::default(),
             inventory: BTreeMap::new(),
             camera: Camera::new(viewport_width, viewport_height),
         };
@@ -95,6 +98,11 @@ impl<M: CollisionMap> GameState<M> {
 
     pub fn with_scene_number(mut self, scene_number: u16) -> Self {
         self.scene_number = scene_number;
+        self
+    }
+
+    pub fn with_party(mut self, party: Party) -> Self {
+        self.party = party;
         self
     }
 

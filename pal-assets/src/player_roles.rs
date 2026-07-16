@@ -1,36 +1,143 @@
-//! Selected fields from the `PLAYERROLES` table in `DATA.MKF` chunk 3.
+//! Player role definitions stored in `DATA.MKF` chunk 3.
 
 pub const PLAYER_ROLE_COUNT: usize = 6;
-const PLAYER_ARRAY_BYTES: usize = PLAYER_ROLE_COUNT * 2;
-const SPRITE_NUM_ARRAY_INDEX: usize = 2;
-const WALK_FRAMES_ARRAY_INDEX: usize = 64;
+pub const PLAYER_EQUIPMENT_COUNT: usize = 6;
+pub const PLAYER_MAGIC_COUNT: usize = 32;
+pub const MAGIC_ELEMENT_COUNT: usize = 5;
 
-/// Graphics settings for one playable role.
+const PLAYER_ARRAY_BYTES: usize = PLAYER_ROLE_COUNT * 2;
+const PLAYER_ROLE_ARRAY_COUNT: usize = 75;
+const PLAYER_ROLES_BYTES: usize = PLAYER_ROLE_ARRAY_COUNT * PLAYER_ARRAY_BYTES;
+
+/// Initial attributes and resource references for one playable role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerRole {
+    pub avatar: u16,
+    pub battle_sprite_num: u16,
+    pub scene_sprite_num: u16,
+    pub name_word_id: u16,
+    pub attack_all: bool,
+    pub level: u16,
+    pub max_hp: u16,
+    pub max_mp: u16,
+    pub hp: u16,
+    pub mp: u16,
+    pub equipment: [u16; PLAYER_EQUIPMENT_COUNT],
+    pub attack_strength: u16,
+    pub magic_strength: u16,
+    pub defense: u16,
+    pub dexterity: u16,
+    pub flee_rate: u16,
+    pub poison_resistance: u16,
+    pub elemental_resistance: [u16; MAGIC_ELEMENT_COUNT],
+    pub covered_by: u16,
+    pub magic: [u16; PLAYER_MAGIC_COUNT],
+    pub walk_frames: u16,
+}
+
+impl PlayerRole {
+    /// PAL stores four-frame walks explicitly and otherwise uses three frames.
+    pub fn frames_per_direction(&self) -> u8 {
+        if self.walk_frames == 4 {
+            4
+        } else {
+            3
+        }
+    }
+}
+
+/// The complete six-role `PLAYERROLES` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerRoles {
+    roles: [PlayerRole; PLAYER_ROLE_COUNT],
+}
+
+impl PlayerRoles {
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < PLAYER_ROLES_BYTES {
+            return None;
+        }
+        let roles: [Option<PlayerRole>; PLAYER_ROLE_COUNT] =
+            std::array::from_fn(|role_index| parse_role(data, role_index));
+        Some(Self {
+            roles: roles
+                .into_iter()
+                .collect::<Option<Vec<_>>>()?
+                .try_into()
+                .ok()?,
+        })
+    }
+
+    pub fn role(&self, role_index: usize) -> Option<&PlayerRole> {
+        self.roles.get(role_index)
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &PlayerRole> {
+        self.roles.iter()
+    }
+}
+
+/// Backwards-compatible graphics-only view used by scene setup code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerRoleGraphics {
-    /// Normal-scene sprite slot in `MGO.MKF`.
     pub sprite_num: u16,
-    /// Frames stored for each walking direction. Zero uses the legacy default.
     pub walk_frames: u16,
 }
 
 impl PlayerRoleGraphics {
-    /// Read one role from an uncompressed `PLAYERROLES` table.
     pub fn parse(data: &[u8], role_index: usize) -> Option<Self> {
-        if role_index >= PLAYER_ROLE_COUNT {
-            return None;
-        }
+        let roles = PlayerRoles::parse(data)?;
+        let role = roles.role(role_index)?;
         Some(Self {
-            sprite_num: read_player_array(data, SPRITE_NUM_ARRAY_INDEX, role_index)?,
-            walk_frames: read_player_array(data, WALK_FRAMES_ARRAY_INDEX, role_index)?,
+            sprite_num: role.scene_sprite_num,
+            walk_frames: role.walk_frames,
         })
     }
 }
 
-fn read_player_array(data: &[u8], array_index: usize, role_index: usize) -> Option<u16> {
-    let offset = array_index
+fn parse_role(data: &[u8], role: usize) -> Option<PlayerRole> {
+    Some(PlayerRole {
+        avatar: read_player_array(data, 0, role)?,
+        battle_sprite_num: read_player_array(data, 1, role)?,
+        scene_sprite_num: read_player_array(data, 2, role)?,
+        name_word_id: read_player_array(data, 3, role)?,
+        attack_all: read_player_array(data, 4, role)? != 0,
+        level: read_player_array(data, 6, role)?,
+        max_hp: read_player_array(data, 7, role)?,
+        max_mp: read_player_array(data, 8, role)?,
+        hp: read_player_array(data, 9, role)?,
+        mp: read_player_array(data, 10, role)?,
+        equipment: read_array(data, 11, role)?,
+        attack_strength: read_player_array(data, 17, role)?,
+        magic_strength: read_player_array(data, 18, role)?,
+        defense: read_player_array(data, 19, role)?,
+        dexterity: read_player_array(data, 20, role)?,
+        flee_rate: read_player_array(data, 21, role)?,
+        poison_resistance: read_player_array(data, 22, role)?,
+        elemental_resistance: read_array(data, 23, role)?,
+        covered_by: read_player_array(data, 31, role)?,
+        magic: read_array(data, 32, role)?,
+        walk_frames: read_player_array(data, 64, role)?,
+    })
+}
+
+fn read_array<const N: usize>(data: &[u8], first_array: usize, role: usize) -> Option<[u16; N]> {
+    let values: [Option<u16>; N] =
+        std::array::from_fn(|index| read_player_array(data, first_array + index, role));
+    values
+        .into_iter()
+        .collect::<Option<Vec<_>>>()?
+        .try_into()
+        .ok()
+}
+
+fn read_player_array(data: &[u8], array: usize, role: usize) -> Option<u16> {
+    if role >= PLAYER_ROLE_COUNT {
+        return None;
+    }
+    let offset = array
         .checked_mul(PLAYER_ARRAY_BYTES)?
-        .checked_add(role_index.checked_mul(2)?)?;
+        .checked_add(role.checked_mul(2)?)?;
     Some(u16::from_le_bytes(
         data.get(offset..offset + 2)?.try_into().ok()?,
     ))
@@ -40,28 +147,61 @@ fn read_player_array(data: &[u8], array_index: usize, role_index: usize) -> Opti
 mod tests {
     use super::*;
 
-    #[test]
-    fn reads_graphics_fields_for_selected_role() {
-        let mut data = vec![0; WALK_FRAMES_ARRAY_INDEX * PLAYER_ARRAY_BYTES + PLAYER_ARRAY_BYTES];
-        let role_index = PLAYER_ROLE_COUNT - 1;
-        let sprite_offset = SPRITE_NUM_ARRAY_INDEX * PLAYER_ARRAY_BYTES + role_index * 2;
-        let walk_offset = WALK_FRAMES_ARRAY_INDEX * PLAYER_ARRAY_BYTES + role_index * 2;
-        data[sprite_offset..sprite_offset + 2].copy_from_slice(&42u16.to_le_bytes());
-        data[walk_offset..walk_offset + 2].copy_from_slice(&3u16.to_le_bytes());
+    fn table() -> Vec<u8> {
+        let mut data = vec![0; PLAYER_ROLES_BYTES];
+        for array in 0..PLAYER_ROLE_ARRAY_COUNT {
+            for role in 0..PLAYER_ROLE_COUNT {
+                let value = (array * 10 + role) as u16;
+                let offset = array * PLAYER_ARRAY_BYTES + role * 2;
+                data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        data
+    }
 
+    #[test]
+    fn parses_role_attributes_and_nested_arrays() {
+        let roles = PlayerRoles::parse(&table()).unwrap();
+        let role = roles.role(5).unwrap();
+        assert_eq!(role.scene_sprite_num, 25);
+        assert_eq!(role.name_word_id, 35);
+        assert_eq!(role.level, 65);
+        assert_eq!(role.equipment, [115, 125, 135, 145, 155, 165]);
+        assert_eq!(role.elemental_resistance, [235, 245, 255, 265, 275]);
+        assert_eq!(role.magic[0], 325);
+        assert_eq!(role.magic[31], 635);
+        assert_eq!(role.walk_frames, 645);
+        assert_eq!(roles.iter().len(), PLAYER_ROLE_COUNT);
+    }
+
+    #[test]
+    fn normalizes_walking_frame_count() {
+        let mut data = table();
+        let offset = 64 * PLAYER_ARRAY_BYTES;
+        data[offset..offset + 2].copy_from_slice(&4u16.to_le_bytes());
         assert_eq!(
-            PlayerRoleGraphics::parse(&data, role_index),
-            Some(PlayerRoleGraphics {
-                sprite_num: 42,
-                walk_frames: 3,
-            })
+            PlayerRoles::parse(&data)
+                .unwrap()
+                .role(0)
+                .unwrap()
+                .frames_per_direction(),
+            4
+        );
+        assert_eq!(
+            PlayerRoles::parse(&data)
+                .unwrap()
+                .role(1)
+                .unwrap()
+                .frames_per_direction(),
+            3
         );
     }
 
     #[test]
     fn rejects_truncated_data_and_out_of_range_role() {
-        assert_eq!(PlayerRoleGraphics::parse(&[], 0), None);
-        let data = vec![0; WALK_FRAMES_ARRAY_INDEX * PLAYER_ARRAY_BYTES + PLAYER_ARRAY_BYTES];
-        assert_eq!(PlayerRoleGraphics::parse(&data, PLAYER_ROLE_COUNT), None);
+        assert!(PlayerRoles::parse(&table()[..PLAYER_ROLES_BYTES - 1]).is_none());
+        let roles = PlayerRoles::parse(&table()).unwrap();
+        assert!(roles.role(PLAYER_ROLE_COUNT).is_none());
+        assert!(PlayerRoleGraphics::parse(&table(), PLAYER_ROLE_COUNT).is_none());
     }
 }

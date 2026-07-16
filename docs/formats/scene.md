@@ -2,8 +2,9 @@
 
 ## 概述
 
-`SSS.MKF` 保存场景、事件对象、全局对象和脚本等数据。M2 当前解析零基 chunk 0、
-chunk 1 和 chunk 4；chunk 3 作为 `M.MSG` 消息偏移表由文本加载器读取。
+`SSS.MKF` 保存场景、事件对象、全局对象和脚本等数据。当前解析零基 chunk 0、
+chunk 1、chunk 2 和 chunk 4；chunk 3 作为 `M.MSG` 消息偏移表由文本加载器读取。
+全局对象的版本相关联合体布局见 [objects.md](objects.md)。
 
 | Chunk | 记录大小 | 内容 |
 |---:|---:|---|
