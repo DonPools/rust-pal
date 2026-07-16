@@ -6,11 +6,13 @@ use pal_assets::mkf::MkfArchive;
 use pal_assets::palette::Palette;
 use pal_assets::player_roles::PlayerRoleGraphics;
 use pal_assets::scene::SceneData;
+use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::GameState;
 use pal_core::map::{tile_to_world, Map, MAP_COLUMNS, MAP_HALVES, MAP_ROWS};
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
+use pal_core::script::{ScriptEvent, ScriptRuntime};
 use pal_desktop::renderer::Renderer;
 use pal_desktop::window::{render_tile_map, run_game_window, Viewport};
 
@@ -30,6 +32,7 @@ fn main() {
     let palette = load_palette(&data_dir, DEFAULT_PALETTE).expect("failed to load palette");
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
+    let script_table = load_script_table(&data_dir).expect("failed to load script table");
     let scene = scene_data
         .scene(DEFAULT_SCENE)
         .expect("default scene is missing");
@@ -149,6 +152,41 @@ fn main() {
             .zip(text_before.chunks_exact(4))
             .filter(|(with_text, before)| with_text != before)
             .count();
+        let script_object = game
+            .scene_objects
+            .iter()
+            .find(|object| {
+                script_table
+                    .entry(object.trigger_script)
+                    .is_some_and(|entry| entry.opcode == 0xffff)
+            })
+            .expect("scene has no directly displayable message script");
+        let trigger = pal_core::scene::TriggerRequest {
+            object_id: script_object.id,
+            script_entry: script_object.trigger_script,
+            kind: pal_core::scene::TriggerKind::Search,
+        };
+        let script_count = script_table.len();
+        let mut scripts = ScriptRuntime::new(script_table);
+        assert!(scripts.start(trigger));
+        let mut script_messages = 0;
+        loop {
+            match scripts
+                .advance()
+                .expect("script runtime stopped without an event")
+            {
+                ScriptEvent::Message { message_id, .. } => {
+                    assert!(
+                        text.message(usize::from(message_id)).is_some(),
+                        "script references an unavailable message"
+                    );
+                    script_messages += 1;
+                }
+                ScriptEvent::Completed { .. } => break,
+                event => panic!("message script did not complete: {event:?}"),
+            }
+        }
+        assert!(script_messages > 0, "message script yielded no messages");
 
         assert!(visible_pixels > 0, "rendered map is blank");
         assert!(
@@ -189,13 +227,17 @@ fn main() {
             font.glyph_count(),
         );
         println!(
+            "script data passed: {} records, {script_messages} messages yielded",
+            script_count,
+        );
+        println!(
             "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"
         );
         return;
     }
 
-    run_game_window(renderer, game, role_sprites);
+    run_game_window(renderer, game, role_sprites, script_table, text, font);
 }
 
 fn workspace_data_dir() -> PathBuf {
@@ -233,6 +275,12 @@ fn load_text_resources(data_dir: &Path) -> Option<(TextLibrary, BitmapFont)> {
         TextLibrary::parse(&word_data, &message_data, sss.read_chunk(3)?)?,
         BitmapFont::parse(&code_table, &font_data)?,
     ))
+}
+
+fn load_script_table(data_dir: &Path) -> Option<ScriptTable> {
+    let data = std::fs::read(data_dir.join("SSS.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    ScriptTable::parse(archive.read_chunk(4)?)
 }
 
 fn load_role_sprites(data_dir: &Path) -> Option<RoleSprites> {

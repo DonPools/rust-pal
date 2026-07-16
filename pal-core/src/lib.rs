@@ -5,3 +5,4 @@ pub mod game;
 pub mod map;
 pub mod role;
 pub mod scene;
+pub mod script;

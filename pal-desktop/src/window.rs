@@ -4,10 +4,13 @@ use std::time::{Duration, Instant};
 
 use crate::renderer::Renderer;
 use pal_assets::rle::RleBitmap;
+use pal_assets::script::ScriptTable;
+use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::{Camera, GameInput, GameState, UPDATE_INTERVAL_MS};
 use pal_core::map::{Map, MAP_COLUMNS, MAP_ROWS};
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
+use pal_core::script::{DialogPosition, ScriptEvent, ScriptRuntime};
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
@@ -108,7 +111,20 @@ impl HeldInput {
     }
 }
 
-pub fn run_game_window(mut renderer: Renderer, mut game: GameState, role_sprites: RoleSprites) {
+#[derive(Debug, Clone, Copy)]
+struct ActiveDialog {
+    message_id: u16,
+    position: DialogPosition,
+}
+
+pub fn run_game_window(
+    mut renderer: Renderer,
+    mut game: GameState,
+    role_sprites: RoleSprites,
+    script_table: ScriptTable,
+    text: TextLibrary,
+    font: BitmapFont,
+) {
     let viewport = Viewport::from(game.camera);
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let window = Box::leak(Box::new(
@@ -131,7 +147,17 @@ pub fn run_game_window(mut renderer: Renderer, mut game: GameState, role_sprites
     let mut pixels = Pixels::new(viewport.width, viewport.height, surface)
         .expect("failed to create pixel surface");
     let mut show_collision = false;
-    render_game(&mut renderer, &game, &role_sprites, show_collision);
+    let mut scripts = ScriptRuntime::new(script_table);
+    let mut dialog = None;
+    render_game(
+        &mut renderer,
+        &game,
+        &role_sprites,
+        show_collision,
+        dialog.as_ref(),
+        &text,
+        &font,
+    );
 
     let tick = Duration::from_millis(UPDATE_INTERVAL_MS);
     let mut last_update = Instant::now();
@@ -153,7 +179,15 @@ pub fn run_game_window(mut renderer: Renderer, mut game: GameState, role_sprites
                             } else {
                                 "Rust-PAL"
                             });
-                            render_game(&mut renderer, &game, &role_sprites, show_collision);
+                            render_game(
+                                &mut renderer,
+                                &game,
+                                &role_sprites,
+                                show_collision,
+                                dialog.as_ref(),
+                                &text,
+                                &font,
+                            );
                         } else {
                             input.set_key(code, pressed, event.repeat);
                         }
@@ -185,17 +219,48 @@ pub fn run_game_window(mut renderer: Renderer, mut game: GameState, role_sprites
 
                 let mut changed = false;
                 while accumulator >= tick {
-                    changed |= game.update(input.sample());
+                    let sampled = input.sample();
+                    if dialog.is_some() {
+                        if sampled.confirm || sampled.cancel {
+                            dialog = None;
+                            changed = true;
+                            advance_script(&mut scripts, &mut game, &mut dialog, &mut |title| {
+                                window.set_title(title)
+                            });
+                        }
+                    } else if scripts.is_active() {
+                        advance_script(&mut scripts, &mut game, &mut dialog, &mut |title| {
+                            window.set_title(title)
+                        });
+                        changed = true;
+                    } else {
+                        let tick_changed = game.update(sampled);
+                        changed |= tick_changed;
+                        if tick_changed {
+                            if let Some(trigger) = game.take_trigger() {
+                                if scripts.start(trigger) {
+                                    advance_script(
+                                        &mut scripts,
+                                        &mut game,
+                                        &mut dialog,
+                                        &mut |title| window.set_title(title),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     accumulator -= tick;
                 }
-                if let Some(trigger) = game.pending_trigger {
-                    window.set_title(&format!(
-                        "Rust-PAL [event {} script {}]",
-                        trigger.object_id, trigger.script_entry
-                    ));
-                }
                 if changed {
-                    render_game(&mut renderer, &game, &role_sprites, show_collision);
+                    render_game(
+                        &mut renderer,
+                        &game,
+                        &role_sprites,
+                        show_collision,
+                        dialog.as_ref(),
+                        &text,
+                        &font,
+                    );
                 }
                 if renderer.is_dirty() {
                     window.request_redraw();
@@ -212,6 +277,9 @@ fn render_game(
     game: &GameState,
     role_sprites: &RoleSprites,
     show_collision: bool,
+    dialog: Option<&ActiveDialog>,
+    text: &TextLibrary,
+    font: &BitmapFont,
 ) {
     let viewport = Viewport::from(game.camera);
     render_tile_map(
@@ -225,6 +293,123 @@ fn render_game(
     if show_collision {
         render_collision_overlay(renderer, &game.map, &game.player, viewport);
     }
+    if let Some(dialog) = dialog {
+        render_dialog(renderer, text, font, dialog);
+    }
+}
+
+fn advance_script(
+    scripts: &mut ScriptRuntime,
+    game: &mut GameState,
+    dialog: &mut Option<ActiveDialog>,
+    set_title: &mut impl FnMut(&str),
+) {
+    match scripts.advance() {
+        Some(ScriptEvent::Message {
+            message_id,
+            position,
+        }) => {
+            *dialog = Some(ActiveDialog {
+                message_id,
+                position,
+            });
+            set_title("Rust-PAL [Dialog]");
+        }
+        Some(ScriptEvent::Completed {
+            trigger,
+            next_entry,
+        }) => {
+            if let Some(object) = game
+                .scene_objects
+                .iter_mut()
+                .find(|object| object.id == trigger.object_id)
+            {
+                object.trigger_script = next_entry;
+            }
+            set_title("Rust-PAL");
+        }
+        Some(ScriptEvent::Unsupported {
+            trigger,
+            entry,
+            opcode,
+        }) => {
+            game.pending_trigger = Some(trigger);
+            set_title(&format!(
+                "Rust-PAL [unsupported script {entry} opcode {opcode:04x}]"
+            ));
+        }
+        Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
+            game.pending_trigger = Some(trigger);
+            set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
+        }
+        Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
+            game.pending_trigger = Some(trigger);
+            set_title(&format!("Rust-PAL [script loop at {entry}]"));
+        }
+        None => {}
+    }
+}
+
+fn render_dialog(
+    renderer: &mut Renderer,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    dialog: &ActiveDialog,
+) {
+    let y = match dialog.position {
+        DialogPosition::Upper => 8,
+        DialogPosition::Lower => 130,
+        DialogPosition::Center | DialogPosition::CenterWindow => 68,
+    };
+    fill_rect(renderer, 8, y, 304, 62, [8, 8, 12, 255]);
+    fill_rect(renderer, 8, y, 304, 1, [224, 224, 208, 255]);
+    fill_rect(renderer, 8, y + 61, 304, 1, [224, 224, 208, 255]);
+    fill_rect(renderer, 8, y, 1, 62, [224, 224, 208, 255]);
+    fill_rect(renderer, 311, y, 1, 62, [224, 224, 208, 255]);
+
+    let Some(message) = text.message(usize::from(dialog.message_id)) else {
+        return;
+    };
+    for (line, bytes) in wrap_big5_lines(message, 272)
+        .into_iter()
+        .take(3)
+        .enumerate()
+    {
+        renderer.draw_big5_text(font, bytes, 20, y + 8 + line as i32 * 16, 0x4f);
+    }
+}
+
+fn fill_rect(renderer: &mut Renderer, x: i32, y: i32, width: i32, height: i32, color: [u8; 4]) {
+    for row in y..y + height {
+        for column in x..x + width {
+            renderer.put_rgba(column, row, color);
+        }
+    }
+}
+
+fn wrap_big5_lines(text: &[u8], max_width: usize) -> Vec<&[u8]> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    let mut width = 0;
+    while index < text.len() {
+        let (bytes, character_width) = if text[index] >= 0x80 && index + 1 < text.len() {
+            (2, 16)
+        } else {
+            (1, 8)
+        };
+        if width + character_width > max_width && index > start {
+            lines.push(&text[start..index]);
+            start = index;
+            width = 0;
+        }
+        index += bytes;
+        width += character_width;
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
 }
 
 /// Render the map and depth-sort characters with elevated covering tiles.
@@ -578,5 +763,12 @@ mod tests {
         assert_eq!(cover_tile_candidate(10, 20, 1, 2), (10, 21, 0));
         assert_eq!(cover_tile_candidate(10, 20, 0, 4), (10, 20, 1));
         assert_eq!(cover_tile_candidate(10, 20, 1, 4), (11, 21, 0));
+    }
+
+    #[test]
+    fn wraps_big5_without_splitting_double_byte_characters() {
+        let text = [0xb8, 0x67, 0xc5, 0xe7, b'A'];
+        let lines = wrap_big5_lines(&text, 24);
+        assert_eq!(lines, [&text[..2], &text[2..]]);
     }
 }

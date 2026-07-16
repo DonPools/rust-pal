@@ -7,6 +7,7 @@ pub mod palette;
 pub mod player_roles;
 pub mod rle;
 pub mod scene;
+pub mod script;
 pub mod sprite;
 pub mod text;
 pub mod yj1;
