@@ -5,6 +5,7 @@
 use pal_assets::bitmap::Bitmap;
 use pal_assets::palette::Palette;
 use pal_assets::rle::RleBitmap;
+use pal_assets::text::{BitmapFont, FontGlyph};
 
 /// 渲染管线状态
 pub struct Renderer {
@@ -110,8 +111,83 @@ impl Renderer {
         self.dirty = true;
     }
 
+    /// Draw one 16x15 monochrome PAL font glyph in a palette color.
+    pub fn draw_font_glyph(&mut self, glyph: &FontGlyph, x: i32, y: i32, palette_index: u8) {
+        let (r, g, b) = self.palette.get_rgb(palette_index);
+        for (row, bytes) in glyph.rows.iter().enumerate() {
+            for column in 0..16 {
+                if bytes[column / 8] & (0x80 >> (column % 8)) != 0 {
+                    self.put_rgba(x + column as i32, y + row as i32, [r, g, b, 255]);
+                }
+            }
+        }
+    }
+
+    /// Draw Big5-encoded text using the original 16x15 PAL bitmap font.
+    pub fn draw_big5_text(
+        &mut self,
+        font: &BitmapFont,
+        text: &[u8],
+        x: i32,
+        y: i32,
+        palette_index: u8,
+    ) {
+        let mut cursor_x = x;
+        let mut index = 0;
+        while index < text.len() {
+            if text[index] < 0x80 {
+                cursor_x += 8;
+                index += 1;
+                continue;
+            }
+            let Some(trail) = text.get(index + 1) else {
+                break;
+            };
+            let code = u16::from_be_bytes([text[index], *trail]);
+            if let Some(glyph) = font.glyph(code) {
+                self.draw_font_glyph(glyph, cursor_x, y, palette_index);
+            }
+            cursor_x += 16;
+            index += 2;
+        }
+    }
+
     /// 清屏为黑色
     pub fn clear_black(&mut self) {
         self.clear(0, 0, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pal_assets::palette::PaletteColor;
+
+    fn font_with_left_pixels() -> BitmapFont {
+        let mut data = vec![0; 0x682 + 30];
+        data[0x682] = 0xc0;
+        BitmapFont::parse(&[0xb8, 0x67], &data).unwrap()
+    }
+
+    fn renderer() -> Renderer {
+        let mut palette = Palette::default();
+        palette.colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
+        Renderer::new(palette, 24, 15)
+    }
+
+    #[test]
+    fn big5_text_clips_negative_coordinates_and_advances_past_ascii() {
+        let font = font_with_left_pixels();
+        let mut renderer = renderer();
+
+        renderer.draw_big5_text(&font, &[0xb8, 0x67], -1, 0, 1);
+        assert_eq!(&renderer.screen()[0..4], &[252, 0, 0, 255]);
+
+        renderer.clear_black();
+        renderer.draw_big5_text(&font, &[b'A', 0xb8, 0x67], 0, 0, 1);
+        assert_eq!(&renderer.screen()[8 * 4..9 * 4], &[252, 0, 0, 255]);
+        assert_eq!(&renderer.screen()[9 * 4..10 * 4], &[252, 0, 0, 255]);
+
+        renderer.draw_big5_text(&font, &[0xb8], 0, 0, 1);
     }
 }

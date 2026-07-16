@@ -6,6 +6,7 @@ use pal_assets::mkf::MkfArchive;
 use pal_assets::palette::Palette;
 use pal_assets::player_roles::PlayerRoleGraphics;
 use pal_assets::scene::SceneData;
+use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::GameState;
 use pal_core::map::{tile_to_world, Map, MAP_COLUMNS, MAP_HALVES, MAP_ROWS};
 use pal_core::role::{Direction, Role, RoleSprites};
@@ -28,6 +29,7 @@ fn main() {
 
     let palette = load_palette(&data_dir, DEFAULT_PALETTE).expect("failed to load palette");
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
+    let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
     let scene = scene_data
         .scene(DEFAULT_SCENE)
         .expect("default scene is missing");
@@ -135,6 +137,18 @@ fn main() {
             .zip(object_map_only.chunks_exact(4))
             .filter(|(with_object, map_pixel)| with_object != map_pixel)
             .count();
+        let text_before = renderer.screen().to_vec();
+        let sample_word = (0..text.word_count())
+            .filter_map(|index| text.word(index))
+            .find(|word| !word.is_empty())
+            .expect("WORD.DAT has no displayable sample");
+        renderer.draw_big5_text(&font, sample_word, 8, 8, 0x4f);
+        let text_pixels = renderer
+            .screen()
+            .chunks_exact(4)
+            .zip(text_before.chunks_exact(4))
+            .filter(|(with_text, before)| with_text != before)
+            .count();
 
         assert!(visible_pixels > 0, "rendered map is blank");
         assert!(
@@ -148,6 +162,10 @@ fn main() {
         assert!(
             event_object_pixels > 0,
             "event object did not change the framebuffer"
+        );
+        assert!(
+            text_pixels > 0,
+            "bitmap text did not change the framebuffer"
         );
         println!(
             "scene sprite rendered: {sprite_pixels} pixels, {} slots loaded",
@@ -163,6 +181,12 @@ fn main() {
         println!(
             "event object {} rendered: {event_object_pixels} pixels",
             visible_object.id
+        );
+        println!(
+            "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels",
+            text.word_count(),
+            text.message_count(),
+            font.glyph_count(),
         );
         println!(
             "asset check passed: {visible_pixels} visible pixels, \
@@ -196,6 +220,19 @@ fn load_map(data_dir: &Path, map_num: usize) -> Option<Map> {
 fn load_scene_data(data_dir: &Path) -> Option<SceneData> {
     let data = std::fs::read(data_dir.join("SSS.MKF")).ok()?;
     SceneData::parse(&data)
+}
+
+fn load_text_resources(data_dir: &Path) -> Option<(TextLibrary, BitmapFont)> {
+    let sss_data = std::fs::read(data_dir.join("SSS.MKF")).ok()?;
+    let sss = MkfArchive::new(&sss_data)?;
+    let word_data = std::fs::read(data_dir.join("WORD.DAT")).ok()?;
+    let message_data = std::fs::read(data_dir.join("M.MSG")).ok()?;
+    let code_table = std::fs::read(data_dir.join("WOR16.ASC")).ok()?;
+    let font_data = std::fs::read(data_dir.join("WOR16.FON")).ok()?;
+    Some((
+        TextLibrary::parse(&word_data, &message_data, sss.read_chunk(3)?)?,
+        BitmapFont::parse(&code_table, &font_data)?,
+    ))
 }
 
 fn load_role_sprites(data_dir: &Path) -> Option<RoleSprites> {
