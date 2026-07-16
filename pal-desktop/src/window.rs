@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::audio::SoundEffects;
 use crate::renderer::Renderer;
 use pal_assets::rle::RleBitmap;
 use pal_assets::script::ScriptTable;
@@ -40,6 +41,7 @@ pub struct GameResources {
     pub initial_enter_script: u16,
     pub text: TextLibrary,
     pub font: BitmapFont,
+    pub voc_mkf: Vec<u8>,
 }
 
 impl Viewport {
@@ -134,6 +136,46 @@ struct ActiveDialog {
     page: usize,
 }
 
+const INVENTORY_VISIBLE_ROWS: usize = 8;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct InventoryMenu {
+    selected: usize,
+}
+
+impl InventoryMenu {
+    fn update(&mut self, direction: Option<Direction>, item_count: usize) {
+        if item_count == 0 {
+            self.selected = 0;
+            return;
+        }
+        match direction {
+            Some(Direction::North) => self.selected = self.selected.saturating_sub(1),
+            Some(Direction::South) => self.selected = (self.selected + 1).min(item_count - 1),
+            _ => {}
+        }
+    }
+
+    fn first_visible(self, item_count: usize) -> usize {
+        self.selected
+            .min(item_count.saturating_sub(1))
+            .saturating_sub(INVENTORY_VISIBLE_ROWS - 1)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UiRenderContext<'a> {
+    dialog: Option<&'a ActiveDialog>,
+    inventory_menu: Option<&'a InventoryMenu>,
+    text: &'a TextLibrary,
+    font: &'a BitmapFont,
+}
+
+struct ScriptServices {
+    pending_enter_script: Option<u16>,
+    sound_effects: SoundEffects,
+}
+
 pub fn run_game_window<L>(
     mut renderer: Renderer,
     mut game: GameState,
@@ -148,6 +190,7 @@ pub fn run_game_window<L>(
         initial_enter_script,
         text,
         font,
+        voc_mkf,
     } = resources;
     let viewport = Viewport::from(game.camera);
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -173,7 +216,11 @@ pub fn run_game_window<L>(
     let mut show_collision = false;
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
-    let mut pending_enter_script = None;
+    let mut inventory_menu = None;
+    let mut script_services = ScriptServices {
+        pending_enter_script: None,
+        sound_effects: SoundEffects::new(&voc_mkf).expect("failed to load VOC sound effects"),
+    };
     if initial_enter_script != 0 {
         scripts.start(pal_core::scene::TriggerRequest {
             object_id: 0xffff,
@@ -186,9 +233,12 @@ pub fn run_game_window<L>(
         &game,
         &role_sprites,
         show_collision,
-        dialog.as_ref(),
-        &text,
-        &font,
+        UiRenderContext {
+            dialog: dialog.as_ref(),
+            inventory_menu: inventory_menu.as_ref(),
+            text: &text,
+            font: &font,
+        },
     );
 
     let tick = Duration::from_millis(UPDATE_INTERVAL_MS);
@@ -216,9 +266,12 @@ pub fn run_game_window<L>(
                                 &game,
                                 &role_sprites,
                                 show_collision,
-                                dialog.as_ref(),
-                                &text,
-                                &font,
+                                UiRenderContext {
+                                    dialog: dialog.as_ref(),
+                                    inventory_menu: inventory_menu.as_ref(),
+                                    text: &text,
+                                    font: &font,
+                                },
                             );
                         } else {
                             input.set_key(code, pressed, event.repeat);
@@ -266,10 +319,18 @@ pub fn run_game_window<L>(
                                     &mut dialog,
                                     &role_sprites,
                                     &mut load_scene,
-                                    &mut pending_enter_script,
+                                    &mut script_services,
                                     &mut |title| window.set_title(title),
                                 );
                             }
+                        }
+                    } else if let Some(menu) = inventory_menu.as_mut() {
+                        changed = sampled.cancel || sampled.direction.is_some();
+                        if sampled.cancel {
+                            inventory_menu = None;
+                            window.set_title("Rust-PAL");
+                        } else {
+                            menu.update(sampled.direction, game.inventory().len());
                         }
                     } else if scripts.is_active() {
                         advance_script(
@@ -278,11 +339,18 @@ pub fn run_game_window<L>(
                             &mut dialog,
                             &role_sprites,
                             &mut load_scene,
-                            &mut pending_enter_script,
+                            &mut script_services,
                             &mut |title| window.set_title(title),
                         );
                         changed = true;
                     } else {
+                        if sampled.cancel {
+                            inventory_menu = Some(InventoryMenu::default());
+                            window.set_title("Rust-PAL [Inventory]");
+                            changed = true;
+                            accumulator -= tick;
+                            continue;
+                        }
                         let tick_changed = game.update(sampled);
                         changed |= tick_changed;
                         if tick_changed {
@@ -294,7 +362,7 @@ pub fn run_game_window<L>(
                                         &mut dialog,
                                         &role_sprites,
                                         &mut load_scene,
-                                        &mut pending_enter_script,
+                                        &mut script_services,
                                         &mut |title| window.set_title(title),
                                     );
                                 }
@@ -309,9 +377,12 @@ pub fn run_game_window<L>(
                         &game,
                         &role_sprites,
                         show_collision,
-                        dialog.as_ref(),
-                        &text,
-                        &font,
+                        UiRenderContext {
+                            dialog: dialog.as_ref(),
+                            inventory_menu: inventory_menu.as_ref(),
+                            text: &text,
+                            font: &font,
+                        },
                     );
                 }
                 if renderer.is_dirty() {
@@ -329,9 +400,7 @@ fn render_game(
     game: &GameState,
     role_sprites: &RoleSprites,
     show_collision: bool,
-    dialog: Option<&ActiveDialog>,
-    text: &TextLibrary,
-    font: &BitmapFont,
+    ui: UiRenderContext<'_>,
 ) {
     let viewport = Viewport::from(game.camera);
     render_tile_map(
@@ -345,8 +414,10 @@ fn render_game(
     if show_collision {
         render_collision_overlay(renderer, &game.map, &game.player, viewport);
     }
-    if let Some(dialog) = dialog {
-        render_dialog(renderer, text, font, dialog);
+    if let Some(dialog) = ui.dialog {
+        render_dialog(renderer, ui.text, ui.font, dialog);
+    } else if let Some(menu) = ui.inventory_menu {
+        render_inventory_menu(renderer, game, ui.text, ui.font, *menu);
     }
 }
 
@@ -356,7 +427,7 @@ fn advance_script<L>(
     dialog: &mut Option<ActiveDialog>,
     role_sprites: &RoleSprites,
     load_scene: &mut L,
-    pending_enter_script: &mut Option<u16>,
+    services: &mut ScriptServices,
     set_title: &mut impl FnMut(&str),
 ) where
     L: FnMut(u16, &RoleSprites) -> Option<LoadedScene>,
@@ -380,9 +451,15 @@ fn advance_script<L>(
                 return;
             };
             game.replace_scene(scene.number, scene.map, scene.objects);
-            *pending_enter_script = (scene.enter_script != 0).then_some(scene.enter_script);
+            services.pending_enter_script = (scene.enter_script != 0).then_some(scene.enter_script);
             set_title(&format!("Rust-PAL [scene {}]", scene.number));
         }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaySound { sound_id }))
+            if !services.sound_effects.play(sound_id) =>
+        {
+            set_title(&format!("Rust-PAL [invalid sound {sound_id}]"));
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaySound { .. })) => {}
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");
         }
@@ -398,7 +475,7 @@ fn advance_script<L>(
             {
                 object.trigger_script = next_entry;
             }
-            if let Some(entry) = pending_enter_script.take() {
+            if let Some(entry) = services.pending_enter_script.take() {
                 let trigger = pal_core::scene::TriggerRequest {
                     object_id: 0xffff,
                     script_entry: entry,
@@ -458,6 +535,107 @@ fn render_dialog(
         .enumerate()
     {
         renderer.draw_big5_text(font, bytes, 20, y + 8 + line as i32 * 16, 0x4f);
+    }
+}
+
+fn render_inventory_menu(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    menu: InventoryMenu,
+) {
+    const PANEL_X: i32 = 132;
+    const PANEL_Y: i32 = 12;
+    const PANEL_WIDTH: i32 = 180;
+    const ROW_HEIGHT: i32 = 20;
+
+    let inventory = game.inventory().collect::<Vec<_>>();
+    let first = menu.first_visible(inventory.len());
+    fill_rect(
+        renderer,
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        176,
+        [8, 8, 12, 255],
+    );
+    stroke_rect(
+        renderer,
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        176,
+        [224, 224, 208, 255],
+    );
+
+    for (row, &(item_id, amount)) in inventory
+        .iter()
+        .skip(first)
+        .take(INVENTORY_VISIBLE_ROWS)
+        .enumerate()
+    {
+        let y = PANEL_Y + 8 + row as i32 * ROW_HEIGHT;
+        if first + row == menu.selected {
+            stroke_rect(
+                renderer,
+                PANEL_X + 5,
+                y - 3,
+                PANEL_WIDTH - 10,
+                19,
+                [224, 192, 64, 255],
+            );
+        }
+        if let Some(name) = text.word(usize::from(item_id)) {
+            renderer.draw_big5_text(font, name, PANEL_X + 12, y, 0x4f);
+        }
+        draw_number(
+            renderer,
+            amount,
+            PANEL_X + PANEL_WIDTH - 28,
+            y + 4,
+            [240, 240, 224, 255],
+        );
+    }
+}
+
+fn stroke_rect(renderer: &mut Renderer, x: i32, y: i32, width: i32, height: i32, color: [u8; 4]) {
+    fill_rect(renderer, x, y, width, 1, color);
+    fill_rect(renderer, x, y + height - 1, width, 1, color);
+    fill_rect(renderer, x, y, 1, height, color);
+    fill_rect(renderer, x + width - 1, y, 1, height, color);
+}
+
+fn draw_number(renderer: &mut Renderer, value: u16, x: i32, y: i32, color: [u8; 4]) {
+    const DIGITS: [[u8; 5]; 10] = [
+        [0b111, 0b101, 0b101, 0b101, 0b111],
+        [0b010, 0b110, 0b010, 0b010, 0b111],
+        [0b111, 0b001, 0b111, 0b100, 0b111],
+        [0b111, 0b001, 0b111, 0b001, 0b111],
+        [0b101, 0b101, 0b111, 0b001, 0b001],
+        [0b111, 0b100, 0b111, 0b001, 0b111],
+        [0b111, 0b100, 0b111, 0b101, 0b111],
+        [0b111, 0b001, 0b010, 0b010, 0b010],
+        [0b111, 0b101, 0b111, 0b101, 0b111],
+        [0b111, 0b101, 0b111, 0b001, 0b111],
+    ];
+
+    let digits = if value >= 10 {
+        [Some((value / 10) % 10), Some(value % 10)]
+    } else {
+        [None, Some(value)]
+    };
+    for (position, digit) in digits.into_iter().enumerate() {
+        let Some(digit) = digit else {
+            continue;
+        };
+        for (row, bits) in DIGITS[usize::from(digit)].iter().enumerate() {
+            for column in 0..3 {
+                if bits & (0b100 >> column) != 0 {
+                    renderer.put_rgba(x + position as i32 * 5 + column, y + row as i32, color);
+                }
+            }
+        }
     }
 }
 
@@ -869,5 +1047,23 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[..3].iter().map(|line| line.len()).sum::<usize>(), 102);
         assert_eq!(lines[3].len(), 7);
+    }
+
+    #[test]
+    fn inventory_menu_clamps_selection_and_scrolls_visible_rows() {
+        let mut menu = InventoryMenu::default();
+        menu.update(Some(Direction::North), 10);
+        assert_eq!(menu.selected, 0);
+        menu.update(Some(Direction::South), 10);
+        assert_eq!(menu.selected, 1);
+        for _ in 0..20 {
+            menu.update(Some(Direction::South), 10);
+        }
+        assert_eq!(menu.selected, 9);
+        assert_eq!(menu.first_visible(10), 2);
+
+        menu.update(None, 0);
+        assert_eq!(menu.selected, 0);
+        assert_eq!(menu.first_visible(0), 0);
     }
 }

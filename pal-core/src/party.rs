@@ -34,6 +34,33 @@ impl Party {
         self.members.first()
     }
 
+    /// Replace the active party from zero-based role IDs.
+    pub fn replace(&mut self, role_ids: &[u16], roles: &PlayerRoles) -> bool {
+        if role_ids.is_empty() || role_ids.len() > MAX_PARTY_MEMBERS {
+            return false;
+        }
+
+        let mut replacement = Vec::with_capacity(role_ids.len());
+        for &role_id in role_ids {
+            if replacement
+                .iter()
+                .any(|member: &PartyMember| member.role_id == role_id)
+            {
+                return false;
+            }
+            let Some(attributes) = roles.role(usize::from(role_id)).cloned() else {
+                return false;
+            };
+            replacement.push(PartyMember {
+                role_id,
+                attributes,
+            });
+        }
+
+        self.members = replacement;
+        true
+    }
+
     pub fn add(&mut self, role_id: u16, roles: &PlayerRoles) -> bool {
         if self.members.len() >= MAX_PARTY_MEMBERS
             || usize::from(role_id) >= PLAYER_ROLE_COUNT
@@ -93,5 +120,25 @@ mod tests {
         assert!(party.remove(0));
         assert_eq!(party.leader().unwrap().role_id, 1);
         assert!(!party.remove(0));
+    }
+
+    #[test]
+    fn replaces_members_atomically() {
+        let roles = roles();
+        let mut party = Party::single(0, &roles).unwrap();
+        assert!(party.replace(&[2, 1], &roles));
+        assert_eq!(
+            party
+                .members()
+                .iter()
+                .map(|member| member.role_id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+
+        assert!(!party.replace(&[2, 2], &roles));
+        assert_eq!(party.members().len(), 2);
+        assert_eq!(party.leader().unwrap().role_id, 2);
+        assert!(!party.replace(&[], &roles));
     }
 }

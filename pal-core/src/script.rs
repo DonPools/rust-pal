@@ -49,6 +49,14 @@ pub enum ScriptAction {
         item_id: u16,
         amount: i16,
     },
+    PlayMusic {
+        music_id: u16,
+        looped: bool,
+        fade_seconds: u8,
+    },
+    PlaySound {
+        sound_id: u16,
+    },
     MoveObject {
         object_id: u16,
         direction: Direction,
@@ -90,6 +98,10 @@ pub enum ScriptAction {
     },
     ChangeScene {
         scene_number: u16,
+    },
+    SetParty {
+        /// Zero-based role IDs. Empty script slots are omitted.
+        members: [Option<u16>; 3],
     },
 }
 
@@ -167,7 +179,7 @@ impl ScriptRuntime {
                     });
                 }
                 0x0003 => execution.entry = entry.operands[0],
-                0x0005 | 0x0043 | 0x0045 | 0x0047 | 0x0050 | 0x0075 | 0x008e => {
+                0x0005 | 0x0045 | 0x0050 | 0x008e => {
                     execution.entry = execution.entry.wrapping_add(1)
                 }
                 0x0008 => {
@@ -261,6 +273,23 @@ impl ScriptRuntime {
                         amount: entry.operands[1] as i16,
                     }));
                 }
+                0x0043 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PlayMusic {
+                        music_id: entry.operands[0],
+                        looped: entry.operands[1] != 1,
+                        fade_seconds: u8::from(entry.operands[1] == 3 && entry.operands[0] != 9)
+                            * 3,
+                    }));
+                }
+                0x0047 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PlaySound {
+                        sound_id: entry.operands[0],
+                    }));
+                }
                 0x0049 if entry.operands[0] != 0 => {
                     let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
                     execution.entry = execution.entry.wrapping_add(1);
@@ -321,6 +350,15 @@ impl ScriptRuntime {
                         tile_y: entry.operands[1],
                         half: entry.operands[2],
                     }));
+                }
+                0x0075 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    let mut members = entry.operands.map(|role| role.checked_sub(1));
+                    if members.iter().all(Option::is_none) {
+                        members[0] = Some(0);
+                    }
+                    return Some(ScriptEvent::Action(ScriptAction::SetParty { members }));
                 }
                 0x003b => {
                     execution.dialog_position = DialogPosition::Center;
@@ -545,6 +583,63 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Action(ScriptAction::ChangeScene {
                 scene_number: 3,
+            }))
+        );
+    }
+
+    #[test]
+    fn yields_zero_based_party_members_and_default_leader() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x0075, 3, 1, 0],
+            [0x0075, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetParty {
+                members: [Some(2), Some(0), None],
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetParty {
+                members: [Some(0), None, None],
+            }))
+        );
+    }
+
+    #[test]
+    fn yields_music_and_sound_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x0043, 7, 3, 0],
+            [0x0043, 9, 1, 0],
+            [0x0047, 12, 0, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlayMusic {
+                music_id: 7,
+                looped: true,
+                fade_seconds: 3,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlayMusic {
+                music_id: 9,
+                looped: false,
+                fade_seconds: 0,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlaySound {
+                sound_id: 12
             }))
         );
     }

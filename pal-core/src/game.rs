@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use pal_assets::player_roles::PlayerRoles;
+
 use crate::map::tile_to_world;
 use crate::map::{Map, MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 use crate::party::Party;
@@ -71,6 +73,8 @@ pub struct GameState<M = Map> {
     pub scene_objects: Vec<SceneObject>,
     pub pending_trigger: Option<TriggerRequest>,
     pub party: Party,
+    pub current_music: Option<u16>,
+    player_roles: Option<PlayerRoles>,
     inventory: BTreeMap<u16, u16>,
     pub camera: Camera,
 }
@@ -84,6 +88,8 @@ impl<M: CollisionMap> GameState<M> {
             scene_objects: Vec::new(),
             pending_trigger: None,
             party: Party::default(),
+            current_music: None,
+            player_roles: None,
             inventory: BTreeMap::new(),
             camera: Camera::new(viewport_width, viewport_height),
         };
@@ -106,8 +112,20 @@ impl<M: CollisionMap> GameState<M> {
         self
     }
 
+    pub fn with_player_roles(mut self, player_roles: PlayerRoles) -> Self {
+        self.player_roles = Some(player_roles);
+        self
+    }
+
     pub fn item_count(&self, item_id: u16) -> u16 {
         self.inventory.get(&item_id).copied().unwrap_or(0)
+    }
+
+    /// Return inventory entries in stable object-ID order.
+    pub fn inventory(&self) -> impl ExactSizeIterator<Item = (u16, u16)> + '_ {
+        self.inventory
+            .iter()
+            .map(|(&item_id, &amount)| (item_id, amount))
     }
 
     pub fn replace_scene(&mut self, scene_number: u16, map: M, scene_objects: Vec<SceneObject>) {
@@ -138,6 +156,10 @@ impl<M: CollisionMap> GameState<M> {
                     self.inventory.insert(item_id, updated);
                 }
             }
+            ScriptAction::PlayMusic { music_id, .. } => {
+                self.current_music = (music_id != 0).then_some(music_id);
+            }
+            ScriptAction::PlaySound { .. } => {}
             ScriptAction::MoveObject {
                 object_id,
                 direction,
@@ -215,6 +237,22 @@ impl<M: CollisionMap> GameState<M> {
                 self.follow_player();
             }
             ScriptAction::ChangeScene { .. } => return false,
+            ScriptAction::SetParty { members } => {
+                let role_ids = members.into_iter().flatten().collect::<Vec<_>>();
+                let Some(player_roles) = self.player_roles.as_ref() else {
+                    return false;
+                };
+                if !self.party.replace(&role_ids, player_roles) {
+                    return false;
+                }
+                let leader = self
+                    .party
+                    .leader()
+                    .expect("a successfully replaced party is non-empty");
+                self.player.sprite_index = usize::from(leader.attributes.scene_sprite_num);
+                self.player.frames_per_direction = leader.attributes.frames_per_direction();
+                self.player.anim_frame = 0;
+            }
         }
         true
     }
@@ -470,12 +508,64 @@ mod tests {
             amount: -1,
         }));
         assert_eq!(state.item_count(99), 0);
+        assert!(state.apply_script_action(ScriptAction::AddItem {
+            item_id: 42,
+            amount: 3,
+        }));
+        assert!(state.apply_script_action(ScriptAction::AddItem {
+            item_id: 7,
+            amount: 2,
+        }));
+        assert_eq!(state.inventory().collect::<Vec<_>>(), vec![(7, 2), (42, 3)]);
+        assert!(state.apply_script_action(ScriptAction::PlayMusic {
+            music_id: 6,
+            looped: true,
+            fade_seconds: 0,
+        }));
+        assert_eq!(state.current_music, Some(6));
+        assert!(state.apply_script_action(ScriptAction::PlayMusic {
+            music_id: 0,
+            looped: false,
+            fade_seconds: 0,
+        }));
+        assert_eq!(state.current_music, None);
+        assert!(state.apply_script_action(ScriptAction::PlaySound { sound_id: 1 }));
         assert!(state.apply_script_action(ScriptAction::SetPlayerPosition {
             tile_x: 10,
             tile_y: 12,
             half: 1,
         }));
         assert_eq!((state.player.world_x, state.player.world_y), (336, 200));
+    }
+
+    #[test]
+    fn party_script_action_replaces_members_and_updates_leader_sprite() {
+        let mut role_data = vec![0; 900];
+        role_data[28..30].copy_from_slice(&42u16.to_le_bytes());
+        role_data[772..774].copy_from_slice(&4u16.to_le_bytes());
+        let player_roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &player_roles).unwrap();
+        let mut state = state(&[]).with_party(party).with_player_roles(player_roles);
+
+        assert!(state.apply_script_action(ScriptAction::SetParty {
+            members: [Some(2), Some(1), None],
+        }));
+        assert_eq!(
+            state
+                .party
+                .members()
+                .iter()
+                .map(|member| member.role_id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(state.player.sprite_index, 42);
+        assert_eq!(state.player.frames_per_direction, 4);
+
+        assert!(!state.apply_script_action(ScriptAction::SetParty {
+            members: [Some(2), Some(2), None],
+        }));
+        assert_eq!(state.party.members().len(), 2);
     }
 
     #[test]

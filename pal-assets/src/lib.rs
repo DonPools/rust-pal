@@ -11,4 +11,5 @@ pub mod scene;
 pub mod script;
 pub mod sprite;
 pub mod text;
+pub mod voc;
 pub mod yj1;

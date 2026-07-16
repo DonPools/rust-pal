@@ -9,6 +9,7 @@ use pal_assets::player_roles::PlayerRoles;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_assets::voc::VocClip;
 use pal_core::game::GameState;
 use pal_core::map::{tile_to_world, Map};
 use pal_core::party::Party;
@@ -35,6 +36,7 @@ fn main() {
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
+    let voc_mkf = load_sound_effects(&data_dir).expect("failed to load sound effects");
     let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
     let global_objects =
         load_global_objects(&data_dir).expect("failed to load global object definitions");
@@ -60,7 +62,8 @@ fn main() {
     let mut game = GameState::new(map, player, SCREEN_WIDTH, SCREEN_HEIGHT)
         .with_scene_number(scene.number as u16)
         .with_scene_objects(scene_objects)
-        .with_party(party);
+        .with_party(party)
+        .with_player_roles(player_roles.clone());
     let viewport = Viewport::from(game.camera);
     println!(
         "scene {} loaded: map {}, {} event objects, {} tile frames, palette {}, viewport ({}, {})",
@@ -75,6 +78,8 @@ fn main() {
 
     let mut renderer = Renderer::new(palette, SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize);
     if check_only {
+        let sound_effect_count = validate_sound_effects(&voc_mkf)
+            .expect("VOC.MKF contains an invalid or unsupported sound effect");
         let leader = game.party.leader().expect("loaded party has no leader");
         assert!(leader.attributes.hp <= leader.attributes.max_hp);
         assert!(leader.attributes.mp <= leader.attributes.max_mp);
@@ -360,6 +365,7 @@ fn main() {
             "script data passed: {} records, {script_messages} messages, {script_ticks} timed actions",
             script_count,
         );
+        println!("sound data passed: {sound_effect_count} PCM VOC effects");
         println!(
             "M3 data passed: {} party member, {} role definitions, {} {:?} object definitions",
             game.party.members().len(),
@@ -387,6 +393,7 @@ fn main() {
             initial_enter_script: scene.scene.script_on_enter,
             text,
             font,
+            voc_mkf,
         },
         move |number, sprites| load_runtime_scene(&scene_data_dir, &scene_data, number, sprites),
     );
@@ -433,6 +440,24 @@ fn load_script_table(data_dir: &Path) -> Option<ScriptTable> {
     let data = std::fs::read(data_dir.join("SSS.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
     ScriptTable::parse(archive.read_chunk(4)?)
+}
+
+fn load_sound_effects(data_dir: &Path) -> Option<Vec<u8>> {
+    std::fs::read(data_dir.join("VOC.MKF")).ok()
+}
+
+fn validate_sound_effects(data: &[u8]) -> Option<usize> {
+    let archive = MkfArchive::new(data)?;
+    let mut count = 0;
+    for index in 0..archive.chunk_count() {
+        let chunk = archive.read_chunk(index)?;
+        if chunk.is_empty() {
+            continue;
+        }
+        VocClip::parse(chunk)?;
+        count += 1;
+    }
+    Some(count)
 }
 
 fn load_role_sprites(data_dir: &Path) -> Option<RoleSprites> {

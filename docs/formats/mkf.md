@@ -105,7 +105,7 @@ impl MkfArchive {
 | `RGM.MKF` | 大量 | 随机迷宫生成数据 |
 | `RNG.MKF` | 大量 | 随机迷宫地图 |
 | `SSS.MKF` | 少量 | 场景、事件对象、全局对象和脚本记录 |
-| `VOC.MKF` | 大量 | WAV 音效片段 |
+| `VOC.MKF` | 大量 | Creative Voice File 音效片段 |
 
 ---
 
