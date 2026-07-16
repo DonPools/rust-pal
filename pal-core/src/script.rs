@@ -45,6 +45,10 @@ pub enum ScriptEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptAction {
+    AddItem {
+        item_id: u16,
+        amount: i16,
+    },
     MoveObject {
         object_id: u16,
         direction: Direction,
@@ -72,9 +76,20 @@ pub enum ScriptAction {
         direction: Direction,
         frame: u8,
     },
+    SetPlayerSprite {
+        sprite_index: usize,
+    },
     OffsetPlayer {
         dx: i32,
         dy: i32,
+    },
+    SetPlayerPosition {
+        tile_x: u16,
+        tile_y: u16,
+        half: u16,
+    },
+    ChangeScene {
+        scene_number: u16,
     },
 }
 
@@ -152,7 +167,7 @@ impl ScriptRuntime {
                     });
                 }
                 0x0003 => execution.entry = entry.operands[0],
-                0x0005 | 0x0047 | 0x0050 | 0x008e => {
+                0x0005 | 0x0043 | 0x0045 | 0x0047 | 0x0050 | 0x0075 | 0x008e => {
                     execution.entry = execution.entry.wrapping_add(1)
                 }
                 0x0008 => {
@@ -238,6 +253,14 @@ impl ScriptRuntime {
                     }));
                 }
                 0x0016 => execution.entry = execution.entry.wrapping_add(1),
+                0x001f => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::AddItem {
+                        item_id: entry.operands[0],
+                        amount: entry.operands[1] as i16,
+                    }));
+                }
                 0x0049 if entry.operands[0] != 0 => {
                     let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
                     execution.entry = execution.entry.wrapping_add(1);
@@ -248,6 +271,30 @@ impl ScriptRuntime {
                     }));
                 }
                 0x0049 => execution.entry = execution.entry.wrapping_add(1),
+                0x0046 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetPlayerPosition {
+                        tile_x: entry.operands[0],
+                        tile_y: entry.operands[1],
+                        half: entry.operands[2],
+                    }));
+                }
+                0x0059 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::ChangeScene {
+                        scene_number: entry.operands[0],
+                    }));
+                }
+                0x0065 if entry.operands[0] == 0 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetPlayerSprite {
+                        sprite_index: usize::from(entry.operands[1]),
+                    }));
+                }
+                0x0065 => execution.entry = execution.entry.wrapping_add(1),
                 0x006c => {
                     let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
                     execution.entry = execution.entry.wrapping_add(1);
@@ -264,6 +311,15 @@ impl ScriptRuntime {
                     return Some(ScriptEvent::Action(ScriptAction::OffsetPlayer {
                         dx: i32::from(entry.operands[0] as i16),
                         dy: i32::from(entry.operands[1] as i16),
+                    }));
+                }
+                0x0070 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetPlayerPosition {
+                        tile_x: entry.operands[0],
+                        tile_y: entry.operands[1],
+                        half: entry.operands[2],
                     }));
                 }
                 0x003b => {
@@ -399,14 +455,14 @@ mod tests {
 
     #[test]
     fn reports_unsupported_and_invalid_entries() {
-        let mut runtime = ScriptRuntime::new(table(&[[0, 0, 0, 0], [0x46, 0, 0, 0]]));
+        let mut runtime = ScriptRuntime::new(table(&[[0, 0, 0, 0], [0x42, 0, 0, 0]]));
         runtime.start(trigger(1));
         assert_eq!(
             runtime.advance(),
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: 0x46,
+                opcode: 0x42,
             })
         );
 
@@ -458,5 +514,38 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Completed { .. })
         ));
+    }
+
+    #[test]
+    fn yields_inventory_position_and_scene_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x001f, 99, 0, 0],
+            [0x0046, 45, 96, 0],
+            [0x0059, 3, 0, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::AddItem {
+                item_id: 99,
+                amount: 0,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetPlayerPosition {
+                tile_x: 45,
+                tile_y: 96,
+                half: 0,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::ChangeScene {
+                scene_number: 3,
+            }))
+        );
     }
 }

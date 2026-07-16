@@ -1,5 +1,8 @@
 //! Deterministic exploration state and update rules.
 
+use std::collections::BTreeMap;
+
+use crate::map::tile_to_world;
 use crate::map::{Map, MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 use crate::role::{Direction, Role};
 use crate::scene::{
@@ -61,20 +64,24 @@ impl Camera {
 
 /// State for the current exploration scene.
 pub struct GameState<M = Map> {
+    pub scene_number: u16,
     pub map: M,
     pub player: Role,
     pub scene_objects: Vec<SceneObject>,
     pub pending_trigger: Option<TriggerRequest>,
+    inventory: BTreeMap<u16, u16>,
     pub camera: Camera,
 }
 
 impl<M: CollisionMap> GameState<M> {
     pub fn new(map: M, player: Role, viewport_width: u32, viewport_height: u32) -> Self {
         let mut state = Self {
+            scene_number: 1,
             map,
             player,
             scene_objects: Vec::new(),
             pending_trigger: None,
+            inventory: BTreeMap::new(),
             camera: Camera::new(viewport_width, viewport_height),
         };
         state.follow_player();
@@ -86,6 +93,23 @@ impl<M: CollisionMap> GameState<M> {
         self
     }
 
+    pub fn with_scene_number(mut self, scene_number: u16) -> Self {
+        self.scene_number = scene_number;
+        self
+    }
+
+    pub fn item_count(&self, item_id: u16) -> u16 {
+        self.inventory.get(&item_id).copied().unwrap_or(0)
+    }
+
+    pub fn replace_scene(&mut self, scene_number: u16, map: M, scene_objects: Vec<SceneObject>) {
+        self.scene_number = scene_number;
+        self.map = map;
+        self.scene_objects = scene_objects;
+        self.pending_trigger = None;
+        self.follow_player();
+    }
+
     pub fn take_trigger(&mut self) -> Option<TriggerRequest> {
         self.pending_trigger.take()
     }
@@ -93,6 +117,19 @@ impl<M: CollisionMap> GameState<M> {
     /// Apply a platform-independent world mutation yielded by the script runtime.
     pub fn apply_script_action(&mut self, action: ScriptAction) -> bool {
         match action {
+            ScriptAction::AddItem { item_id, amount } => {
+                if item_id == 0 {
+                    return false;
+                }
+                let amount = if amount == 0 { 1 } else { amount };
+                let current = i32::from(self.item_count(item_id));
+                let updated = (current + i32::from(amount)).clamp(0, 99) as u16;
+                if updated == 0 {
+                    self.inventory.remove(&item_id);
+                } else {
+                    self.inventory.insert(item_id, updated);
+                }
+            }
             ScriptAction::MoveObject {
                 object_id,
                 direction,
@@ -146,11 +183,30 @@ impl<M: CollisionMap> GameState<M> {
                 self.player.direction = direction;
                 self.player.anim_frame = frame;
             }
+            ScriptAction::SetPlayerSprite { sprite_index } => {
+                self.player.sprite_index = sprite_index;
+                self.player.anim_frame = 0;
+            }
             ScriptAction::OffsetPlayer { dx, dy } => {
                 self.player.world_x += dx;
                 self.player.world_y += dy;
                 self.follow_player();
             }
+            ScriptAction::SetPlayerPosition {
+                tile_x,
+                tile_y,
+                half,
+            } => {
+                let Some((x, y)) =
+                    tile_to_world(usize::from(tile_x), usize::from(tile_y), usize::from(half))
+                else {
+                    return false;
+                };
+                self.player.world_x = x;
+                self.player.world_y = y;
+                self.follow_player();
+            }
+            ScriptAction::ChangeScene { .. } => return false,
         }
         true
     }
@@ -395,6 +451,23 @@ mod tests {
             object_id: 99,
             state: 0,
         }));
+
+        assert!(state.apply_script_action(ScriptAction::AddItem {
+            item_id: 99,
+            amount: 0,
+        }));
+        assert_eq!(state.item_count(99), 1);
+        assert!(state.apply_script_action(ScriptAction::AddItem {
+            item_id: 99,
+            amount: -1,
+        }));
+        assert_eq!(state.item_count(99), 0);
+        assert!(state.apply_script_action(ScriptAction::SetPlayerPosition {
+            tile_x: 10,
+            tile_y: 12,
+            half: 1,
+        }));
+        assert_eq!((state.player.world_x, state.player.world_y), (336, 200));
     }
 
     #[test]

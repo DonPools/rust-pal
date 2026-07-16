@@ -14,7 +14,7 @@ use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
 use pal_core::script::{ScriptEvent, ScriptRuntime};
 use pal_desktop::renderer::Renderer;
-use pal_desktop::window::{render_tile_map, run_game_window, Viewport};
+use pal_desktop::window::{render_tile_map, run_game_window, GameResources, LoadedScene, Viewport};
 
 const SCREEN_WIDTH: u32 = 320;
 const SCREEN_HEIGHT: u32 = 200;
@@ -50,8 +50,9 @@ fn main() {
     .expect("failed to create player at the scene entry position");
     let scene_objects = create_scene_objects(&scene, &role_sprites)
         .expect("failed to create current scene event objects");
-    let game =
-        GameState::new(map, player, SCREEN_WIDTH, SCREEN_HEIGHT).with_scene_objects(scene_objects);
+    let mut game = GameState::new(map, player, SCREEN_WIDTH, SCREEN_HEIGHT)
+        .with_scene_number(scene.number as u16)
+        .with_scene_objects(scene_objects);
     let viewport = Viewport::from(game.camera);
     println!(
         "scene {} loaded: map {}, {} event objects, {} tile frames, palette {}, viewport ({}, {})",
@@ -117,6 +118,7 @@ fn main() {
             .iter()
             .find(|object| object.is_visible())
             .expect("current scene has no visible event object");
+        let visible_object_id = visible_object.id;
         let object_viewport = Viewport::new(
             (visible_object.world_x - SCREEN_WIDTH as i32 / 2).max(0),
             (visible_object.world_y - SCREEN_HEIGHT as i32 / 2).max(0),
@@ -212,6 +214,90 @@ fn main() {
         }
         assert!(script_ticks > 0, "movement script yielded no timed work");
 
+        let intro_trigger = pal_core::scene::TriggerRequest {
+            object_id: 0xffff,
+            script_entry: scene.scene.script_on_enter,
+            kind: pal_core::scene::TriggerKind::Touch,
+        };
+        assert!(scripts.start(intro_trigger));
+        let mut intro_messages = 0;
+        let mut intro_actions = 0;
+        loop {
+            match scripts
+                .advance()
+                .expect("scene enter script stopped without an event")
+            {
+                ScriptEvent::Message { message_id, .. } => {
+                    assert!(text.message(usize::from(message_id)).is_some());
+                    intro_messages += 1;
+                }
+                ScriptEvent::Action(action) => {
+                    assert!(
+                        game.apply_script_action(action),
+                        "scene enter action could not be applied: {action:?}"
+                    );
+                    intro_actions += 1;
+                }
+                ScriptEvent::Waiting => {}
+                ScriptEvent::Completed { .. } => break,
+                event => panic!("scene enter script did not complete: {event:?}"),
+            }
+        }
+        assert_eq!(intro_messages, 67);
+        assert!(intro_actions > 0);
+
+        let item_trigger = pal_core::scene::TriggerRequest {
+            object_id: 5,
+            script_entry: 6318,
+            kind: pal_core::scene::TriggerKind::Search,
+        };
+        assert!(scripts.start(item_trigger));
+        loop {
+            match scripts
+                .advance()
+                .expect("item script stopped without an event")
+            {
+                ScriptEvent::Message { message_id, .. } => {
+                    assert!(text.message(usize::from(message_id)).is_some());
+                }
+                ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
+                ScriptEvent::Waiting => {}
+                ScriptEvent::Completed { .. } => break,
+                event => panic!("item script did not complete: {event:?}"),
+            }
+        }
+        assert_eq!(game.item_count(99), 1);
+
+        let exit_trigger = pal_core::scene::TriggerRequest {
+            object_id: 1,
+            script_entry: 4667,
+            kind: pal_core::scene::TriggerKind::Touch,
+        };
+        assert!(scripts.start(exit_trigger));
+        let mut switched_scene = None;
+        loop {
+            match scripts
+                .advance()
+                .expect("exit script stopped without an event")
+            {
+                ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene {
+                    scene_number,
+                }) => {
+                    let loaded =
+                        load_runtime_scene(&data_dir, &scene_data, scene_number, &role_sprites)
+                            .expect("exit script target scene could not be loaded");
+                    game.replace_scene(loaded.number, loaded.map, loaded.objects);
+                    switched_scene = Some(scene_number);
+                }
+                ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
+                ScriptEvent::Waiting => {}
+                ScriptEvent::Completed { .. } => break,
+                event => panic!("exit script did not complete: {event:?}"),
+            }
+        }
+        assert_eq!(switched_scene, Some(3));
+        assert_eq!(game.scene_number, 3);
+
         assert!(visible_pixels > 0, "rendered map is blank");
         assert!(
             chromatic_pixels > 0,
@@ -242,7 +328,7 @@ fn main() {
         );
         println!(
             "event object {} rendered: {event_object_pixels} pixels",
-            visible_object.id
+            visible_object_id
         );
         println!(
             "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels",
@@ -255,13 +341,28 @@ fn main() {
             script_count,
         );
         println!(
+            "M2 flow passed: {intro_messages} intro messages, {intro_actions} intro actions, item 99 acquired, scene 3 loaded"
+        );
+        println!(
             "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"
         );
         return;
     }
 
-    run_game_window(renderer, game, role_sprites, script_table, text, font);
+    let scene_data_dir = data_dir.clone();
+    run_game_window(
+        renderer,
+        game,
+        GameResources {
+            role_sprites,
+            script_table,
+            initial_enter_script: scene.scene.script_on_enter,
+            text,
+            font,
+        },
+        move |number, sprites| load_runtime_scene(&scene_data_dir, &scene_data, number, sprites),
+    );
 }
 
 fn workspace_data_dir() -> PathBuf {
@@ -331,6 +432,22 @@ fn create_scene_objects(
             SceneObject::from_asset(id, event, frame_count)
         })
         .collect()
+}
+
+fn load_runtime_scene(
+    data_dir: &Path,
+    scene_data: &SceneData,
+    number: u16,
+    sprites: &RoleSprites,
+) -> Option<LoadedScene> {
+    let scene = scene_data.scene(usize::from(number))?;
+    Some(LoadedScene {
+        number,
+        map: load_map(data_dir, usize::from(scene.scene.map_num))?,
+        objects: create_scene_objects(&scene, sprites)?,
+        enter_script: scene.scene.script_on_enter,
+        teleport_script: scene.scene.script_on_teleport,
+    })
 }
 
 fn load_default_role_settings(data_dir: &Path) -> Option<(usize, u8)> {

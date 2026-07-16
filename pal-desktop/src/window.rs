@@ -26,6 +26,22 @@ pub struct Viewport {
     pub height: u32,
 }
 
+pub struct LoadedScene {
+    pub number: u16,
+    pub map: Map,
+    pub objects: Vec<SceneObject>,
+    pub enter_script: u16,
+    pub teleport_script: u16,
+}
+
+pub struct GameResources {
+    pub role_sprites: RoleSprites,
+    pub script_table: ScriptTable,
+    pub initial_enter_script: u16,
+    pub text: TextLibrary,
+    pub font: BitmapFont,
+}
+
 impl Viewport {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
@@ -118,14 +134,21 @@ struct ActiveDialog {
     page: usize,
 }
 
-pub fn run_game_window(
+pub fn run_game_window<L>(
     mut renderer: Renderer,
     mut game: GameState,
-    role_sprites: RoleSprites,
-    script_table: ScriptTable,
-    text: TextLibrary,
-    font: BitmapFont,
-) {
+    resources: GameResources,
+    mut load_scene: L,
+) where
+    L: FnMut(u16, &RoleSprites) -> Option<LoadedScene> + 'static,
+{
+    let GameResources {
+        role_sprites,
+        script_table,
+        initial_enter_script,
+        text,
+        font,
+    } = resources;
     let viewport = Viewport::from(game.camera);
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let window = Box::leak(Box::new(
@@ -150,6 +173,14 @@ pub fn run_game_window(
     let mut show_collision = false;
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
+    let mut pending_enter_script = None;
+    if initial_enter_script != 0 {
+        scripts.start(pal_core::scene::TriggerRequest {
+            object_id: 0xffff,
+            script_entry: initial_enter_script,
+            kind: pal_core::scene::TriggerKind::Touch,
+        });
+    }
     render_game(
         &mut renderer,
         &game,
@@ -233,14 +264,23 @@ pub fn run_game_window(
                                     &mut scripts,
                                     &mut game,
                                     &mut dialog,
+                                    &role_sprites,
+                                    &mut load_scene,
+                                    &mut pending_enter_script,
                                     &mut |title| window.set_title(title),
                                 );
                             }
                         }
                     } else if scripts.is_active() {
-                        advance_script(&mut scripts, &mut game, &mut dialog, &mut |title| {
-                            window.set_title(title)
-                        });
+                        advance_script(
+                            &mut scripts,
+                            &mut game,
+                            &mut dialog,
+                            &role_sprites,
+                            &mut load_scene,
+                            &mut pending_enter_script,
+                            &mut |title| window.set_title(title),
+                        );
                         changed = true;
                     } else {
                         let tick_changed = game.update(sampled);
@@ -252,6 +292,9 @@ pub fn run_game_window(
                                         &mut scripts,
                                         &mut game,
                                         &mut dialog,
+                                        &role_sprites,
+                                        &mut load_scene,
+                                        &mut pending_enter_script,
                                         &mut |title| window.set_title(title),
                                     );
                                 }
@@ -307,12 +350,17 @@ fn render_game(
     }
 }
 
-fn advance_script(
+fn advance_script<L>(
     scripts: &mut ScriptRuntime,
     game: &mut GameState,
     dialog: &mut Option<ActiveDialog>,
+    role_sprites: &RoleSprites,
+    load_scene: &mut L,
+    pending_enter_script: &mut Option<u16>,
     set_title: &mut impl FnMut(&str),
-) {
+) where
+    L: FnMut(u16, &RoleSprites) -> Option<LoadedScene>,
+{
     match scripts.advance() {
         Some(ScriptEvent::Message {
             message_id,
@@ -326,6 +374,15 @@ fn advance_script(
             set_title("Rust-PAL [Dialog]");
         }
         Some(ScriptEvent::Waiting) => {}
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
+            let Some(scene) = load_scene(scene_number, role_sprites) else {
+                set_title("Rust-PAL [failed to load scene]");
+                return;
+            };
+            game.replace_scene(scene.number, scene.map, scene.objects);
+            *pending_enter_script = (scene.enter_script != 0).then_some(scene.enter_script);
+            set_title(&format!("Rust-PAL [scene {}]", scene.number));
+        }
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");
         }
@@ -341,7 +398,16 @@ fn advance_script(
             {
                 object.trigger_script = next_entry;
             }
-            set_title("Rust-PAL");
+            if let Some(entry) = pending_enter_script.take() {
+                let trigger = pal_core::scene::TriggerRequest {
+                    object_id: 0xffff,
+                    script_entry: entry,
+                    kind: pal_core::scene::TriggerKind::Touch,
+                };
+                scripts.start(trigger);
+            } else {
+                set_title("Rust-PAL");
+            }
         }
         Some(ScriptEvent::Unsupported {
             trigger,
