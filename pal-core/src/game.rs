@@ -2,6 +2,7 @@
 
 use crate::map::{Map, MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 use crate::role::{Direction, Role};
+use crate::scene::{blocks_position, SceneObject};
 
 pub const UPDATE_INTERVAL_MS: u64 = 50;
 
@@ -59,6 +60,7 @@ impl Camera {
 pub struct GameState<M = Map> {
     pub map: M,
     pub player: Role,
+    pub scene_objects: Vec<SceneObject>,
     pub camera: Camera,
 }
 
@@ -67,27 +69,39 @@ impl<M: CollisionMap> GameState<M> {
         let mut state = Self {
             map,
             player,
+            scene_objects: Vec::new(),
             camera: Camera::new(viewport_width, viewport_height),
         };
         state.follow_player();
         state
     }
 
+    pub fn with_scene_objects(mut self, scene_objects: Vec<SceneObject>) -> Self {
+        self.scene_objects = scene_objects;
+        self
+    }
+
     /// Advance one fixed update and report whether visible state changed.
     pub fn update(&mut self, input: GameInput) -> bool {
+        let mut changed = false;
+        for object in &mut self.scene_objects {
+            changed |= object.update_vanish_time();
+        }
         let Some(direction) = input.direction else {
             if self.player.anim_frame == 0 {
-                return false;
+                return changed;
             }
             self.player.anim_frame = 0;
             return true;
         };
 
-        let mut changed = self.player.direction != direction;
+        changed |= self.player.direction != direction;
         self.player.direction = direction;
         let (dx, dy) = direction.step();
         let target = (self.player.world_x + dx, self.player.world_y + dy);
-        if !self.map.is_world_blocked(target.0, target.1) {
+        if !self.map.is_world_blocked(target.0, target.1)
+            && !blocks_position(&self.scene_objects, target.0, target.1)
+        {
             self.player.world_x = target.0;
             self.player.world_y = target.1;
             self.player.anim_frame =
@@ -114,6 +128,25 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    fn blocking_object(world_x: i32, world_y: i32) -> SceneObject {
+        SceneObject {
+            id: 1,
+            world_x,
+            world_y,
+            layer: 0,
+            trigger_script: 0,
+            auto_script: 0,
+            state: 2,
+            trigger_mode: 0,
+            sprite_index: Some(1),
+            frames_per_direction: 3,
+            sprite_frame_count: 12,
+            direction: Direction::South,
+            current_frame: 0,
+            vanish_time: 0,
+        }
+    }
 
     struct TestMap {
         blocked: HashSet<(i32, i32)>,
@@ -183,6 +216,17 @@ mod tests {
         }));
         assert_eq!((state.player.world_x, state.player.world_y), (320, 240));
         assert_eq!(state.player.anim_frame, 0);
+    }
+
+    #[test]
+    fn event_object_blockers_prevent_walking() {
+        let mut state = state(&[]).with_scene_objects(vec![blocking_object(336, 248)]);
+        assert!(state.update(GameInput {
+            direction: Some(Direction::East),
+            ..GameInput::default()
+        }));
+        assert_eq!((state.player.world_x, state.player.world_y), (320, 240));
+        assert_eq!(state.player.direction, Direction::East);
     }
 
     #[test]

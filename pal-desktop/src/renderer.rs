@@ -78,7 +78,7 @@ impl Renderer {
 
     /// 解码并绘制 RLE 位图
     pub fn blit_rle(&mut self, rle: &RleBitmap, dx: i32, dy: i32) {
-        let bitmap = Bitmap::from_indexed(rle.pixels.clone(), rle.width, rle.height, &self.palette);
+        let bitmap = Bitmap::from_decoded_rle(rle, &self.palette);
         self.blit_bitmap(&bitmap, dx, dy);
     }
 
@@ -94,6 +94,19 @@ impl Renderer {
         self.screen[idx + 1] = g;
         self.screen[idx + 2] = b;
         self.screen[idx + 3] = a;
+        self.dirty = true;
+    }
+
+    /// Draw one debug pixel in a fixed RGBA color, clipped to the framebuffer.
+    pub fn put_rgba(&mut self, x: i32, y: i32, color: [u8; 4]) {
+        let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+            return;
+        };
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let index = (y * self.width + x) * 4;
+        self.screen[index..index + 4].copy_from_slice(&color);
         self.dirty = true;
     }
 

@@ -16,6 +16,16 @@ pub enum Direction {
 impl Direction {
     pub const ALL: [Self; 4] = [Self::South, Self::West, Self::North, Self::East];
 
+    pub fn from_pal(value: u16) -> Option<Self> {
+        match value {
+            0 => Some(Self::South),
+            1 => Some(Self::West),
+            2 => Some(Self::North),
+            3 => Some(Self::East),
+            _ => None,
+        }
+    }
+
     /// One PAL walking step in logical world pixels.
     pub fn step(self) -> (i32, i32) {
         match self {
@@ -50,7 +60,9 @@ impl Role {
 
     /// Convert the map position to a bottom-center pixel anchor.
     pub fn screen_anchor(&self) -> (i32, i32) {
-        (self.world_x, self.world_y + 8)
+        // PAL draws party frames with their feet four pixels below the
+        // logical position used by movement and obstacle checks.
+        (self.world_x, self.world_y + 4)
     }
 }
 
@@ -157,13 +169,13 @@ mod tests {
 
     #[test]
     fn screen_anchor_uses_interleaved_map_coordinates() {
-        assert_eq!(role(Direction::South, 0).screen_anchor(), (32, 40));
+        assert_eq!(role(Direction::South, 0).screen_anchor(), (32, 36));
         let shifted = Role {
             world_x: 48,
             world_y: 40,
             ..role(Direction::South, 0)
         };
-        assert_eq!(shifted.screen_anchor(), (48, 48));
+        assert_eq!(shifted.screen_anchor(), (48, 44));
     }
 
     #[test]

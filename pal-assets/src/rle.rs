@@ -6,8 +6,13 @@ use crate::palette::Palette;
 pub struct RleBitmap {
     pub width: u16,
     pub height: u16,
-    /// Decoded indexed pixels. Index 0 represents transparent pixels.
+    /// Decoded palette indices.
     pub pixels: Vec<u8>,
+    /// Whether each decoded pixel came from a literal draw command.
+    ///
+    /// Transparency is encoded by RLE skip commands. A literal palette index
+    /// of zero is still opaque and must not be confused with a skipped pixel.
+    pub opaque: Vec<bool>,
 }
 
 impl RleBitmap {
@@ -35,6 +40,7 @@ impl RleBitmap {
 
         let total_pixels = (width as usize).checked_mul(height as usize)?;
         let mut pixels = vec![0; total_pixels];
+        let mut opaque = vec![false; total_pixels];
         let mut destination = 0usize;
 
         while destination < total_pixels {
@@ -54,6 +60,7 @@ impl RleBitmap {
                     return None;
                 }
                 pixels[destination..destination_end].copy_from_slice(data.get(offset..source_end)?);
+                opaque[destination..destination_end].fill(true);
                 offset = source_end;
                 destination = destination_end;
             }
@@ -64,13 +71,19 @@ impl RleBitmap {
                 width,
                 height,
                 pixels,
+                opaque,
             },
             offset,
         ))
     }
 
     pub fn to_rgba(&self, palette: &Palette) -> Vec<u8> {
-        palette.apply_to_pixels(&self.pixels)
+        let mut rgba = Vec::with_capacity(self.pixels.len() * 4);
+        for (&index, &opaque) in self.pixels.iter().zip(&self.opaque) {
+            let (r, g, b) = palette.get_rgb(index);
+            rgba.extend_from_slice(&[r, g, b, if opaque { 255 } else { 0 }]);
+        }
+        rgba
     }
 }
 
@@ -94,6 +107,15 @@ mod tests {
         ];
         let bitmap = RleBitmap::decode(&data).unwrap();
         assert_eq!(bitmap.pixels, [1, 2, 0, 0, 3, 4]);
+        assert_eq!(bitmap.opaque, [true, true, false, false, true, true]);
+    }
+
+    #[test]
+    fn literal_palette_zero_remains_opaque() {
+        let data = [1, 0, 1, 0, 1, 0];
+        let bitmap = RleBitmap::decode(&data).unwrap();
+        assert_eq!(bitmap.pixels, [0]);
+        assert_eq!(bitmap.opaque, [true]);
     }
 
     #[test]

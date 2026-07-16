@@ -20,17 +20,35 @@ pub fn tile_to_world(x: usize, y: usize, h: usize) -> Option<(i32, i32)> {
     Some((x as i32 * 32 + h as i32 * 16, y as i32 * 16 + h as i32 * 8))
 }
 
-/// Convert an aligned logical world position to an interleaved map tile.
+/// Convert a logical world pixel to the diamond tile containing that point.
 pub fn world_to_tile(world_x: i32, world_y: i32) -> Option<(usize, usize, usize)> {
-    if world_x < 0 || world_y < 0 || world_x % 16 != 0 {
+    if world_x < 0 || world_y < 0 {
         return None;
     }
-    let h = usize::from(world_x % 32 != 0);
-    if world_y % 16 != h as i32 * 8 {
-        return None;
+
+    let mut x = world_x / 32;
+    let mut y = world_y / 16;
+    let mut h = 0;
+    let xr = world_x % 32;
+    let yr = world_y % 16;
+
+    // The rectangular 32x16 cell contains pieces of four neighboring
+    // diamonds. These boundary tests match PAL_CheckObstacle.
+    if xr + yr * 2 >= 16 {
+        if xr + yr * 2 >= 48 {
+            x += 1;
+            y += 1;
+        } else if 32 - xr + yr * 2 < 16 {
+            x += 1;
+        } else if 32 - xr + yr * 2 < 48 {
+            h = 1;
+        } else {
+            y += 1;
+        }
     }
-    let x = usize::try_from(world_x / 32).ok()?;
-    let y = usize::try_from(world_y / 16).ok()?;
+
+    let x = usize::try_from(x).ok()?;
+    let y = usize::try_from(y).ok()?;
     (x < MAP_COLUMNS && y < MAP_ROWS).then_some((x, y, h))
 }
 
@@ -111,7 +129,7 @@ impl Map {
             .unwrap_or(true)
     }
 
-    /// Check collision at an aligned logical world position.
+    /// Check collision at a logical world pixel.
     pub fn is_world_blocked(&self, world_x: i32, world_y: i32) -> bool {
         let Some((x, y, h)) = world_to_tile(world_x, world_y) else {
             return true;
@@ -151,10 +169,19 @@ mod tests {
     }
 
     #[test]
-    fn world_coordinates_reject_bounds_and_unaligned_positions() {
+    fn world_coordinates_follow_diamond_boundaries() {
+        assert_eq!(world_to_tile(1, 0), Some((0, 0, 0)));
+        assert_eq!(world_to_tile(16, 0), Some((0, 0, 1)));
+        assert_eq!(world_to_tile(15, 1), Some((0, 0, 1)));
+        assert_eq!(world_to_tile(31, 1), Some((1, 0, 0)));
+        assert_eq!(world_to_tile(1, 15), Some((0, 1, 0)));
+        assert_eq!(world_to_tile(31, 15), Some((1, 1, 0)));
+    }
+
+    #[test]
+    fn world_coordinates_reject_out_of_bounds_positions() {
         assert_eq!(world_to_tile(-16, 0), None);
-        assert_eq!(world_to_tile(1, 0), None);
-        assert_eq!(world_to_tile(16, 0), None);
+        assert_eq!(world_to_tile(0, -8), None);
         assert_eq!(world_to_tile(MAP_PIXEL_WIDTH, 0), None);
     }
 }

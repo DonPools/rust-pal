@@ -18,12 +18,16 @@ impl Bitmap {
     /// 从 RLE 数据 + 调色板解码为 RGBA 位图
     pub fn from_rle(data: &[u8], palette: &Palette) -> Option<Self> {
         let rle = RleBitmap::decode(data)?;
-        let rgba = rle.to_rgba(palette);
-        Some(Bitmap {
+        Some(Self::from_decoded_rle(&rle, palette))
+    }
+
+    /// Convert a decoded RLE bitmap while preserving its skip-command mask.
+    pub fn from_decoded_rle(rle: &RleBitmap, palette: &Palette) -> Self {
+        Self {
             width: rle.width,
             height: rle.height,
-            rgba,
-        })
+            rgba: rle.to_rgba(palette),
+        }
     }
 
     /// 从索引像素数据 + 调色板创建 RGBA 位图
