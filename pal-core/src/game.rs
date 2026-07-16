@@ -2,7 +2,9 @@
 
 use crate::map::{Map, MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 use crate::role::{Direction, Role};
-use crate::scene::{blocks_position, SceneObject};
+use crate::scene::{
+    blocks_position, find_search_trigger, find_touch_trigger, SceneObject, TriggerRequest,
+};
 
 pub const UPDATE_INTERVAL_MS: u64 = 50;
 
@@ -61,6 +63,7 @@ pub struct GameState<M = Map> {
     pub map: M,
     pub player: Role,
     pub scene_objects: Vec<SceneObject>,
+    pub pending_trigger: Option<TriggerRequest>,
     pub camera: Camera,
 }
 
@@ -70,6 +73,7 @@ impl<M: CollisionMap> GameState<M> {
             map,
             player,
             scene_objects: Vec::new(),
+            pending_trigger: None,
             camera: Camera::new(viewport_width, viewport_height),
         };
         state.follow_player();
@@ -81,11 +85,34 @@ impl<M: CollisionMap> GameState<M> {
         self
     }
 
+    pub fn take_trigger(&mut self) -> Option<TriggerRequest> {
+        self.pending_trigger.take()
+    }
+
     /// Advance one fixed update and report whether visible state changed.
     pub fn update(&mut self, input: GameInput) -> bool {
+        if self.pending_trigger.is_some() {
+            return false;
+        }
         let mut changed = false;
         for object in &mut self.scene_objects {
             changed |= object.update_vanish_time();
+        }
+        self.pending_trigger = find_touch_trigger(
+            &mut self.scene_objects,
+            self.player.world_x,
+            self.player.world_y,
+        );
+        if self.pending_trigger.is_none() && input.confirm {
+            self.pending_trigger = find_search_trigger(
+                &mut self.scene_objects,
+                self.player.world_x,
+                self.player.world_y,
+                self.player.direction,
+            );
+        }
+        if self.pending_trigger.is_some() {
+            return true;
         }
         let Some(direction) = input.direction else {
             if self.player.anim_frame == 0 {
@@ -227,6 +254,47 @@ mod tests {
         }));
         assert_eq!((state.player.world_x, state.player.world_y), (320, 240));
         assert_eq!(state.player.direction, Direction::East);
+    }
+
+    #[test]
+    fn touch_trigger_is_queued_and_pauses_exploration_until_consumed() {
+        let mut object = blocking_object(330, 240);
+        object.state = 1;
+        object.trigger_mode = 4;
+        object.trigger_script = 99;
+        let mut state = state(&[]).with_scene_objects(vec![object]);
+
+        assert!(state.update(GameInput {
+            direction: Some(Direction::East),
+            ..GameInput::default()
+        }));
+        assert_eq!((state.player.world_x, state.player.world_y), (320, 240));
+        assert_eq!(state.pending_trigger.unwrap().script_entry, 99);
+        assert!(!state.update(GameInput {
+            direction: Some(Direction::East),
+            ..GameInput::default()
+        }));
+        assert_eq!(state.take_trigger().unwrap().object_id, 1);
+        assert!(state.pending_trigger.is_none());
+    }
+
+    #[test]
+    fn confirm_queues_search_trigger_in_front_of_player() {
+        let mut object = blocking_object(336, 248);
+        object.state = 1;
+        object.trigger_mode = 1;
+        object.trigger_script = 77;
+        let mut state = state(&[]).with_scene_objects(vec![object]);
+        state.player.direction = Direction::East;
+
+        assert!(state.update(GameInput {
+            confirm: true,
+            ..GameInput::default()
+        }));
+        let trigger = state.take_trigger().unwrap();
+        assert_eq!(trigger.object_id, 1);
+        assert_eq!(trigger.script_entry, 77);
+        assert_eq!(state.scene_objects[0].direction, Direction::West);
     }
 
     #[test]

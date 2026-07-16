@@ -35,6 +35,15 @@ impl Direction {
             Self::East => (16, 8),
         }
     }
+
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::South => Self::North,
+            Self::West => Self::East,
+            Self::North => Self::South,
+            Self::East => Self::West,
+        }
+    }
 }
 
 /// A character instance on the map.

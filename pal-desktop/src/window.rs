@@ -52,7 +52,7 @@ struct HeldInput {
 }
 
 impl HeldInput {
-    fn set_key(&mut self, key: KeyCode, pressed: bool) {
+    fn set_key(&mut self, key: KeyCode, pressed: bool, repeat: bool) {
         let direction = match key {
             KeyCode::ArrowDown | KeyCode::KeyS => Some(Direction::South),
             KeyCode::ArrowLeft | KeyCode::KeyA => Some(Direction::West),
@@ -70,18 +70,21 @@ impl HeldInput {
         }
 
         match key {
-            KeyCode::Enter | KeyCode::Space => self.confirm = pressed,
-            KeyCode::Escape | KeyCode::Backspace => self.cancel = pressed,
+            KeyCode::Enter | KeyCode::Space if pressed && !repeat => self.confirm = true,
+            KeyCode::Escape | KeyCode::Backspace if pressed && !repeat => self.cancel = true,
             _ => {}
         }
     }
 
-    fn sample(&self) -> GameInput {
-        GameInput {
+    fn sample(&mut self) -> GameInput {
+        let input = GameInput {
             direction: self.active_direction,
             confirm: self.confirm,
             cancel: self.cancel,
-        }
+        };
+        self.confirm = false;
+        self.cancel = false;
+        input
     }
 
     fn direction_held_mut(&mut self, direction: Direction) -> &mut bool {
@@ -152,7 +155,7 @@ pub fn run_game_window(mut renderer: Renderer, mut game: GameState, role_sprites
                             });
                             render_game(&mut renderer, &game, &role_sprites, show_collision);
                         } else {
-                            input.set_key(code, pressed);
+                            input.set_key(code, pressed, event.repeat);
                         }
                     }
                 }
@@ -184,6 +187,12 @@ pub fn run_game_window(mut renderer: Renderer, mut game: GameState, role_sprites
                 while accumulator >= tick {
                     changed |= game.update(input.sample());
                     accumulator -= tick;
+                }
+                if let Some(trigger) = game.pending_trigger {
+                    window.set_title(&format!(
+                        "Rust-PAL [event {} script {}]",
+                        trigger.object_id, trigger.script_entry
+                    ));
                 }
                 if changed {
                     render_game(&mut renderer, &game, &role_sprites, show_collision);
