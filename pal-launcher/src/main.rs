@@ -187,6 +187,24 @@ fn main() {
             }
         }
         assert!(script_messages > 0, "message script yielded no messages");
+        let movement_trigger = pal_core::scene::TriggerRequest {
+            object_id: 2,
+            script_entry: 69,
+            kind: pal_core::scene::TriggerKind::Touch,
+        };
+        assert!(scripts.start(movement_trigger));
+        let mut script_ticks = 0;
+        loop {
+            match scripts
+                .advance()
+                .expect("movement script stopped without an event")
+            {
+                ScriptEvent::Action(_) | ScriptEvent::Waiting => script_ticks += 1,
+                ScriptEvent::Completed { .. } => break,
+                event => panic!("movement script did not complete: {event:?}"),
+            }
+        }
+        assert!(script_ticks > 0, "movement script yielded no timed work");
 
         assert!(visible_pixels > 0, "rendered map is blank");
         assert!(
@@ -227,7 +245,7 @@ fn main() {
             font.glyph_count(),
         );
         println!(
-            "script data passed: {} records, {script_messages} messages yielded",
+            "script data passed: {} records, {script_messages} messages, {script_ticks} timed actions",
             script_count,
         );
         println!(

@@ -28,11 +28,16 @@ impl Direction {
 
     /// One PAL walking step in logical world pixels.
     pub fn step(self) -> (i32, i32) {
+        self.step_at_speed(8)
+    }
+
+    /// PAL NPC movement uses two horizontal and one vertical pixel per speed unit.
+    pub fn step_at_speed(self, speed: i32) -> (i32, i32) {
         match self {
-            Self::South => (-16, 8),
-            Self::West => (-16, -8),
-            Self::North => (16, -8),
-            Self::East => (16, 8),
+            Self::South => (-2 * speed, speed),
+            Self::West => (-2 * speed, -speed),
+            Self::North => (2 * speed, -speed),
+            Self::East => (2 * speed, speed),
         }
     }
 
@@ -193,6 +198,8 @@ mod tests {
         assert_eq!(Direction::West.step(), (-16, -8));
         assert_eq!(Direction::North.step(), (16, -8));
         assert_eq!(Direction::East.step(), (16, 8));
+        assert_eq!(Direction::South.step_at_speed(2), (-4, 2));
+        assert_eq!(Direction::East.step_at_speed(2), (4, 2));
     }
 
     #[test]

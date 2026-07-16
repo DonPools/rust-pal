@@ -2,6 +2,7 @@
 
 use pal_assets::script::ScriptTable;
 
+use crate::role::Direction;
 use crate::scene::TriggerRequest;
 
 const MAX_INSTRUCTIONS_PER_ADVANCE: usize = 1024;
@@ -21,6 +22,8 @@ pub enum ScriptEvent {
         message_id: u16,
         position: DialogPosition,
     },
+    Waiting,
+    Action(ScriptAction),
     Completed {
         trigger: TriggerRequest,
         next_entry: u16,
@@ -40,12 +43,48 @@ pub enum ScriptEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptAction {
+    MoveObject {
+        object_id: u16,
+        direction: Direction,
+    },
+    SetObjectPose {
+        object_id: u16,
+        direction: Option<Direction>,
+        frame: Option<u16>,
+    },
+    SetObjectPosition {
+        object_id: u16,
+        x: i32,
+        y: i32,
+    },
+    OffsetObject {
+        object_id: u16,
+        dx: i32,
+        dy: i32,
+    },
+    SetObjectState {
+        object_id: u16,
+        state: i16,
+    },
+    SetPlayerPose {
+        direction: Direction,
+        frame: u8,
+    },
+    OffsetPlayer {
+        dx: i32,
+        dy: i32,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Execution {
     trigger: TriggerRequest,
     entry: u16,
     next_entry: u16,
     dialog_position: DialogPosition,
+    wait_frames: u16,
 }
 
 pub struct ScriptRuntime {
@@ -70,6 +109,7 @@ impl ScriptRuntime {
             entry: trigger.script_entry,
             next_entry: trigger.script_entry,
             dialog_position: DialogPosition::Lower,
+            wait_frames: 0,
         });
         true
     }
@@ -81,6 +121,11 @@ impl ScriptRuntime {
     /// Execute until a message, completion, or unsupported instruction yields control.
     pub fn advance(&mut self) -> Option<ScriptEvent> {
         let mut execution = self.execution?;
+        if execution.wait_frames > 0 {
+            execution.wait_frames -= 1;
+            self.execution = Some(execution);
+            return Some(ScriptEvent::Waiting);
+        }
         for _ in 0..MAX_INSTRUCTIONS_PER_ADVANCE {
             let Some(entry) = self.table.entry(execution.entry).copied() else {
                 self.execution = None;
@@ -107,10 +152,119 @@ impl ScriptRuntime {
                     });
                 }
                 0x0003 => execution.entry = entry.operands[0],
-                0x0005 | 0x008e => execution.entry = execution.entry.wrapping_add(1),
+                0x0005 | 0x0047 | 0x0050 | 0x008e => {
+                    execution.entry = execution.entry.wrapping_add(1)
+                }
                 0x0008 => {
                     execution.entry = execution.entry.wrapping_add(1);
                     execution.next_entry = execution.entry;
+                }
+                0x0009 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    execution.wait_frames = entry.operands[0].max(1) - 1;
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Waiting);
+                }
+                0x000b..=0x000e => {
+                    let direction = Direction::from_pal(entry.opcode - 0x000b)
+                        .expect("walk opcodes always encode a valid direction");
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::MoveObject {
+                        object_id: execution.trigger.object_id,
+                        direction,
+                    }));
+                }
+                0x000f => {
+                    let direction = optional_direction(entry.operands[0]);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetObjectPose {
+                        object_id: execution.trigger.object_id,
+                        direction,
+                        frame: (entry.operands[1] != 0xffff).then_some(entry.operands[1]),
+                    }));
+                }
+                0x0013 => {
+                    let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetObjectPosition {
+                        object_id,
+                        x: i32::from(entry.operands[1]),
+                        y: i32::from(entry.operands[2]),
+                    }));
+                }
+                0x0014 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetObjectPose {
+                        object_id: execution.trigger.object_id,
+                        direction: Some(Direction::South),
+                        frame: Some(entry.operands[0]),
+                    }));
+                }
+                0x0015 => {
+                    let Some(direction) = Direction::from_pal(entry.operands[0]) else {
+                        self.execution = None;
+                        return Some(ScriptEvent::Unsupported {
+                            trigger: execution.trigger,
+                            entry: execution.entry,
+                            opcode: entry.opcode,
+                        });
+                    };
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetPlayerPose {
+                        direction,
+                        frame: u8::try_from(entry.operands[1]).unwrap_or(u8::MAX),
+                    }));
+                }
+                0x0016 if entry.operands[0] != 0 => {
+                    let Some(direction) = Direction::from_pal(entry.operands[1]) else {
+                        self.execution = None;
+                        return Some(ScriptEvent::Unsupported {
+                            trigger: execution.trigger,
+                            entry: execution.entry,
+                            opcode: entry.opcode,
+                        });
+                    };
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetObjectPose {
+                        object_id: entry.operands[0],
+                        direction: Some(direction),
+                        frame: Some(entry.operands[2]),
+                    }));
+                }
+                0x0016 => execution.entry = execution.entry.wrapping_add(1),
+                0x0049 if entry.operands[0] != 0 => {
+                    let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetObjectState {
+                        object_id,
+                        state: entry.operands[1] as i16,
+                    }));
+                }
+                0x0049 => execution.entry = execution.entry.wrapping_add(1),
+                0x006c => {
+                    let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::OffsetObject {
+                        object_id,
+                        dx: i32::from(entry.operands[1] as i16),
+                        dy: i32::from(entry.operands[2] as i16),
+                    }));
+                }
+                0x006e => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::OffsetPlayer {
+                        dx: i32::from(entry.operands[0] as i16),
+                        dy: i32::from(entry.operands[1] as i16),
+                    }));
                 }
                 0x003b => {
                     execution.dialog_position = DialogPosition::Center;
@@ -153,6 +307,20 @@ impl ScriptRuntime {
             entry: execution.entry,
         })
     }
+}
+
+fn selected_object(selector: u16, current: u16) -> u16 {
+    if selector == 0 || selector == 0xffff {
+        current
+    } else {
+        selector
+    }
+}
+
+fn optional_direction(value: u16) -> Option<Direction> {
+    (value != 0xffff)
+        .then(|| Direction::from_pal(value))
+        .flatten()
 }
 
 #[cfg(test)]
@@ -250,5 +418,45 @@ mod tests {
                 entry: 99,
             })
         );
+    }
+
+    #[test]
+    fn yields_wait_ticks_and_world_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x0009, 2, 0, 0],
+            [0x000b, 0, 0, 0],
+            [0x0049, 0xffff, 0xffff, 0],
+            [0x006e, 0xfff0, 8, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(runtime.advance(), Some(ScriptEvent::Waiting));
+        assert_eq!(runtime.advance(), Some(ScriptEvent::Waiting));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::MoveObject {
+                object_id: 7,
+                direction: Direction::South,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetObjectState {
+                object_id: 7,
+                state: -1,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::OffsetPlayer {
+                dx: -16,
+                dy: 8,
+            }))
+        );
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
     }
 }

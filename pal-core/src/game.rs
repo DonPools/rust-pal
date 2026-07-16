@@ -5,6 +5,7 @@ use crate::role::{Direction, Role};
 use crate::scene::{
     blocks_position, find_search_trigger, find_touch_trigger, SceneObject, TriggerRequest,
 };
+use crate::script::ScriptAction;
 
 pub const UPDATE_INTERVAL_MS: u64 = 50;
 
@@ -87,6 +88,75 @@ impl<M: CollisionMap> GameState<M> {
 
     pub fn take_trigger(&mut self) -> Option<TriggerRequest> {
         self.pending_trigger.take()
+    }
+
+    /// Apply a platform-independent world mutation yielded by the script runtime.
+    pub fn apply_script_action(&mut self, action: ScriptAction) -> bool {
+        match action {
+            ScriptAction::MoveObject {
+                object_id,
+                direction,
+            } => {
+                let Some(object) = self.object_mut(object_id) else {
+                    return false;
+                };
+                object.direction = direction;
+                let (dx, dy) = direction.step_at_speed(2);
+                object.world_x += dx;
+                object.world_y += dy;
+                object.advance_animation();
+            }
+            ScriptAction::SetObjectPose {
+                object_id,
+                direction,
+                frame,
+            } => {
+                let Some(object) = self.object_mut(object_id) else {
+                    return false;
+                };
+                if let Some(direction) = direction {
+                    object.direction = direction;
+                }
+                if let Some(frame) = frame {
+                    object.current_frame = frame;
+                }
+            }
+            ScriptAction::SetObjectPosition { object_id, x, y } => {
+                let Some(object) = self.object_mut(object_id) else {
+                    return false;
+                };
+                object.world_x = x;
+                object.world_y = y;
+            }
+            ScriptAction::OffsetObject { object_id, dx, dy } => {
+                let Some(object) = self.object_mut(object_id) else {
+                    return false;
+                };
+                object.world_x += dx;
+                object.world_y += dy;
+                object.advance_animation();
+            }
+            ScriptAction::SetObjectState { object_id, state } => {
+                let Some(object) = self.object_mut(object_id) else {
+                    return false;
+                };
+                object.state = state;
+            }
+            ScriptAction::SetPlayerPose { direction, frame } => {
+                self.player.direction = direction;
+                self.player.anim_frame = frame;
+            }
+            ScriptAction::OffsetPlayer { dx, dy } => {
+                self.player.world_x += dx;
+                self.player.world_y += dy;
+                self.follow_player();
+            }
+        }
+        true
+    }
+
+    fn object_mut(&mut self, id: u16) -> Option<&mut SceneObject> {
+        self.scene_objects.iter_mut().find(|object| object.id == id)
     }
 
     /// Advance one fixed update and report whether visible state changed.
@@ -295,6 +365,36 @@ mod tests {
         assert_eq!(trigger.object_id, 1);
         assert_eq!(trigger.script_entry, 77);
         assert_eq!(state.scene_objects[0].direction, Direction::West);
+    }
+
+    #[test]
+    fn script_actions_mutate_world_state_and_follow_player() {
+        let mut state = state(&[]).with_scene_objects(vec![blocking_object(320, 200)]);
+        assert!(state.apply_script_action(ScriptAction::MoveObject {
+            object_id: 1,
+            direction: Direction::East,
+        }));
+        assert_eq!(
+            (
+                state.scene_objects[0].world_x,
+                state.scene_objects[0].world_y
+            ),
+            (324, 202)
+        );
+        assert_eq!(state.scene_objects[0].current_frame, 1);
+
+        assert!(state.apply_script_action(ScriptAction::SetObjectState {
+            object_id: 1,
+            state: -1,
+        }));
+        assert_eq!(state.scene_objects[0].state, -1);
+        assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 32, dy: 16 }));
+        assert_eq!((state.player.world_x, state.player.world_y), (352, 256));
+        assert_eq!((state.camera.x, state.camera.y), (192, 156));
+        assert!(!state.apply_script_action(ScriptAction::SetObjectState {
+            object_id: 99,
+            state: 0,
+        }));
     }
 
     #[test]

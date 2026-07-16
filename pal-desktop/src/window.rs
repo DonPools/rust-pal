@@ -115,6 +115,7 @@ impl HeldInput {
 struct ActiveDialog {
     message_id: u16,
     position: DialogPosition,
+    page: usize,
 }
 
 pub fn run_game_window(
@@ -220,13 +221,21 @@ pub fn run_game_window(
                 let mut changed = false;
                 while accumulator >= tick {
                     let sampled = input.sample();
-                    if dialog.is_some() {
+                    if let Some(active_dialog) = dialog.as_mut() {
                         if sampled.confirm || sampled.cancel {
-                            dialog = None;
                             changed = true;
-                            advance_script(&mut scripts, &mut game, &mut dialog, &mut |title| {
-                                window.set_title(title)
-                            });
+                            let page_count = dialog_page_count(&text, active_dialog.message_id);
+                            if active_dialog.page + 1 < page_count {
+                                active_dialog.page += 1;
+                            } else {
+                                dialog = None;
+                                advance_script(
+                                    &mut scripts,
+                                    &mut game,
+                                    &mut dialog,
+                                    &mut |title| window.set_title(title),
+                                );
+                            }
                         }
                     } else if scripts.is_active() {
                         advance_script(&mut scripts, &mut game, &mut dialog, &mut |title| {
@@ -312,9 +321,15 @@ fn advance_script(
             *dialog = Some(ActiveDialog {
                 message_id,
                 position,
+                page: 0,
             });
             set_title("Rust-PAL [Dialog]");
         }
+        Some(ScriptEvent::Waiting) => {}
+        Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
+            set_title("Rust-PAL [script target is unavailable]");
+        }
+        Some(ScriptEvent::Action(_)) => {}
         Some(ScriptEvent::Completed {
             trigger,
             next_entry,
@@ -372,11 +387,20 @@ fn render_dialog(
     };
     for (line, bytes) in wrap_big5_lines(message, 272)
         .into_iter()
+        .skip(dialog.page * 3)
         .take(3)
         .enumerate()
     {
         renderer.draw_big5_text(font, bytes, 20, y + 8 + line as i32 * 16, 0x4f);
     }
+}
+
+fn dialog_page_count(text: &TextLibrary, message_id: u16) -> usize {
+    let line_count = text
+        .message(usize::from(message_id))
+        .map(|message| wrap_big5_lines(message, 272).len())
+        .unwrap_or(0);
+    line_count.max(1).div_ceil(3)
 }
 
 fn fill_rect(renderer: &mut Renderer, x: i32, y: i32, width: i32, height: i32, color: [u8; 4]) {
@@ -770,5 +794,14 @@ mod tests {
         let text = [0xb8, 0x67, 0xc5, 0xe7, b'A'];
         let lines = wrap_big5_lines(&text, 24);
         assert_eq!(lines, [&text[..2], &text[2..]]);
+    }
+
+    #[test]
+    fn long_dialog_text_spans_multiple_three_line_pages() {
+        let text = [b'A'; 109];
+        let lines = wrap_big5_lines(&text, 272);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[..3].iter().map(|line| line.len()).sum::<usize>(), 102);
+        assert_eq!(lines[3].len(), 7);
     }
 }
