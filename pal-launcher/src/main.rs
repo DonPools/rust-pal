@@ -9,7 +9,7 @@ use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::GameState;
-use pal_core::map::{tile_to_world, Map, MAP_COLUMNS, MAP_HALVES, MAP_ROWS};
+use pal_core::map::{tile_to_world, Map};
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
 use pal_core::script::{ScriptEvent, ScriptRuntime};
@@ -40,8 +40,14 @@ fn main() {
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
     let (role_sprite_index, walk_frames) =
         load_default_role_settings(&data_dir).expect("failed to load player role settings");
-    let player = create_player(&map, &role_sprites, role_sprite_index, walk_frames)
-        .expect("failed to create player on a walkable tile");
+    let player = create_player(
+        &role_sprites,
+        role_sprite_index,
+        walk_frames,
+        scene_entry_position(&script_table, scene.scene.script_on_enter)
+            .expect("scene enter script has no initial party position"),
+    )
+    .expect("failed to create player at the scene entry position");
     let scene_objects = create_scene_objects(&scene, &role_sprites)
         .expect("failed to create current scene event objects");
     let game =
@@ -338,36 +344,74 @@ fn load_default_role_settings(data_dir: &Path) -> Option<(usize, u8)> {
 }
 
 fn create_player(
-    map: &Map,
     sprites: &RoleSprites,
     sprite_index: usize,
     frames_per_direction: u8,
+    world_position: (i32, i32),
 ) -> Option<Role> {
     if !sprites.has_directional_animation(sprite_index, frames_per_direction) {
         return None;
     }
-    let (map_x, map_y, map_h) = display_tile(map)?;
-    let (world_x, world_y) = tile_to_world(map_x, map_y, map_h)?;
     Some(Role {
         sprite_index,
-        world_x,
-        world_y,
+        world_x: world_position.0,
+        world_y: world_position.1,
         direction: Direction::South,
         anim_frame: 0,
         frames_per_direction,
     })
 }
 
-fn display_tile(map: &Map) -> Option<(usize, usize, usize)> {
-    // Keep enough map above the role for its bitmap to be fully visible.
-    for y in 8..MAP_ROWS {
-        for x in 0..MAP_COLUMNS {
-            for h in 0..MAP_HALVES {
-                if map.get_bottom_tile_index(x, y, h)? != 0 && !map.is_tile_blocked(x, y, h) {
-                    return Some((x, y, h));
-                }
+/// Find the first party-position opcode executed by a scene's entry script.
+fn scene_entry_position(scripts: &ScriptTable, start: u16) -> Option<(i32, i32)> {
+    let mut entry = start;
+    for _ in 0..1024 {
+        let script = scripts.entry(entry)?;
+        match script.opcode {
+            0x0046 => {
+                return tile_to_world(
+                    usize::from(script.operands[0]),
+                    usize::from(script.operands[1]),
+                    usize::from(script.operands[2]),
+                );
             }
+            0x0000..=0x0002 => return None,
+            0x0003 => entry = script.operands[0],
+            _ => entry = entry.checked_add(1)?,
         }
     }
-    map.first_occupied_tile()
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scripts(entries: &[[u16; 4]]) -> ScriptTable {
+        let data = entries
+            .iter()
+            .flat_map(|entry| entry.iter().flat_map(|value| value.to_le_bytes()))
+            .collect::<Vec<_>>();
+        ScriptTable::parse(&data).unwrap()
+    }
+
+    #[test]
+    fn scene_entry_position_follows_jumps_to_party_position() {
+        let scripts = scripts(&[
+            [0, 0, 0, 0],
+            [3, 3, 0, 0],
+            [0, 0, 0, 0],
+            [0x0046, 41, 18, 0],
+        ]);
+        assert_eq!(scene_entry_position(&scripts, 1), Some((1312, 288)));
+    }
+
+    #[test]
+    fn scene_entry_position_rejects_missing_or_invalid_position() {
+        assert_eq!(scene_entry_position(&scripts(&[[0, 0, 0, 0]]), 0), None);
+        assert_eq!(
+            scene_entry_position(&scripts(&[[0x0046, 128, 0, 0]]), 0),
+            None
+        );
+    }
 }
