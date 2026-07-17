@@ -168,7 +168,7 @@ define_script_opcodes! {
     DialogCenterWindow = 0x003E, "DIALOG_WINDOW", "Show following text in a centered window.", Implemented;
     RideObjectSlow = 0x003F, "RIDE_SLOW", "Ride the current event object to a tile at low speed.", Implemented;
     SetObjectTriggerMode = 0x0040, "OBJ_TRIGGER_MODE", "Set an event object's interaction trigger mode.", Implemented;
-    MarkScriptFailed = 0x0041, "FAIL", "Mark the current script execution as failed.", Unsupported;
+    MarkScriptFailed = 0x0041, "FAIL", "Mark the current script execution as failed.", Implemented;
     SimulatePlayerMagic = 0x0042, "MAGIC_SIM", "Simulate a player's magic attack in battle.", Unsupported;
     PlayMusic = 0x0043, "MUSIC", "Play or stop scene background music.", Implemented;
     RideObject = 0x0044, "RIDE", "Ride the current event object to a tile at normal speed.", Implemented;
@@ -217,7 +217,7 @@ define_script_opcodes! {
     WalkParty = 0x0070, "PARTY_WALK", "Walk the party to a tile at normal script speed.", Implemented;
     SetScreenWave = 0x0071, "SCREEN_WAVE", "Configure the screen wave effect.", Unsupported;
     FadeScene = 0x0073, "FADE_SCENE", "Fade from the backed-up screen to the current scene.", Stub;
-    JumpIfPartyNotFullHp = 0x0074, "JNOT_FULL_HP", "Jump when any party member is below maximum HP.", Unsupported;
+    JumpIfPartyNotFullHp = 0x0074, "JNOT_FULL_HP", "Jump when any party member is below maximum HP.", Implemented;
     SetParty = 0x0075, "PARTY_SET", "Replace the active party membership.", Implemented;
     ShowFbp = 0x0076, "FBP_SHOW", "Show an FBP full-screen picture.", Unsupported;
     StopMusic = 0x0077, "MUSIC_STOP", "Stop current music with an optional fade.", Implemented;
@@ -233,9 +233,9 @@ define_script_opcodes! {
     JumpIfNotFacingObject = 0x0081, "JNOT_FACING", "Jump when the player is not facing the specified event object.", Implemented;
     WalkObjectFast = 0x0082, "OBJ_WALK_FAST", "Walk the current event object to a tile at high speed.", Implemented;
     JumpIfObjectOutsideZone = 0x0083, "JOUTSIDE_ZONE", "Jump when an event object is outside another object's zone.", Unsupported;
-    PlaceUsedItemObject = 0x0084, "ITEM_PLACE", "Place the currently used item as an event object in the scene.", Unsupported;
+    PlaceUsedItemObject = 0x0084, "ITEM_PLACE", "Place the currently used item as an event object in the scene.", Implemented;
     Delay = 0x0085, "DELAY", "Delay for operand 0 periods of 80 milliseconds.", Implemented;
-    JumpIfItemNotEquipped = 0x0086, "JNOT_EQUIPPED", "Jump when fewer than the requested item count are equipped.", Unsupported;
+    JumpIfItemNotEquipped = 0x0086, "JNOT_EQUIPPED", "Jump when fewer than the requested item count are equipped.", Implemented;
     AnimateObject = 0x0087, "OBJ_ANIMATE", "Advance an event object's animation.", Implemented;
     ScaleMagicByCash = 0x0088, "MAGIC_SCALE_CASH", "Consume cash and derive magic base damage from it.", Unsupported;
     SetBattleResult = 0x0089, "BATTLE_RESULT", "Set the current battle result.", Unsupported;
@@ -371,6 +371,11 @@ pub enum ScriptAction {
         object_id: u16,
         dx: i32,
         dy: i32,
+    },
+    PlaceObjectInFront {
+        object_id: u16,
+        state: i16,
+        blocked_entry: u16,
     },
     OffsetObject {
         object_id: u16,
@@ -509,6 +514,14 @@ pub enum ScriptCondition {
     PlayerFacesObject {
         object_id: u16,
         range: u16,
+        target_entry: u16,
+    },
+    PartyNotFullHp {
+        target_entry: u16,
+    },
+    ItemNotEquipped {
+        item_id: u16,
+        amount: u16,
         target_entry: u16,
     },
 }
@@ -1121,6 +1134,13 @@ impl ScriptRuntime {
                     }
                     return Some(ScriptEvent::Action(ScriptAction::SetParty { members }));
                 }
+                JumpIfPartyNotFullHp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::PartyNotFullHp {
+                        target_entry: entry.operands[0],
+                    }));
+                }
                 StopMusic => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -1215,6 +1235,24 @@ impl ScriptRuntime {
                     return Some(ScriptEvent::Condition(ScriptCondition::PlayerFacesObject {
                         object_id: entry.operands[0],
                         range: entry.operands[1],
+                        target_entry: entry.operands[2],
+                    }));
+                }
+                PlaceUsedItemObject => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PlaceObjectInFront {
+                        object_id: entry.operands[0],
+                        state: entry.operands[1] as i16,
+                        blocked_entry: entry.operands[2],
+                    }));
+                }
+                JumpIfItemNotEquipped => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::ItemNotEquipped {
+                        item_id: entry.operands[0],
+                        amount: entry.operands[1],
                         target_entry: entry.operands[2],
                     }));
                 }
@@ -1316,6 +1354,10 @@ impl ScriptRuntime {
                     }));
                 }
                 SetObjectTriggerMode => execution.entry = execution.entry.wrapping_add(1),
+                MarkScriptFailed => {
+                    execution.succeeded = false;
+                    execution.entry = execution.entry.wrapping_add(1);
+                }
                 Delay => {
                     execution.entry = execution.entry.wrapping_add(1);
                     execution.wait_frames = delay_80ms_ticks(entry.operands[0]).saturating_sub(1);
@@ -1359,7 +1401,6 @@ impl ScriptRuntime {
                 | TeleportParty
                 | DrainEnemyHp
                 | FleeBattle
-                | MarkScriptFailed
                 | SimulatePlayerMagic
                 | ChasePlayer
                 | WaitForKey
@@ -1389,12 +1430,9 @@ impl ScriptRuntime {
                 | StealEnemy
                 | BlowEnemiesAway
                 | SetScreenWave
-                | JumpIfPartyNotFullHp
                 | ShowFbp
                 | ToggleDayNightPalette
                 | JumpIfObjectOutsideZone
-                | PlaceUsedItemObject
-                | JumpIfItemNotEquipped
                 | ScaleMagicByCash
                 | SetBattleResult
                 | EnableAutoBattle
@@ -1540,7 +1578,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [75, 6, 84]);
+        assert_eq!(support_counts, [79, 6, 80]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2118,6 +2156,49 @@ mod tests {
                 position: DialogPosition::Lower,
                 font_color: 0x4f,
                 face_index: None,
+            })
+        );
+    }
+
+    #[test]
+    fn marks_failure_and_yields_party_and_equipment_conditions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x0084, 798, 2, 7],
+            [0x0041, 0, 0, 0],
+            [0x0074, 8, 0, 0],
+            [0x0086, 274, 2, 9],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlaceObjectInFront {
+                object_id: 798,
+                state: 2,
+                blocked_entry: 7,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::PartyNotFullHp {
+                target_entry: 8,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::ItemNotEquipped {
+                item_id: 274,
+                amount: 2,
+                target_entry: 9,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed {
+                trigger: trigger(1),
+                next_entry: 1,
+                succeeded: false,
             })
         );
     }

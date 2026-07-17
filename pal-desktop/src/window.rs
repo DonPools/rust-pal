@@ -1083,6 +1083,15 @@ fn advance_script<L>(
             let succeeded = game.apply_script_action(action);
             scripts.set_success(succeeded);
         }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::PlaceObjectInFront { blocked_entry, .. },
+        )) if !game.apply_script_action(action) => {
+            scripts.set_success(false);
+            scripts.branch_to(blocked_entry);
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaceObjectInFront {
+            ..
+        })) => {}
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::WalkObjectTo {
             object_id,
             tile_x,
@@ -1163,6 +1172,14 @@ fn advance_script<L>(
                     range,
                     target_entry,
                 } => (!game.player_faces_object(object_id, range), target_entry),
+                ScriptCondition::PartyNotFullHp { target_entry } => {
+                    (game.party_not_full_hp(), target_entry)
+                }
+                ScriptCondition::ItemNotEquipped {
+                    item_id,
+                    amount,
+                    target_entry,
+                } => (game.equipped_item_count(item_id) < amount, target_entry),
             };
             if matches {
                 scripts.branch_to(target_entry);

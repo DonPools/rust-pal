@@ -494,6 +494,34 @@ impl<M: CollisionMap> GameState<M> {
         inventory.saturating_add(u16::try_from(equipped).unwrap_or(u16::MAX))
     }
 
+    /// Count an item in the active party's equipment slots only.
+    pub fn equipped_item_count(&self, item_id: u16) -> u16 {
+        let Some(roles) = self.player_roles.as_ref() else {
+            return 0;
+        };
+        let equipped = self
+            .party
+            .members()
+            .iter()
+            .filter_map(|member| roles.role(usize::from(member.role_id)))
+            .flat_map(|role| role.equipment)
+            .filter(|&equipped| equipped == item_id)
+            .count();
+        u16::try_from(equipped).unwrap_or(u16::MAX)
+    }
+
+    /// Report whether any active party member is below maximum HP.
+    pub fn party_not_full_hp(&self) -> bool {
+        let Some(roles) = self.player_roles.as_ref() else {
+            return false;
+        };
+        self.party.members().iter().any(|member| {
+            roles
+                .role(usize::from(member.role_id))
+                .is_some_and(|role| role.hp < role.max_hp)
+        })
+    }
+
     pub fn inventory_count(&self, item_id: u16) -> u16 {
         self.inventory.get(&item_id).copied().unwrap_or(0)
     }
@@ -742,6 +770,38 @@ impl<M: CollisionMap> GameState<M> {
         if range > 0 {
             object.trigger_mode = 5u16.saturating_add(range);
         }
+        true
+    }
+
+    /// Place a current-scene object one logical movement step in front of the player.
+    pub fn place_object_in_front(&mut self, object_id: u16, state: i16) -> bool {
+        let Some(index) = self
+            .scene_objects
+            .iter()
+            .position(|object| object.id == object_id)
+        else {
+            return false;
+        };
+        let (dx, dy) = self.player.direction.step();
+        let target = (self.player.world_x + dx, self.player.world_y + dy);
+        let blocked_by_object = self
+            .scene_objects
+            .iter()
+            .enumerate()
+            .filter(|(candidate, _)| *candidate != index)
+            .any(|(_, object)| {
+                object.is_blocker()
+                    && u64::from(object.world_x.abs_diff(target.0))
+                        + u64::from(object.world_y.abs_diff(target.1)) * 2
+                        < 16
+            });
+        if self.map.is_world_blocked(target.0, target.1) || blocked_by_object {
+            return false;
+        }
+        let object = &mut self.scene_objects[index];
+        object.world_x = target.0;
+        object.world_y = target.1;
+        object.state = state;
         true
     }
 
@@ -1076,6 +1136,9 @@ impl<M: CollisionMap> GameState<M> {
                 object.world_x = position.0;
                 object.world_y = position.1;
             }
+            ScriptAction::PlaceObjectInFront {
+                object_id, state, ..
+            } => return self.place_object_in_front(object_id, state),
             ScriptAction::OffsetObject { object_id, dx, dy } => {
                 let Some(object) = self.object_mut(object_id) else {
                     return false;
@@ -2915,6 +2978,37 @@ mod tests {
     }
 
     #[test]
+    fn party_health_and_equipped_item_conditions_use_active_mutable_roles() {
+        let mut role_data = vec![0; 900];
+        let mut set_role_value = |array: usize, role: usize, value: u16| {
+            let offset = array * PLAYER_ROLE_COUNT * 2 + role * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        };
+        for role in 0..3 {
+            set_role_value(7, role, 100);
+            set_role_value(9, role, if role == 1 { 75 } else { 100 });
+            set_role_value(11, role, 274);
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let mut party = Party::single(0, &roles).unwrap();
+        assert!(party.add(1, &roles));
+        let mut state = state(&[]).with_party(party).with_player_roles(roles);
+
+        assert!(state.party_not_full_hp());
+        assert_eq!(state.equipped_item_count(274), 2);
+        state.player_roles.as_mut().unwrap().role_mut(1).unwrap().hp = 100;
+        assert!(!state.party_not_full_hp());
+        state
+            .player_roles
+            .as_mut()
+            .unwrap()
+            .role_mut(1)
+            .unwrap()
+            .equipment[0] = 0;
+        assert_eq!(state.equipped_item_count(274), 1);
+    }
+
+    #[test]
     fn item_use_validates_targets_applies_recovery_and_consumes_on_success() {
         let mut role_data = vec![0; 900];
         let mut set_role_value = |array: usize, role: usize, value: u16| {
@@ -3092,6 +3186,31 @@ mod tests {
         state.scene_objects[0].state = 0;
         assert!(!state.player_faces_object(1, 1));
         assert!(!state.player_faces_object(99, 1));
+    }
+
+    #[test]
+    fn item_object_placement_requires_current_scene_and_clear_space() {
+        let mut item_object = blocking_object(0, 0);
+        item_object.id = 7;
+        item_object.state = 0;
+        let mut game = state(&[]).with_scene_objects(vec![item_object.clone()]);
+
+        assert!(game.place_object_in_front(7, 2));
+        assert_eq!(
+            (game.scene_objects[0].world_x, game.scene_objects[0].world_y),
+            (304, 248)
+        );
+        assert_eq!(game.object_state(7), Some(2));
+        assert!(!game.place_object_in_front(99, 2));
+
+        let mut blocked_by_map = state(&[(304, 248)]).with_scene_objects(vec![item_object.clone()]);
+        assert!(!blocked_by_map.place_object_in_front(7, 2));
+        assert_eq!(blocked_by_map.object_state(7), Some(0));
+
+        let blocker = blocking_object(304, 248);
+        let mut blocked_by_object = state(&[]).with_scene_objects(vec![item_object, blocker]);
+        assert!(!blocked_by_object.place_object_in_front(7, 2));
+        assert_eq!(blocked_by_object.object_state(7), Some(0));
     }
 
     #[test]
