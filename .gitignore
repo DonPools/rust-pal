@@ -1,5 +1,7 @@
 # Rust
 target/
+rust-pal.snapshot.json
+rust-pal.snapshot.json.tmp
 Cargo.lock
 
 # macOS

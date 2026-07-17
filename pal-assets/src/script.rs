@@ -8,7 +8,7 @@ pub struct ScriptEntry {
     pub operands: [u16; 3],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScriptTable {
     entries: Vec<ScriptEntry>,
 }

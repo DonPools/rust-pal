@@ -47,6 +47,9 @@ frame = direction * walk_frames + animation_frame
 - 使用精灵前验证四个方向所需帧均存在且能解码。
 - 队伍最多包含 5 个不同角色；这是运行时约束，不属于资源表布局。
 
+运行时持有完整六角色可变表；队伍成员属性是该表的同步视图。HP、MP、装备和精灵等
+变化不会因角色离队再入队而重置，并随版本 9 开发快照一起保存。
+
 ## 参考
 
 - SDLPAL `global.h`：`PLAYERROLES`、`PLAYERS` 布局

@@ -30,6 +30,21 @@ impl Party {
         &self.members
     }
 
+    pub fn sync_from_roles(&mut self, roles: &PlayerRoles) -> bool {
+        let Some(attributes) = self
+            .members
+            .iter()
+            .map(|member| roles.role(usize::from(member.role_id)).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        for (member, attributes) in self.members.iter_mut().zip(attributes) {
+            member.attributes = attributes;
+        }
+        true
+    }
+
     pub fn leader(&self) -> Option<&PartyMember> {
         self.members.first()
     }

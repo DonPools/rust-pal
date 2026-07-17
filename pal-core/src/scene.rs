@@ -43,6 +43,7 @@ pub struct SceneObject {
     pub direction: Direction,
     pub current_frame: u16,
     pub vanish_time: i16,
+    pub auto_script_idle_frame: u16,
 }
 
 impl SceneObject {
@@ -69,6 +70,7 @@ impl SceneObject {
             direction,
             current_frame: event.current_frame,
             vanish_time: event.vanish_time,
+            auto_script_idle_frame: event.auto_script_idle_frame,
         })
     }
 

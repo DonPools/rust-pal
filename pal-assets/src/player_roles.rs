@@ -72,6 +72,18 @@ impl PlayerRoles {
         self.roles.get(role_index)
     }
 
+    pub fn role_mut(&mut self, role_index: usize) -> Option<&mut PlayerRole> {
+        self.roles.get_mut(role_index)
+    }
+
+    pub fn from_roles(roles: [PlayerRole; PLAYER_ROLE_COUNT]) -> Self {
+        Self { roles }
+    }
+
+    pub fn cloned_roles(&self) -> [PlayerRole; PLAYER_ROLE_COUNT] {
+        self.roles.clone()
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &PlayerRole> {
         self.roles.iter()
     }

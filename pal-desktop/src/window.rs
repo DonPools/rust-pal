@@ -1,17 +1,20 @@
 //! Native window and map framebuffer presentation.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::audio::SoundEffects;
+use crate::audio::{BackgroundMusic, SoundEffects};
 use crate::renderer::Renderer;
 use pal_assets::rle::RleBitmap;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
-use pal_core::game::{Camera, GameInput, GameState, UPDATE_INTERVAL_MS};
+use pal_core::game::{
+    AutoScriptError, Camera, GameInput, GameState, StoreItem, UPDATE_INTERVAL_MS,
+};
 use pal_core::map::{Map, MAP_COLUMNS, MAP_ROWS};
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
-use pal_core::script::{DialogPosition, ScriptEvent, ScriptRuntime};
+use pal_core::script::{DialogPosition, ScriptCondition, ScriptEvent, ScriptRuntime};
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
@@ -42,6 +45,9 @@ pub struct GameResources {
     pub text: TextLibrary,
     pub font: BitmapFont,
     pub voc_mkf: Vec<u8>,
+    pub midi_mkf: Vec<u8>,
+    pub sound_font: Vec<u8>,
+    pub snapshot_path: PathBuf,
 }
 
 impl Viewport {
@@ -143,6 +149,46 @@ struct InventoryMenu {
     selected: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfirmationMenu {
+    no_entry: u16,
+    selected_yes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShopMode {
+    Buy { store_number: u16 },
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShopMenu {
+    mode: ShopMode,
+    selected: usize,
+    confirming: bool,
+}
+
+impl ShopMenu {
+    fn items(self, game: &GameState) -> Vec<StoreItem> {
+        match self.mode {
+            ShopMode::Buy { store_number } => game.store_items(store_number).unwrap_or_default(),
+            ShopMode::Sell => game.sellable_inventory(),
+        }
+    }
+
+    fn update_selection(&mut self, direction: Option<Direction>, item_count: usize) {
+        if item_count == 0 {
+            self.selected = 0;
+            return;
+        }
+        match direction {
+            Some(Direction::North) => self.selected = self.selected.saturating_sub(1),
+            Some(Direction::South) => self.selected = (self.selected + 1).min(item_count - 1),
+            _ => {}
+        }
+    }
+}
+
 impl InventoryMenu {
     fn update(&mut self, direction: Option<Direction>, item_count: usize) {
         if item_count == 0 {
@@ -167,13 +213,19 @@ impl InventoryMenu {
 struct UiRenderContext<'a> {
     dialog: Option<&'a ActiveDialog>,
     inventory_menu: Option<&'a InventoryMenu>,
+    confirmation_menu: Option<&'a ConfirmationMenu>,
+    shop_menu: Option<&'a ShopMenu>,
     text: &'a TextLibrary,
     font: &'a BitmapFont,
 }
 
 struct ScriptServices {
     pending_enter_script: Option<u16>,
+    confirmation_menu: Option<ConfirmationMenu>,
+    shop_menu: Option<ShopMenu>,
+    auto_scripts: ScriptTable,
     sound_effects: SoundEffects,
+    music: BackgroundMusic,
 }
 
 pub fn run_game_window<L>(
@@ -191,6 +243,9 @@ pub fn run_game_window<L>(
         text,
         font,
         voc_mkf,
+        midi_mkf,
+        sound_font,
+        snapshot_path,
     } = resources;
     let viewport = Viewport::from(game.camera);
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -214,13 +269,20 @@ pub fn run_game_window<L>(
     let mut pixels = Pixels::new(viewport.width, viewport.height, surface)
         .expect("failed to create pixel surface");
     let mut show_collision = false;
+    let auto_scripts = script_table.clone();
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
     let mut inventory_menu = None;
     let mut script_services = ScriptServices {
         pending_enter_script: None,
+        confirmation_menu: None,
+        shop_menu: None,
+        auto_scripts,
         sound_effects: SoundEffects::new(&voc_mkf).expect("failed to load VOC sound effects"),
+        music: BackgroundMusic::new(&midi_mkf, &sound_font)
+            .expect("failed to load MIDI music and SoundFont"),
     };
+    let initial_enter_script = game.scene_enter_script(initial_enter_script);
     if initial_enter_script != 0 {
         scripts.start(pal_core::scene::TriggerRequest {
             object_id: 0xffff,
@@ -236,6 +298,8 @@ pub fn run_game_window<L>(
         UiRenderContext {
             dialog: dialog.as_ref(),
             inventory_menu: inventory_menu.as_ref(),
+            confirmation_menu: script_services.confirmation_menu.as_ref(),
+            shop_menu: script_services.shop_menu.as_ref(),
             text: &text,
             font: &font,
         },
@@ -254,13 +318,62 @@ pub fn run_game_window<L>(
                 WindowEvent::KeyboardInput { event, .. } => {
                     if let PhysicalKey::Code(code) = event.physical_key {
                         let pressed = event.state == ElementState::Pressed;
-                        if code == KeyCode::F3 && pressed && !event.repeat {
-                            show_collision = !show_collision;
-                            window.set_title(if show_collision {
-                                "Rust-PAL [Collision Debug]"
-                            } else {
-                                "Rust-PAL"
-                            });
+                        let handled = pressed
+                            && !event.repeat
+                            && match code {
+                                KeyCode::F3 => {
+                                    show_collision = !show_collision;
+                                    window.set_title(if show_collision {
+                                        "Rust-PAL [Collision Debug]"
+                                    } else {
+                                        "Rust-PAL"
+                                    });
+                                    true
+                                }
+                                KeyCode::F5 if !scripts.is_active() && dialog.is_none() => {
+                                    if game.encode_snapshot().is_some_and(|bytes| {
+                                        write_snapshot(&snapshot_path, &bytes).is_ok()
+                                    }) {
+                                        window.set_title("Rust-PAL [Snapshot saved]");
+                                    } else {
+                                        window.set_title("Rust-PAL [Snapshot save failed]");
+                                    }
+                                    true
+                                }
+                                KeyCode::F9 if !scripts.is_active() && dialog.is_none() => {
+                                    let saved = std::fs::read(&snapshot_path)
+                                        .ok()
+                                        .and_then(|bytes| game.decode_snapshot(&bytes));
+                                    if let Some(saved) = saved {
+                                        if let Some(scene) =
+                                            load_scene(saved.scene_number(), &role_sprites)
+                                        {
+                                            game.restore_snapshot(saved, scene.map);
+                                            if let Some(music_id) = game.current_music {
+                                                if !script_services.music.play(music_id, true, 0) {
+                                                    window.set_title(
+                                                        "Rust-PAL [snapshot music unavailable]",
+                                                    );
+                                                }
+                                            } else {
+                                                script_services.music.stop();
+                                            }
+                                            inventory_menu = None;
+                                            script_services.pending_enter_script = None;
+                                            input = HeldInput::default();
+                                            window.set_title("Rust-PAL [Snapshot restored]");
+                                        } else {
+                                            window
+                                                .set_title("Rust-PAL [Snapshot scene unavailable]");
+                                        }
+                                    } else {
+                                        window.set_title("Rust-PAL [No snapshot]");
+                                    }
+                                    true
+                                }
+                                _ => false,
+                            };
+                        if handled {
                             render_game(
                                 &mut renderer,
                                 &game,
@@ -269,6 +382,8 @@ pub fn run_game_window<L>(
                                 UiRenderContext {
                                     dialog: dialog.as_ref(),
                                     inventory_menu: inventory_menu.as_ref(),
+                                    confirmation_menu: script_services.confirmation_menu.as_ref(),
+                                    shop_menu: script_services.shop_menu.as_ref(),
                                     text: &text,
                                     font: &font,
                                 },
@@ -324,6 +439,82 @@ pub fn run_game_window<L>(
                                 );
                             }
                         }
+                    } else if let Some(menu) = script_services.confirmation_menu.as_mut() {
+                        changed = sampled.confirm || sampled.cancel || sampled.direction.is_some();
+                        if matches!(sampled.direction, Some(Direction::West | Direction::North)) {
+                            menu.selected_yes = false;
+                        } else if matches!(
+                            sampled.direction,
+                            Some(Direction::East | Direction::South)
+                        ) {
+                            menu.selected_yes = true;
+                        }
+                        if sampled.confirm || sampled.cancel {
+                            let no_entry = menu.no_entry;
+                            let selected_no = sampled.cancel || !menu.selected_yes;
+                            script_services.confirmation_menu = None;
+                            if selected_no {
+                                scripts.branch_to(no_entry);
+                            }
+                            advance_script(
+                                &mut scripts,
+                                &mut game,
+                                &mut dialog,
+                                &role_sprites,
+                                &mut load_scene,
+                                &mut script_services,
+                                &mut |title| window.set_title(title),
+                            );
+                        }
+                    } else if script_services.shop_menu.is_some() {
+                        let mut close_shop = false;
+                        {
+                            let menu = script_services
+                                .shop_menu
+                                .as_mut()
+                                .expect("shop menu was checked above");
+                            let items = menu.items(&game);
+                            changed =
+                                sampled.confirm || sampled.cancel || sampled.direction.is_some();
+                            if menu.confirming {
+                                if sampled.cancel {
+                                    menu.confirming = false;
+                                } else if sampled.confirm {
+                                    if let Some(item) = items.get(menu.selected) {
+                                        match menu.mode {
+                                            ShopMode::Buy { .. } => {
+                                                game.buy_item(item.item_id);
+                                            }
+                                            ShopMode::Sell => {
+                                                game.sell_item(item.item_id);
+                                            }
+                                        }
+                                    }
+                                    menu.confirming = false;
+                                    let remaining = menu.items(&game).len();
+                                    menu.selected = menu.selected.min(remaining.saturating_sub(1));
+                                }
+                            } else if sampled.cancel {
+                                close_shop = true;
+                            } else {
+                                menu.update_selection(sampled.direction, items.len());
+                                if sampled.confirm && items.get(menu.selected).is_some() {
+                                    menu.confirming = true;
+                                }
+                            }
+                        }
+                        if close_shop {
+                            script_services.shop_menu = None;
+                            advance_script(
+                                &mut scripts,
+                                &mut game,
+                                &mut dialog,
+                                &role_sprites,
+                                &mut load_scene,
+                                &mut script_services,
+                                &mut |title| window.set_title(title),
+                            );
+                        }
                     } else if let Some(menu) = inventory_menu.as_mut() {
                         changed = sampled.cancel || sampled.direction.is_some();
                         if sampled.cancel {
@@ -368,6 +559,19 @@ pub fn run_game_window<L>(
                                 }
                             }
                         }
+                        if !scripts.is_active() {
+                            match game.update_auto_scripts(&script_services.auto_scripts) {
+                                Ok(auto_changed) => changed |= auto_changed,
+                                Err(error) => window.set_title(&auto_script_error_title(error)),
+                            }
+                            for sound_id in game.take_auto_script_sounds() {
+                                if !script_services.sound_effects.play(sound_id) {
+                                    window.set_title(&format!(
+                                        "Rust-PAL [invalid auto sound {sound_id}]"
+                                    ));
+                                }
+                            }
+                        }
                     }
                     accumulator -= tick;
                 }
@@ -380,6 +584,8 @@ pub fn run_game_window<L>(
                         UiRenderContext {
                             dialog: dialog.as_ref(),
                             inventory_menu: inventory_menu.as_ref(),
+                            confirmation_menu: script_services.confirmation_menu.as_ref(),
+                            shop_menu: script_services.shop_menu.as_ref(),
                             text: &text,
                             font: &font,
                         },
@@ -395,6 +601,42 @@ pub fn run_game_window<L>(
         .expect("event loop failed");
 }
 
+fn auto_script_error_title(error: AutoScriptError) -> String {
+    match error {
+        AutoScriptError::InvalidEntry { object_id, entry } => {
+            format!("Rust-PAL [object {object_id} invalid auto script {entry}]")
+        }
+        AutoScriptError::MissingObject {
+            object_id,
+            entry,
+            target_id,
+        } => {
+            format!("Rust-PAL [object {object_id} auto script {entry} missing object {target_id}]")
+        }
+        AutoScriptError::Unsupported {
+            object_id,
+            entry,
+            opcode,
+        } => format!("Rust-PAL [object {object_id} auto script {entry} opcode {opcode:04x}]"),
+        AutoScriptError::InstructionLimit { object_id, entry } => {
+            format!("Rust-PAL [object {object_id} auto script loop at {entry}]")
+        }
+    }
+}
+
+fn write_snapshot(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes)?;
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(_error) if path.exists() => {
+            std::fs::remove_file(path)?;
+            std::fs::rename(temporary, path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn render_game(
     renderer: &mut Renderer,
     game: &GameState,
@@ -403,11 +645,15 @@ fn render_game(
     ui: UiRenderContext<'_>,
 ) {
     let viewport = Viewport::from(game.camera);
+    let roles = std::iter::once(&game.player)
+        .chain(game.party_followers())
+        .cloned()
+        .collect::<Vec<_>>();
     render_tile_map(
         renderer,
         &game.map,
         Some(role_sprites),
-        std::slice::from_ref(&game.player),
+        &roles,
         &game.scene_objects,
         viewport,
     );
@@ -416,6 +662,10 @@ fn render_game(
     }
     if let Some(dialog) = ui.dialog {
         render_dialog(renderer, ui.text, ui.font, dialog);
+    } else if let Some(menu) = ui.confirmation_menu {
+        render_confirmation_menu(renderer, ui.text, ui.font, *menu);
+    } else if let Some(menu) = ui.shop_menu {
+        render_shop_menu(renderer, game, ui.text, ui.font, *menu);
     } else if let Some(menu) = ui.inventory_menu {
         render_inventory_menu(renderer, game, ui.text, ui.font, *menu);
     }
@@ -444,14 +694,48 @@ fn advance_script<L>(
             });
             set_title("Rust-PAL [Dialog]");
         }
-        Some(ScriptEvent::Waiting) => {}
+        Some(ScriptEvent::Waiting) => {
+            update_trigger_world(game, services, set_title);
+        }
+        Some(ScriptEvent::Delay) => {}
+        Some(ScriptEvent::Confirm { no_entry }) => {
+            services.confirmation_menu = Some(ConfirmationMenu {
+                no_entry,
+                selected_yes: false,
+            });
+            set_title("Rust-PAL [Confirm]");
+        }
+        Some(ScriptEvent::OpenBuyMenu { store_number }) => {
+            if game.store_items(store_number).is_none() {
+                set_title("Rust-PAL [invalid store]");
+                return;
+            }
+            services.shop_menu = Some(ShopMenu {
+                mode: ShopMode::Buy { store_number },
+                selected: 0,
+                confirming: false,
+            });
+            set_title("Rust-PAL [Buy]");
+        }
+        Some(ScriptEvent::OpenSellMenu) => {
+            services.shop_menu = Some(ShopMenu {
+                mode: ShopMode::Sell,
+                selected: 0,
+                confirming: false,
+            });
+            set_title("Rust-PAL [Sell]");
+        }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
+            if scene_number == game.scene_number {
+                return;
+            }
             let Some(scene) = load_scene(scene_number, role_sprites) else {
                 set_title("Rust-PAL [failed to load scene]");
                 return;
             };
             game.replace_scene(scene.number, scene.map, scene.objects);
-            services.pending_enter_script = (scene.enter_script != 0).then_some(scene.enter_script);
+            let enter_script = game.scene_enter_script(scene.enter_script);
+            services.pending_enter_script = (enter_script != 0).then_some(enter_script);
             set_title(&format!("Rust-PAL [scene {}]", scene.number));
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaySound { sound_id }))
@@ -460,6 +744,125 @@ fn advance_script<L>(
             set_title(&format!("Rust-PAL [invalid sound {sound_id}]"));
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaySound { .. })) => {}
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlayMusic {
+            music_id,
+            looped,
+            fade_seconds,
+        })) => {
+            if services.music.play(music_id, looped, fade_seconds) {
+                game.apply_script_action(pal_core::script::ScriptAction::PlayMusic {
+                    music_id,
+                    looped,
+                    fade_seconds,
+                });
+            } else {
+                set_title(&format!("Rust-PAL [invalid music {music_id}]"));
+            }
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::AdjustCash {
+            amount,
+            insufficient_entry,
+        })) if !game.adjust_cash(amount) => {
+            scripts.branch_to(insufficient_entry);
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::AdjustCash { .. })) => {}
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::RemoveItem {
+            item_id,
+            amount,
+            insufficient_entry,
+        })) => {
+            if let (false, 1..) = (
+                game.remove_item(item_id, amount, insufficient_entry),
+                insufficient_entry,
+            ) {
+                scripts.branch_to(insufficient_entry);
+            }
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::WalkObjectTo {
+            object_id,
+            tile_x,
+            tile_y,
+            half,
+            speed,
+            repeat_entry,
+        })) => match game.walk_object_to(object_id, tile_x, tile_y, half, speed) {
+            Some(true) => {}
+            Some(false) => {
+                scripts.branch_to(repeat_entry);
+            }
+            None => set_title("Rust-PAL [script walk target is unavailable]"),
+        },
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::WalkPlayerTo {
+            tile_x,
+            tile_y,
+            half,
+            speed,
+            repeat_entry,
+        })) => match game.walk_player_to(tile_x, tile_y, half, speed) {
+            Some(true) => {}
+            Some(false) => {
+                scripts.branch_to(repeat_entry);
+            }
+            None => set_title("Rust-PAL [script party walk target is unavailable]"),
+        },
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::RideObjectTo {
+            object_id,
+            tile_x,
+            tile_y,
+            half,
+            speed,
+            repeat_entry,
+        })) => {
+            match game.ride_object_to(object_id, tile_x, tile_y, half, speed) {
+                Some(true) => {}
+                Some(false) => {
+                    scripts.branch_to(repeat_entry);
+                }
+                None => set_title("Rust-PAL [script ride target is unavailable]"),
+            }
+            update_trigger_world(game, services, set_title);
+        }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::MoveViewport { x, y, frames },
+        )) => {
+            game.apply_script_action(action);
+            if (x != 0 || y != 0) && frames != -1 {
+                update_trigger_world(game, services, set_title);
+            }
+        }
+        Some(ScriptEvent::Condition(condition)) => {
+            let (matches, target_entry) = match condition {
+                ScriptCondition::ItemCountLess {
+                    item_id,
+                    amount,
+                    target_entry,
+                } => (
+                    i32::from(game.item_count(item_id)) < i32::from(amount),
+                    target_entry,
+                ),
+                ScriptCondition::ObjectStateEquals {
+                    object_id,
+                    state,
+                    target_entry,
+                } => (game.object_state(object_id) == Some(state), target_entry),
+                ScriptCondition::SceneEquals {
+                    scene_number,
+                    target_entry,
+                } => (game.scene_number == scene_number, target_entry),
+                ScriptCondition::PartyContainsName {
+                    name_word_id,
+                    target_entry,
+                } => (game.party_contains_name(name_word_id), target_entry),
+                ScriptCondition::PlayerFacesObject {
+                    object_id,
+                    range,
+                    target_entry,
+                } => (!game.player_faces_object(object_id, range), target_entry),
+            };
+            if matches {
+                scripts.branch_to(target_entry);
+            }
+        }
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");
         }
@@ -468,12 +871,16 @@ fn advance_script<L>(
             trigger,
             next_entry,
         }) => {
-            if let Some(object) = game
-                .scene_objects
-                .iter_mut()
-                .find(|object| object.id == trigger.object_id)
-            {
-                object.trigger_script = next_entry;
+            if trigger.object_id == 0xffff {
+                game.update_scene_enter_script(next_entry);
+            } else {
+                if let Some(object) = game
+                    .scene_objects
+                    .iter_mut()
+                    .find(|object| object.id == trigger.object_id)
+                {
+                    object.trigger_script = next_entry;
+                }
             }
             if let Some(entry) = services.pending_enter_script.take() {
                 let trigger = pal_core::scene::TriggerRequest {
@@ -487,24 +894,37 @@ fn advance_script<L>(
             }
         }
         Some(ScriptEvent::Unsupported {
-            trigger,
+            trigger: _,
             entry,
             opcode,
         }) => {
-            game.pending_trigger = Some(trigger);
             set_title(&format!(
                 "Rust-PAL [unsupported script {entry} opcode {opcode:04x}]"
             ));
         }
-        Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
-            game.pending_trigger = Some(trigger);
+        Some(ScriptEvent::InvalidEntry { trigger: _, entry }) => {
             set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
         }
-        Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
-            game.pending_trigger = Some(trigger);
+        Some(ScriptEvent::InstructionLimit { trigger: _, entry }) => {
             set_title(&format!("Rust-PAL [script loop at {entry}]"));
         }
         None => {}
+    }
+}
+
+fn update_trigger_world(
+    game: &mut GameState,
+    services: &mut ScriptServices,
+    set_title: &mut impl FnMut(&str),
+) {
+    match game.update_auto_scripts(&services.auto_scripts) {
+        Ok(_) => {}
+        Err(error) => set_title(&auto_script_error_title(error)),
+    }
+    for sound_id in game.take_auto_script_sounds() {
+        if !services.sound_effects.play(sound_id) {
+            set_title(&format!("Rust-PAL [invalid auto sound {sound_id}]"));
+        }
     }
 }
 
@@ -535,6 +955,110 @@ fn render_dialog(
         .enumerate()
     {
         renderer.draw_big5_text(font, bytes, 20, y + 8 + line as i32 * 16, 0x4f);
+    }
+}
+
+fn render_confirmation_menu(
+    renderer: &mut Renderer,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    menu: ConfirmationMenu,
+) {
+    const NO_WORD: usize = 19;
+    const YES_WORD: usize = 20;
+    const X: i32 = 120;
+    const Y: i32 = 92;
+    fill_rect(renderer, X, Y, 80, 32, [8, 8, 12, 255]);
+    stroke_rect(renderer, X, Y, 80, 32, [224, 224, 208, 255]);
+    for (index, (word_id, selected)) in
+        [(NO_WORD, !menu.selected_yes), (YES_WORD, menu.selected_yes)]
+            .into_iter()
+            .enumerate()
+    {
+        let Some(label) = text.word(word_id) else {
+            continue;
+        };
+        let x = X + 10 + index as i32 * 38;
+        if selected {
+            fill_rect(renderer, x - 4, Y + 6, 34, 20, [48, 48, 56, 255]);
+        }
+        renderer.draw_big5_text(font, label, x, Y + 8, if selected { 0x2d } else { 0x4f });
+    }
+}
+
+fn render_shop_menu(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    menu: ShopMenu,
+) {
+    const PANEL_X: i32 = 112;
+    const PANEL_Y: i32 = 8;
+    const PANEL_WIDTH: i32 = 200;
+    const ROW_HEIGHT: i32 = 18;
+    const CASH_WORD: usize = 21;
+
+    let items = menu.items(game);
+    fill_rect(
+        renderer,
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        184,
+        [8, 8, 12, 255],
+    );
+    stroke_rect(
+        renderer,
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        184,
+        [224, 224, 208, 255],
+    );
+    for (row, item) in items.iter().take(9).enumerate() {
+        let y = PANEL_Y + 10 + row as i32 * ROW_HEIGHT;
+        if row == menu.selected {
+            stroke_rect(
+                renderer,
+                PANEL_X + 5,
+                y - 3,
+                PANEL_WIDTH - 10,
+                17,
+                [224, 192, 64, 255],
+            );
+        }
+        if let Some(name) = text.word(usize::from(item.item_id)) {
+            renderer.draw_big5_text(font, name, PANEL_X + 12, y, 0x4f);
+        }
+        draw_number(
+            renderer,
+            u32::from(item.price),
+            PANEL_X + PANEL_WIDTH - 12,
+            y + 4,
+            [240, 224, 96, 255],
+        );
+    }
+    if let Some(cash_label) = text.word(CASH_WORD) {
+        renderer.draw_big5_text(font, cash_label, PANEL_X + 12, PANEL_Y + 164, 0x4f);
+    }
+    draw_number(
+        renderer,
+        game.cash,
+        PANEL_X + PANEL_WIDTH - 12,
+        PANEL_Y + 168,
+        [240, 224, 96, 255],
+    );
+    if menu.confirming {
+        render_confirmation_menu(
+            renderer,
+            text,
+            font,
+            ConfirmationMenu {
+                no_entry: 0,
+                selected_yes: true,
+            },
+        );
     }
 }
 
@@ -591,8 +1115,8 @@ fn render_inventory_menu(
         }
         draw_number(
             renderer,
-            amount,
-            PANEL_X + PANEL_WIDTH - 28,
+            u32::from(amount),
+            PANEL_X + PANEL_WIDTH - 14,
             y + 4,
             [240, 240, 224, 255],
         );
@@ -606,7 +1130,7 @@ fn stroke_rect(renderer: &mut Renderer, x: i32, y: i32, width: i32, height: i32,
     fill_rect(renderer, x + width - 1, y, 1, height, color);
 }
 
-fn draw_number(renderer: &mut Renderer, value: u16, x: i32, y: i32, color: [u8; 4]) {
+fn draw_number(renderer: &mut Renderer, value: u32, right_x: i32, y: i32, color: [u8; 4]) {
     const DIGITS: [[u8; 5]; 10] = [
         [0b111, 0b101, 0b101, 0b101, 0b111],
         [0b010, 0b110, 0b010, 0b010, 0b111],
@@ -620,19 +1144,27 @@ fn draw_number(renderer: &mut Renderer, value: u16, x: i32, y: i32, color: [u8; 
         [0b111, 0b101, 0b111, 0b001, 0b111],
     ];
 
-    let digits = if value >= 10 {
-        [Some((value / 10) % 10), Some(value % 10)]
-    } else {
-        [None, Some(value)]
-    };
-    for (position, digit) in digits.into_iter().enumerate() {
-        let Some(digit) = digit else {
-            continue;
-        };
+    let mut digits = [0u8; 10];
+    let mut count = 0;
+    let mut remaining = value;
+    loop {
+        digits[digits.len() - 1 - count] = (remaining % 10) as u8;
+        count += 1;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    let start_x = right_x - count as i32 * 5 + 1;
+    for (position, &digit) in digits[digits.len() - count..].iter().enumerate() {
         for (row, bits) in DIGITS[usize::from(digit)].iter().enumerate() {
             for column in 0..3 {
                 if bits & (0b100 >> column) != 0 {
-                    renderer.put_rgba(x + position as i32 * 5 + column, y + row as i32, color);
+                    renderer.put_rgba(
+                        start_x + position as i32 * 5 + column,
+                        y + row as i32,
+                        color,
+                    );
                 }
             }
         }

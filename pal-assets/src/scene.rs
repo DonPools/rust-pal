@@ -109,6 +109,11 @@ impl SceneData {
     pub fn event_object_count(&self) -> usize {
         self.event_objects.len()
     }
+
+    /// Complete global event-object table in one-based ID order.
+    pub fn event_objects(&self) -> &[EventObject] {
+        &self.event_objects
+    }
 }
 
 fn parse_scene(record: &[u8]) -> Option<Scene> {
