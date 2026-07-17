@@ -1019,6 +1019,7 @@ fn advance_script<L>(
             });
             set_title("Rust-PAL [Sell]");
         }
+        Some(ScriptEvent::FadeScene { .. }) => {}
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
             if scene_number == game.scene_number {
                 return;

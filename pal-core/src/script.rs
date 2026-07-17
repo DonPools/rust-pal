@@ -35,6 +35,9 @@ pub enum ScriptEvent {
         store_number: u16,
     },
     OpenSellMenu,
+    FadeScene {
+        speed: u16,
+    },
     Action(ScriptAction),
     Condition(ScriptCondition),
     Completed {
@@ -824,6 +827,13 @@ impl ScriptRuntime {
                         speed: 2,
                         repeat_entry,
                     }));
+                }
+                0x0073 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::FadeScene {
+                        speed: entry.operands[0],
+                    });
                 }
                 0x0075 => {
                     execution.entry = execution.entry.wrapping_add(1);
@@ -1884,6 +1894,27 @@ mod tests {
             Some(ScriptEvent::Action(ScriptAction::SetParty {
                 members: [Some(0), None, None],
             }))
+        );
+    }
+
+    #[test]
+    fn yields_scene_fade_and_continues_at_the_next_instruction() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x0073, 4, 0x48, 0],
+            [0xffff, 42, 0, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(runtime.advance(), Some(ScriptEvent::FadeScene { speed: 4 }));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Message {
+                message_id: 42,
+                position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
+            })
         );
     }
 

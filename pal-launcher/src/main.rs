@@ -264,7 +264,8 @@ fn main() {
                 | ScriptEvent::Delay
                 | ScriptEvent::Confirm { .. }
                 | ScriptEvent::OpenBuyMenu { .. }
-                | ScriptEvent::OpenSellMenu => script_ticks += 1,
+                | ScriptEvent::OpenSellMenu
+                | ScriptEvent::FadeScene { .. } => script_ticks += 1,
                 ScriptEvent::Completed { .. } => break,
                 event => panic!("movement script did not complete: {event:?}"),
             }
@@ -341,7 +342,8 @@ fn main() {
                 ScriptEvent::Delay
                 | ScriptEvent::Confirm { .. }
                 | ScriptEvent::OpenBuyMenu { .. }
-                | ScriptEvent::OpenSellMenu => {}
+                | ScriptEvent::OpenSellMenu
+                | ScriptEvent::FadeScene { .. } => {}
                 ScriptEvent::Completed { .. } => break,
                 event => panic!("scene enter script did not complete: {event:?}"),
             }
@@ -407,7 +409,8 @@ fn main() {
                 ScriptEvent::Delay
                 | ScriptEvent::Confirm { .. }
                 | ScriptEvent::OpenBuyMenu { .. }
-                | ScriptEvent::OpenSellMenu => {}
+                | ScriptEvent::OpenSellMenu
+                | ScriptEvent::FadeScene { .. } => {}
                 ScriptEvent::Completed { .. } => break,
                 event => panic!("item script did not complete: {event:?}"),
             }
@@ -482,7 +485,8 @@ fn main() {
                 ScriptEvent::Delay
                 | ScriptEvent::Confirm { .. }
                 | ScriptEvent::OpenBuyMenu { .. }
-                | ScriptEvent::OpenSellMenu => {}
+                | ScriptEvent::OpenSellMenu
+                | ScriptEvent::FadeScene { .. } => {}
                 ScriptEvent::Completed { .. } => break,
                 event => panic!("exit script did not complete: {event:?}"),
             }
@@ -517,7 +521,8 @@ fn main() {
                 ScriptEvent::Delay
                 | ScriptEvent::Confirm { .. }
                 | ScriptEvent::OpenBuyMenu { .. }
-                | ScriptEvent::OpenSellMenu => {}
+                | ScriptEvent::OpenSellMenu
+                | ScriptEvent::FadeScene { .. } => {}
                 ScriptEvent::Completed { .. } => break,
                 event => panic!("inn conversation did not complete: {event:?}"),
             }
@@ -605,7 +610,8 @@ fn main() {
                 | ScriptEvent::Waiting
                 | ScriptEvent::Confirm { .. }
                 | ScriptEvent::OpenBuyMenu { .. }
-                | ScriptEvent::OpenSellMenu => {}
+                | ScriptEvent::OpenSellMenu
+                | ScriptEvent::FadeScene { .. } => {}
                 ScriptEvent::Completed { .. } => break,
                 event => panic!("stairs script did not complete: {event:?}"),
             }
