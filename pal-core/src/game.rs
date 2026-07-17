@@ -15,7 +15,7 @@ use crate::role::{Direction, Role};
 use crate::scene::{
     blocks_position, find_search_trigger, find_touch_trigger, SceneObject, TriggerRequest,
 };
-use crate::script::ScriptAction;
+use crate::script::{ScriptAction, ScriptOpcode};
 
 pub const UPDATE_INTERVAL_MS: u64 = 50;
 const MAX_INVENTORY: usize = 1024;
@@ -1591,13 +1591,21 @@ impl<M: CollisionMap> GameState<M> {
                         object_id,
                         entry: script_entry,
                     })?;
-            match entry.opcode {
-                0x0000 => return Ok(false),
-                0x0001 => {
+            let Some(opcode) = ScriptOpcode::from_raw(entry.opcode) else {
+                return Err(AutoScriptError::Unsupported {
+                    object_id,
+                    entry: script_entry,
+                    opcode: entry.opcode,
+                });
+            };
+            use ScriptOpcode::*;
+            match opcode {
+                Stop => return Ok(false),
+                StopAndAdvance => {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0002 => {
+                StopAndReplace => {
                     let object = &mut self.scene_objects[object_index];
                     if entry.operands[1] == 0 {
                         object.auto_script = entry.operands[0];
@@ -1611,7 +1619,7 @@ impl<M: CollisionMap> GameState<M> {
                     }
                     return Ok(true);
                 }
-                0x0003 => {
+                Jump => {
                     let object = &mut self.scene_objects[object_index];
                     if entry.operands[1] == 0 {
                         object.auto_script = entry.operands[0];
@@ -1626,7 +1634,7 @@ impl<M: CollisionMap> GameState<M> {
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0004 => {
+                Call => {
                     let called_object_id = if entry.operands[1] == 0 {
                         object_id
                     } else {
@@ -1641,7 +1649,7 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0006 => {
+                JumpByChance => {
                     let roll = ((u32::from(object_id)
                         .wrapping_mul(1_103_515_245)
                         .wrapping_add(u32::from(script_entry))
@@ -1660,7 +1668,7 @@ impl<M: CollisionMap> GameState<M> {
                     }
                     return Ok(true);
                 }
-                0x0009 => {
+                WaitFrames => {
                     let object = &mut self.scene_objects[object_index];
                     object.auto_script_idle_frame = object.auto_script_idle_frame.wrapping_add(1);
                     if object.auto_script_idle_frame >= entry.operands[0] {
@@ -1669,7 +1677,7 @@ impl<M: CollisionMap> GameState<M> {
                     }
                     return Ok(true);
                 }
-                0x000f => {
+                SetObjectPose => {
                     let object = &mut self.scene_objects[object_index];
                     if entry.operands[0] != 0xffff {
                         object.direction = Direction::from_pal(entry.operands[0]).ok_or(
@@ -1686,9 +1694,9 @@ impl<M: CollisionMap> GameState<M> {
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x000b..=0x000e => {
-                    let direction =
-                        Direction::from_pal(entry.opcode - 0x000b).expect("valid range");
+                WalkObjectSouth | WalkObjectWest | WalkObjectNorth | WalkObjectEast => {
+                    let direction = Direction::from_pal(opcode.raw() - WalkObjectSouth.raw())
+                        .expect("valid walk opcode");
                     let object = &mut self.scene_objects[object_index];
                     object.direction = direction;
                     let (dx, dy) = direction.step_at_speed(2);
@@ -1698,7 +1706,7 @@ impl<M: CollisionMap> GameState<M> {
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0010 | 0x0011 => {
+                WalkObjectTo | WalkObjectToSlow => {
                     let target = tile_to_world(
                         usize::from(entry.operands[0]),
                         usize::from(entry.operands[1]),
@@ -1710,7 +1718,7 @@ impl<M: CollisionMap> GameState<M> {
                         opcode: entry.opcode,
                     })?;
                     let object = &mut self.scene_objects[object_index];
-                    let should_move = entry.opcode == 0x0010
+                    let should_move = opcode == WalkObjectTo
                         || !self
                             .script_frame
                             .wrapping_add(u32::from(object_id))
@@ -1719,21 +1727,21 @@ impl<M: CollisionMap> GameState<M> {
                         && walk_scene_object_to(
                             object,
                             target,
-                            if entry.opcode == 0x0010 { 3 } else { 2 },
+                            if opcode == WalkObjectTo { 3 } else { 2 },
                         )
                     {
                         object.auto_script = script_entry.wrapping_add(1);
                     }
                     return Ok(true);
                 }
-                0x0014 => {
+                SetObjectGesture => {
                     let object = &mut self.scene_objects[object_index];
                     object.direction = Direction::South;
                     object.current_frame = entry.operands[0];
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0025 => {
+                SetObjectTriggerScript => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1750,7 +1758,7 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0040 => {
+                SetObjectTriggerMode => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1767,7 +1775,7 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0049 => {
+                SetObjectState => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1784,18 +1792,18 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0047 => {
+                PlaySound => {
                     self.pending_auto_sounds.push(entry.operands[0]);
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x004b => {
+                HideObjectShort => {
                     let object = &mut self.scene_objects[object_index];
                     object.vanish_time = -15;
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x004c => {
+                ChasePlayer => {
                     self.chase_player(
                         object_index,
                         if entry.operands[1] == 0 {
@@ -1813,7 +1821,7 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x006c => {
+                OffsetObjectAndAnimate => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1832,7 +1840,7 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x006f => {
+                SyncObjectState => {
                     let source_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1851,21 +1859,161 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0x0087 => {
+                AnimateObject => {
                     let object = &mut self.scene_objects[object_index];
                     object.advance_animation();
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                0xffff => {
+                PrintMessage => {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                opcode => {
+                // Known instructions that the auto-script scheduler does not implement yet.
+                Redraw
+                | StartBattle
+                | AdvanceEntry
+                | Confirm
+                | SetObjectPositionRelative
+                | SetObjectPosition
+                | SetPartyMemberPose
+                | SetSelectedObjectPose
+                | SetEquipmentEffect
+                | EquipItem
+                | AdjustPlayerAttribute
+                | SetPlayerAttribute
+                | AdjustPlayerHp
+                | AdjustPlayerMp
+                | AdjustPlayerHpMp
+                | AdjustCash
+                | AddItem
+                | RemoveItem
+                | DamageEnemy
+                | RevivePlayer
+                | RemoveEquipment
+                | SetObjectAutoScript
+                | OpenBuyMenu
+                | OpenSellMenu
+                | PoisonEnemy
+                | PoisonPlayer
+                | CureEnemyPoison
+                | CurePlayerPoison
+                | CurePoisonByLevel
+                | SetPlayerStatus
+                | SetEnemyStatus
+                | RemovePlayerStatus
+                | AdjustTemporaryPlayerStat
+                | SetTemporaryBattleSprite
+                | CollectEnemy
+                | TransmuteCollectedEnemies
+                | ShakeScreen
+                | SelectRngAnimation
+                | PlayRngAnimation
+                | TeleportParty
+                | DrainEnemyHp
+                | FleeBattle
+                | DialogCenter
+                | DialogUpper
+                | DialogLower
+                | DialogCenterWindow
+                | RideObjectSlow
+                | MarkScriptFailed
+                | SimulatePlayerMagic
+                | PlayMusic
+                | RideObject
+                | SetBattleMusic
+                | SetPartyPosition
+                | SetBattlefield
+                | WaitForKey
+                | LoadLastSave
+                | FadeToRed
+                | FadeOut
+                | FadeIn
+                | HideObject
+                | UseDayPalette
+                | UseNightPalette
+                | AddMagic
+                | RemoveMagic
+                | ScaleMagicByMp
+                | JumpIfItemCountLess
+                | ChangeScene
+                | HalvePlayerHp
+                | HalveEnemyHp
+                | HideBattleActor
+                | JumpIfPlayerLacksPoison
+                | JumpIfEnemyLacksPoison
+                | KillPlayer
+                | KillEnemy
+                | JumpIfPlayerNotPoisoned
+                | PauseEnemyChase
+                | SpeedUpEnemyChase
+                | JumpIfEnemyHpAbove
+                | SetPlayerSprite
+                | ThrowWeapon
+                | EnemyCastMagic
+                | JumpIfEnemyTurn
+                | EnemyEscape
+                | StealEnemy
+                | BlowEnemiesAway
+                | SetSceneScripts
+                | OffsetParty
+                | WalkParty
+                | SetScreenWave
+                | FadeScene
+                | JumpIfPartyNotFullHp
+                | SetParty
+                | ShowFbp
+                | StopMusic
+                | NoOp
+                | JumpIfPartyContainsPlayer
+                | WalkPartyFast
+                | WalkPartyFastest
+                | WalkObjectHalfSpeed
+                | OffsetObject
+                | SetObjectLayer
+                | MoveViewport
+                | ToggleDayNightPalette
+                | JumpIfNotFacingObject
+                | WalkObjectFast
+                | JumpIfObjectOutsideZone
+                | PlaceUsedItemObject
+                | Delay
+                | JumpIfItemNotEquipped
+                | ScaleMagicByCash
+                | SetBattleResult
+                | EnableAutoBattle
+                | SetPalette
+                | FadeColor
+                | LevelUpPlayer
+                | RestoreScreen
+                | HalveCash
+                | SetObjectScript
+                | JumpIfEnemyNotFirstKind
+                | PlayerMagicAnimation
+                | FadeSceneWithUpdate
+                | JumpIfObjectStateEquals
+                | JumpIfSceneEquals
+                | PlayEndingAnimation
+                | RideObjectFast
+                | SetPartyFollower
+                | SetSceneMap
+                | SetObjectStates
+                | FadeToCurrentScene
+                | DivideEnemy
+                | SummonEnemy
+                | TransformEnemy
+                | QuitGame
+                | CollapseParty
+                | RandomSelect
+                | PlayCdMusic
+                | ScrollFbp
+                | ShowFbpWithSprite
+                | BackupScreen
+                | AutoScriptNoOp => {
                     return Err(AutoScriptError::Unsupported {
                         object_id,
                         entry: script_entry,
-                        opcode,
+                        opcode: opcode.raw(),
                     })
                 }
             }
@@ -1902,13 +2050,21 @@ impl<M: CollisionMap> GameState<M> {
                         object_id,
                         entry: script_entry,
                     })?;
-            match entry.opcode {
-                0x0000..=0x0002 => return Ok(()),
-                0x0003 => {
+            let Some(opcode) = ScriptOpcode::from_raw(entry.opcode) else {
+                return Err(AutoScriptError::Unsupported {
+                    object_id,
+                    entry: script_entry,
+                    opcode: entry.opcode,
+                });
+            };
+            use ScriptOpcode::*;
+            match opcode {
+                Stop | StopAndAdvance | StopAndReplace => return Ok(()),
+                Jump => {
                     script_entry = entry.operands[0];
                     continue;
                 }
-                0x0004 => {
+                Call => {
                     let called_object_id = if entry.operands[1] == 0 {
                         object_id
                     } else {
@@ -1921,7 +2077,7 @@ impl<M: CollisionMap> GameState<M> {
                         depth + 1,
                     )?;
                 }
-                0x000f => {
+                SetObjectPose => {
                     let Some(object) = self.object_mut(object_id) else {
                         return Err(AutoScriptError::MissingObject {
                             object_id,
@@ -1942,7 +2098,7 @@ impl<M: CollisionMap> GameState<M> {
                         object.current_frame = entry.operands[1];
                     }
                 }
-                0x0014 => {
+                SetObjectGesture => {
                     let Some(object) = self.object_mut(object_id) else {
                         return Err(AutoScriptError::MissingObject {
                             object_id,
@@ -1953,8 +2109,8 @@ impl<M: CollisionMap> GameState<M> {
                     object.direction = Direction::South;
                     object.current_frame = entry.operands[0];
                 }
-                0x0047 => self.pending_auto_sounds.push(entry.operands[0]),
-                0x0049 => {
+                PlaySound => self.pending_auto_sounds.push(entry.operands[0]),
+                SetObjectState => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1969,7 +2125,7 @@ impl<M: CollisionMap> GameState<M> {
                     };
                     target.state = entry.operands[1] as i16;
                 }
-                0x004b => {
+                HideObjectShort => {
                     let Some(object) = self.object_mut(object_id) else {
                         return Err(AutoScriptError::MissingObject {
                             object_id,
@@ -1979,7 +2135,7 @@ impl<M: CollisionMap> GameState<M> {
                     };
                     object.vanish_time = -15;
                 }
-                0x006c => {
+                OffsetObjectAndAnimate => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
                     } else {
@@ -1996,7 +2152,7 @@ impl<M: CollisionMap> GameState<M> {
                     target.world_y += i32::from(entry.operands[2] as i16);
                     target.advance_animation();
                 }
-                0x0087 => {
+                AnimateObject => {
                     let Some(object) = self.object_mut(object_id) else {
                         return Err(AutoScriptError::MissingObject {
                             object_id,
@@ -2006,11 +2162,164 @@ impl<M: CollisionMap> GameState<M> {
                     };
                     object.advance_animation();
                 }
-                opcode => {
+                // Known instructions that immediate auto-subscripts do not implement yet.
+                Redraw
+                | JumpByChance
+                | StartBattle
+                | AdvanceEntry
+                | WaitFrames
+                | Confirm
+                | WalkObjectSouth
+                | WalkObjectWest
+                | WalkObjectNorth
+                | WalkObjectEast
+                | WalkObjectTo
+                | WalkObjectToSlow
+                | SetObjectPositionRelative
+                | SetObjectPosition
+                | SetPartyMemberPose
+                | SetSelectedObjectPose
+                | SetEquipmentEffect
+                | EquipItem
+                | AdjustPlayerAttribute
+                | SetPlayerAttribute
+                | AdjustPlayerHp
+                | AdjustPlayerMp
+                | AdjustPlayerHpMp
+                | AdjustCash
+                | AddItem
+                | RemoveItem
+                | DamageEnemy
+                | RevivePlayer
+                | RemoveEquipment
+                | SetObjectAutoScript
+                | SetObjectTriggerScript
+                | OpenBuyMenu
+                | OpenSellMenu
+                | PoisonEnemy
+                | PoisonPlayer
+                | CureEnemyPoison
+                | CurePlayerPoison
+                | CurePoisonByLevel
+                | SetPlayerStatus
+                | SetEnemyStatus
+                | RemovePlayerStatus
+                | AdjustTemporaryPlayerStat
+                | SetTemporaryBattleSprite
+                | CollectEnemy
+                | TransmuteCollectedEnemies
+                | ShakeScreen
+                | SelectRngAnimation
+                | PlayRngAnimation
+                | TeleportParty
+                | DrainEnemyHp
+                | FleeBattle
+                | DialogCenter
+                | DialogUpper
+                | DialogLower
+                | DialogCenterWindow
+                | RideObjectSlow
+                | SetObjectTriggerMode
+                | MarkScriptFailed
+                | SimulatePlayerMagic
+                | PlayMusic
+                | RideObject
+                | SetBattleMusic
+                | SetPartyPosition
+                | SetBattlefield
+                | ChasePlayer
+                | WaitForKey
+                | LoadLastSave
+                | FadeToRed
+                | FadeOut
+                | FadeIn
+                | HideObject
+                | UseDayPalette
+                | UseNightPalette
+                | AddMagic
+                | RemoveMagic
+                | ScaleMagicByMp
+                | JumpIfItemCountLess
+                | ChangeScene
+                | HalvePlayerHp
+                | HalveEnemyHp
+                | HideBattleActor
+                | JumpIfPlayerLacksPoison
+                | JumpIfEnemyLacksPoison
+                | KillPlayer
+                | KillEnemy
+                | JumpIfPlayerNotPoisoned
+                | PauseEnemyChase
+                | SpeedUpEnemyChase
+                | JumpIfEnemyHpAbove
+                | SetPlayerSprite
+                | ThrowWeapon
+                | EnemyCastMagic
+                | JumpIfEnemyTurn
+                | EnemyEscape
+                | StealEnemy
+                | BlowEnemiesAway
+                | SetSceneScripts
+                | OffsetParty
+                | SyncObjectState
+                | WalkParty
+                | SetScreenWave
+                | FadeScene
+                | JumpIfPartyNotFullHp
+                | SetParty
+                | ShowFbp
+                | StopMusic
+                | NoOp
+                | JumpIfPartyContainsPlayer
+                | WalkPartyFast
+                | WalkPartyFastest
+                | WalkObjectHalfSpeed
+                | OffsetObject
+                | SetObjectLayer
+                | MoveViewport
+                | ToggleDayNightPalette
+                | JumpIfNotFacingObject
+                | WalkObjectFast
+                | JumpIfObjectOutsideZone
+                | PlaceUsedItemObject
+                | Delay
+                | JumpIfItemNotEquipped
+                | ScaleMagicByCash
+                | SetBattleResult
+                | EnableAutoBattle
+                | SetPalette
+                | FadeColor
+                | LevelUpPlayer
+                | RestoreScreen
+                | HalveCash
+                | SetObjectScript
+                | JumpIfEnemyNotFirstKind
+                | PlayerMagicAnimation
+                | FadeSceneWithUpdate
+                | JumpIfObjectStateEquals
+                | JumpIfSceneEquals
+                | PlayEndingAnimation
+                | RideObjectFast
+                | SetPartyFollower
+                | SetSceneMap
+                | SetObjectStates
+                | FadeToCurrentScene
+                | DivideEnemy
+                | SummonEnemy
+                | TransformEnemy
+                | QuitGame
+                | CollapseParty
+                | RandomSelect
+                | PlayCdMusic
+                | ScrollFbp
+                | ShowFbpWithSprite
+                | BackupScreen
+                | AutoScriptNoOp
+                | PrintMessage => {
                     return Err(AutoScriptError::Unsupported {
                         object_id,
                         entry: script_entry,
-                        opcode,
+                        opcode: opcode.raw(),
                     })
                 }
             }

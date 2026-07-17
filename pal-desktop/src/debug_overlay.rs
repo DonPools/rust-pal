@@ -1,7 +1,7 @@
 //! Physical-resolution debug information rendered after the virtual framebuffer.
 
 use pal_core::scene::{TriggerKind, TriggerRequest};
-use pal_core::script::{ScriptDebugSnapshot, ScriptInstructionDebug};
+use pal_core::script::{ScriptDebugSnapshot, ScriptInstructionDebug, ScriptOpcode};
 use pixels::wgpu;
 
 const PANEL_LOGICAL_WIDTH: u32 = 320;
@@ -462,9 +462,11 @@ fn instruction_line(label: &str, instruction: Option<ScriptInstructionDebug>) ->
     instruction.map_or_else(
         || format!("{label} -"),
         |instruction| {
+            let mnemonic = instruction
+                .decoded_opcode()
+                .map_or("UNKNOWN", ScriptOpcode::mnemonic);
             format!(
-                "{label} {} @{} OP {:04X} {:04X}/{:04X}/{:04X}",
-                owner_name(instruction.object_id),
+                "{label} @{} {:04X} {mnemonic} {:04X}/{:04X}/{:04X}",
                 instruction.entry,
                 instruction.opcode,
                 instruction.operands[0],

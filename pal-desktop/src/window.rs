@@ -16,7 +16,7 @@ use pal_core::map::{Map, MAP_COLUMNS, MAP_ROWS};
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
 use pal_core::script::{
-    DialogPosition, ScriptCondition, ScriptDebugSnapshot, ScriptEvent, ScriptRuntime,
+    DialogPosition, ScriptCondition, ScriptDebugSnapshot, ScriptEvent, ScriptOpcode, ScriptRuntime,
 };
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
@@ -866,7 +866,10 @@ fn auto_script_error_title(error: AutoScriptError) -> String {
             object_id,
             entry,
             opcode,
-        } => format!("Rust-PAL [object {object_id} auto script {entry} opcode {opcode:04x}]"),
+        } => format!(
+            "Rust-PAL [object {object_id} auto script {entry} {}]",
+            opcode_label(opcode)
+        ),
         AutoScriptError::InstructionLimit { object_id, entry } => {
             format!("Rust-PAL [object {object_id} auto script loop at {entry}]")
         }
@@ -1221,7 +1224,8 @@ fn advance_script<L>(
                 resume_inventory_after_item_error(game, services);
             }
             set_title(&format!(
-                "Rust-PAL [unsupported script {entry} opcode {opcode:04x}]"
+                "Rust-PAL [unsupported script {entry} {}]",
+                opcode_label(opcode)
             ));
         }
         Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
@@ -1238,6 +1242,13 @@ fn advance_script<L>(
         }
         None => {}
     }
+}
+
+fn opcode_label(raw: u16) -> String {
+    ScriptOpcode::from_raw(raw).map_or_else(
+        || format!("opcode {raw:04X}"),
+        |opcode| format!("{} ({raw:04X})", opcode.mnemonic()),
+    )
 }
 
 fn resume_inventory_after_item_error(game: &GameState, services: &mut ScriptServices) {

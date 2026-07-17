@@ -19,6 +19,11 @@
 
 最小触发脚本运行时目前实现以下 opcode：
 
+代码中的权威指令目录是 `pal-core::script::ScriptOpcode`。它为原版 165 个有效 opcode
+提供稳定助记符和行为说明；`support()` 将每条指令标记为 `Implemented`、`Stub` 或
+`Unsupported`。原版编号空间中的 `0x0032`、`0x0048`、`0x0072` 和 `0x009D` 是空洞，
+不属于指令集。
+
 | Opcode | 行为 |
 |---:|---|
 | `0x0000` | 结束脚本 |
