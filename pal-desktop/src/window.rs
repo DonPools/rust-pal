@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::audio::{BackgroundMusic, SoundEffects};
+use crate::debug_overlay::{glyph, DebugObjectSnapshot, DebugOverlay, DebugSnapshot};
 use crate::renderer::Renderer;
 use pal_assets::rle::RleBitmap;
 use pal_assets::script::ScriptTable;
@@ -14,7 +15,9 @@ use pal_core::game::{
 use pal_core::map::{Map, MAP_COLUMNS, MAP_ROWS};
 use pal_core::role::{Direction, Role, RoleSprites};
 use pal_core::scene::SceneObject;
-use pal_core::script::{DialogPosition, ScriptCondition, ScriptEvent, ScriptRuntime};
+use pal_core::script::{
+    DialogPosition, ScriptCondition, ScriptDebugSnapshot, ScriptEvent, ScriptRuntime,
+};
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
@@ -44,6 +47,7 @@ pub struct GameResources {
     pub initial_enter_script: u16,
     pub text: TextLibrary,
     pub font: BitmapFont,
+    pub dialog_faces: Vec<Option<RleBitmap>>,
     pub voc_mkf: Vec<u8>,
     pub midi_mkf: Vec<u8>,
     pub sound_font: Vec<u8>,
@@ -135,18 +139,44 @@ impl HeldInput {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ActiveDialog {
-    message_id: u16,
+    message_ids: Vec<u16>,
     position: DialogPosition,
+    font_color: u8,
+    face_index: Option<u16>,
     page: usize,
+    awaiting_input: bool,
+    auto_wait_ticks: Option<u16>,
 }
 
 const INVENTORY_VISIBLE_ROWS: usize = 8;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InventoryMenu {
     selected: usize,
+    mode: InventoryMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InventoryMode {
+    Items,
+    Target { item_id: u16, selected: usize },
+}
+
+impl Default for InventoryMenu {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            mode: InventoryMode::Items,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ItemUseSession {
+    item_id: u16,
+    inventory_selected: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,15 +247,25 @@ struct UiRenderContext<'a> {
     shop_menu: Option<&'a ShopMenu>,
     text: &'a TextLibrary,
     font: &'a BitmapFont,
+    dialog_faces: &'a [Option<RleBitmap>],
 }
 
 struct ScriptServices {
     pending_enter_script: Option<u16>,
+    pending_dialog: Option<ActiveDialog>,
     confirmation_menu: Option<ConfirmationMenu>,
     shop_menu: Option<ShopMenu>,
+    inventory_menu: Option<InventoryMenu>,
+    item_use: Option<ItemUseSession>,
     auto_scripts: ScriptTable,
     sound_effects: SoundEffects,
     music: BackgroundMusic,
+}
+
+#[derive(Clone, Copy)]
+struct ScriptRenderResources<'a> {
+    text: &'a TextLibrary,
+    role_sprites: &'a RoleSprites,
 }
 
 pub fn run_game_window<L>(
@@ -242,6 +282,7 @@ pub fn run_game_window<L>(
         initial_enter_script,
         text,
         font,
+        dialog_faces,
         voc_mkf,
         midi_mkf,
         sound_font,
@@ -268,15 +309,24 @@ pub fn run_game_window<L>(
     let surface = SurfaceTexture::new(size.width, size.height, &*window);
     let mut pixels = Pixels::new(viewport.width, viewport.height, surface)
         .expect("failed to create pixel surface");
+    let mut debug_overlay = DebugOverlay::new(
+        pixels.device(),
+        pixels.surface_texture_format(),
+        window.scale_factor(),
+    );
     let mut show_collision = false;
+    let mut show_objects = false;
+    let mut show_script = false;
     let auto_scripts = script_table.clone();
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
-    let mut inventory_menu = None;
     let mut script_services = ScriptServices {
         pending_enter_script: None,
+        pending_dialog: None,
         confirmation_menu: None,
         shop_menu: None,
+        inventory_menu: None,
+        item_use: None,
         auto_scripts,
         sound_effects: SoundEffects::new(&voc_mkf).expect("failed to load VOC sound effects"),
         music: BackgroundMusic::new(&midi_mkf, &sound_font)
@@ -295,13 +345,16 @@ pub fn run_game_window<L>(
         &game,
         &role_sprites,
         show_collision,
+        show_objects,
+        scripts.debug_snapshot(),
         UiRenderContext {
             dialog: dialog.as_ref(),
-            inventory_menu: inventory_menu.as_ref(),
+            inventory_menu: script_services.inventory_menu.as_ref(),
             confirmation_menu: script_services.confirmation_menu.as_ref(),
             shop_menu: script_services.shop_menu.as_ref(),
             text: &text,
             font: &font,
+            dialog_faces: &dialog_faces,
         },
     );
 
@@ -323,11 +376,32 @@ pub fn run_game_window<L>(
                             && match code {
                                 KeyCode::F3 => {
                                     show_collision = !show_collision;
-                                    window.set_title(if show_collision {
-                                        "Rust-PAL [Collision Debug]"
-                                    } else {
-                                        "Rust-PAL"
-                                    });
+                                    update_debug_title(
+                                        window,
+                                        show_collision,
+                                        show_objects,
+                                        show_script,
+                                    );
+                                    true
+                                }
+                                KeyCode::F4 => {
+                                    show_objects = !show_objects;
+                                    update_debug_title(
+                                        window,
+                                        show_collision,
+                                        show_objects,
+                                        show_script,
+                                    );
+                                    true
+                                }
+                                KeyCode::F6 => {
+                                    show_script = !show_script;
+                                    update_debug_title(
+                                        window,
+                                        show_collision,
+                                        show_objects,
+                                        show_script,
+                                    );
                                     true
                                 }
                                 KeyCode::F5 if !scripts.is_active() && dialog.is_none() => {
@@ -358,7 +432,7 @@ pub fn run_game_window<L>(
                                             } else {
                                                 script_services.music.stop();
                                             }
-                                            inventory_menu = None;
+                                            script_services.inventory_menu = None;
                                             script_services.pending_enter_script = None;
                                             input = HeldInput::default();
                                             window.set_title("Rust-PAL [Snapshot restored]");
@@ -379,13 +453,16 @@ pub fn run_game_window<L>(
                                 &game,
                                 &role_sprites,
                                 show_collision,
+                                show_objects,
+                                scripts.debug_snapshot(),
                                 UiRenderContext {
                                     dialog: dialog.as_ref(),
-                                    inventory_menu: inventory_menu.as_ref(),
+                                    inventory_menu: script_services.inventory_menu.as_ref(),
                                     confirmation_menu: script_services.confirmation_menu.as_ref(),
                                     shop_menu: script_services.shop_menu.as_ref(),
                                     text: &text,
                                     font: &font,
+                                    dialog_faces: &dialog_faces,
                                 },
                             );
                         } else {
@@ -397,11 +474,49 @@ pub fn run_game_window<L>(
                     if let Err(error) = pixels.resize_surface(size.width, size.height) {
                         eprintln!("surface resize failed: {error}");
                         target.exit();
+                    } else {
+                        window.request_redraw();
                     }
                 }
                 WindowEvent::RedrawRequested => {
                     pixels.frame_mut().copy_from_slice(renderer.screen());
-                    if let Err(error) = pixels.render() {
+                    let surface_size = window.inner_size();
+                    if show_script {
+                        let script = scripts.debug_snapshot();
+                        debug_overlay.update(
+                            pixels.device(),
+                            pixels.queue(),
+                            DebugSnapshot {
+                                scene_number: game.scene_number,
+                                object_count: game.scene_objects.len(),
+                                player_x: game.player.world_x,
+                                player_y: game.player.world_y,
+                                camera_x: game.camera.x,
+                                camera_y: game.camera.y,
+                                virtual_width: renderer.width as u32,
+                                virtual_height: renderer.height as u32,
+                                surface_width: surface_size.width,
+                                surface_height: surface_size.height,
+                                scale_factor: window.scale_factor(),
+                                focused_object: focused_debug_object(&game, script)
+                                    .map(debug_object_snapshot),
+                                script,
+                            },
+                        );
+                    }
+                    let render_result = pixels.render_with(|encoder, render_target, context| {
+                        context.scaling_renderer.render(encoder, render_target);
+                        if show_script {
+                            debug_overlay.render(
+                                encoder,
+                                render_target,
+                                surface_size.width,
+                                surface_size.height,
+                            );
+                        }
+                        Ok(())
+                    });
+                    if let Err(error) = render_result {
                         eprintln!("render failed: {error}");
                         target.exit();
                     } else {
@@ -420,24 +535,58 @@ pub fn run_game_window<L>(
                 let mut changed = false;
                 while accumulator >= tick {
                     let sampled = input.sample();
-                    if let Some(active_dialog) = dialog.as_mut() {
-                        if sampled.confirm || sampled.cancel {
+                    if dialog.is_some() {
+                        let awaiting_input = dialog
+                            .as_ref()
+                            .is_some_and(|active_dialog| active_dialog.awaiting_input);
+                        let timed_out = if awaiting_input {
+                            dialog
+                                .as_mut()
+                                .and_then(|active_dialog| active_dialog.auto_wait_ticks.as_mut())
+                                .is_some_and(|ticks| {
+                                    *ticks = ticks.saturating_sub(1);
+                                    *ticks == 0
+                                })
+                        } else {
+                            false
+                        };
+                        if awaiting_input && (sampled.confirm || sampled.cancel || timed_out) {
                             changed = true;
-                            let page_count = dialog_page_count(&text, active_dialog.message_id);
+                            let active_dialog = dialog.as_mut().expect("dialog was checked above");
+                            let page_count = dialog_page_count(&text, active_dialog);
                             if active_dialog.page + 1 < page_count {
                                 active_dialog.page += 1;
+                            } else if let Some(pending) = script_services.pending_dialog.take() {
+                                dialog = Some(pending);
                             } else {
                                 dialog = None;
                                 advance_script(
                                     &mut scripts,
                                     &mut game,
                                     &mut dialog,
-                                    &role_sprites,
+                                    ScriptRenderResources {
+                                        text: &text,
+                                        role_sprites: &role_sprites,
+                                    },
                                     &mut load_scene,
                                     &mut script_services,
                                     &mut |title| window.set_title(title),
                                 );
                             }
+                        } else if !awaiting_input {
+                            advance_script(
+                                &mut scripts,
+                                &mut game,
+                                &mut dialog,
+                                ScriptRenderResources {
+                                    text: &text,
+                                    role_sprites: &role_sprites,
+                                },
+                                &mut load_scene,
+                                &mut script_services,
+                                &mut |title| window.set_title(title),
+                            );
+                            changed = true;
                         }
                     } else if let Some(menu) = script_services.confirmation_menu.as_mut() {
                         changed = sampled.confirm || sampled.cancel || sampled.direction.is_some();
@@ -460,7 +609,10 @@ pub fn run_game_window<L>(
                                 &mut scripts,
                                 &mut game,
                                 &mut dialog,
-                                &role_sprites,
+                                ScriptRenderResources {
+                                    text: &text,
+                                    role_sprites: &role_sprites,
+                                },
                                 &mut load_scene,
                                 &mut script_services,
                                 &mut |title| window.set_title(title),
@@ -509,26 +661,117 @@ pub fn run_game_window<L>(
                                 &mut scripts,
                                 &mut game,
                                 &mut dialog,
-                                &role_sprites,
+                                ScriptRenderResources {
+                                    text: &text,
+                                    role_sprites: &role_sprites,
+                                },
                                 &mut load_scene,
                                 &mut script_services,
                                 &mut |title| window.set_title(title),
                             );
                         }
-                    } else if let Some(menu) = inventory_menu.as_mut() {
-                        changed = sampled.cancel || sampled.direction.is_some();
-                        if sampled.cancel {
-                            inventory_menu = None;
-                            window.set_title("Rust-PAL");
+                    } else if script_services.inventory_menu.is_some() {
+                        let mut menu = script_services
+                            .inventory_menu
+                            .take()
+                            .expect("inventory menu was checked above");
+                        changed = sampled.confirm || sampled.cancel || sampled.direction.is_some();
+                        let mut close_menu = false;
+                        let mut item_request = None;
+                        match menu.mode {
+                            InventoryMode::Items => {
+                                let inventory = game.inventory().collect::<Vec<_>>();
+                                if sampled.cancel {
+                                    close_menu = true;
+                                } else {
+                                    menu.update(sampled.direction, inventory.len());
+                                    if sampled.confirm {
+                                        if let Some(&(item_id, _)) = inventory.get(menu.selected) {
+                                            if let Some(item) = game.usable_item(item_id) {
+                                                if item.apply_to_all {
+                                                    item_request = game
+                                                        .item_use_request(item_id, None)
+                                                        .map(|request| (item_id, request));
+                                                } else {
+                                                    menu.mode = InventoryMode::Target {
+                                                        item_id,
+                                                        selected: 0,
+                                                    };
+                                                    window.set_title("Rust-PAL [Item target]");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            InventoryMode::Target {
+                                item_id,
+                                mut selected,
+                            } => {
+                                let member_count = game.party.members().len();
+                                match sampled.direction {
+                                    Some(Direction::North) => {
+                                        selected = selected.saturating_sub(1);
+                                    }
+                                    Some(Direction::South) => {
+                                        selected =
+                                            (selected + 1).min(member_count.saturating_sub(1));
+                                    }
+                                    _ => {}
+                                }
+                                if sampled.cancel {
+                                    menu.mode = InventoryMode::Items;
+                                    window.set_title("Rust-PAL [Inventory]");
+                                } else if sampled.confirm {
+                                    item_request = game
+                                        .party
+                                        .members()
+                                        .get(selected)
+                                        .and_then(|member| {
+                                            game.item_use_request(item_id, Some(member.role_id))
+                                        })
+                                        .map(|request| (item_id, request));
+                                } else {
+                                    menu.mode = InventoryMode::Target { item_id, selected };
+                                }
+                            }
+                        }
+                        if let Some((item_id, request)) = item_request {
+                            if scripts.start(request) {
+                                script_services.item_use = Some(ItemUseSession {
+                                    item_id,
+                                    inventory_selected: menu.selected,
+                                });
+                                window.set_title("Rust-PAL [Using item]");
+                                advance_script(
+                                    &mut scripts,
+                                    &mut game,
+                                    &mut dialog,
+                                    ScriptRenderResources {
+                                        text: &text,
+                                        role_sprites: &role_sprites,
+                                    },
+                                    &mut load_scene,
+                                    &mut script_services,
+                                    &mut |title| window.set_title(title),
+                                );
+                            } else {
+                                script_services.inventory_menu = Some(menu);
+                            }
+                        } else if !close_menu {
+                            script_services.inventory_menu = Some(menu);
                         } else {
-                            menu.update(sampled.direction, game.inventory().len());
+                            window.set_title("Rust-PAL");
                         }
                     } else if scripts.is_active() {
                         advance_script(
                             &mut scripts,
                             &mut game,
                             &mut dialog,
-                            &role_sprites,
+                            ScriptRenderResources {
+                                text: &text,
+                                role_sprites: &role_sprites,
+                            },
                             &mut load_scene,
                             &mut script_services,
                             &mut |title| window.set_title(title),
@@ -536,7 +779,7 @@ pub fn run_game_window<L>(
                         changed = true;
                     } else {
                         if sampled.cancel {
-                            inventory_menu = Some(InventoryMenu::default());
+                            script_services.inventory_menu = Some(InventoryMenu::default());
                             window.set_title("Rust-PAL [Inventory]");
                             changed = true;
                             accumulator -= tick;
@@ -551,7 +794,10 @@ pub fn run_game_window<L>(
                                         &mut scripts,
                                         &mut game,
                                         &mut dialog,
-                                        &role_sprites,
+                                        ScriptRenderResources {
+                                            text: &text,
+                                            role_sprites: &role_sprites,
+                                        },
                                         &mut load_scene,
                                         &mut script_services,
                                         &mut |title| window.set_title(title),
@@ -581,13 +827,16 @@ pub fn run_game_window<L>(
                         &game,
                         &role_sprites,
                         show_collision,
+                        show_objects,
+                        scripts.debug_snapshot(),
                         UiRenderContext {
                             dialog: dialog.as_ref(),
-                            inventory_menu: inventory_menu.as_ref(),
+                            inventory_menu: script_services.inventory_menu.as_ref(),
                             confirmation_menu: script_services.confirmation_menu.as_ref(),
                             shop_menu: script_services.shop_menu.as_ref(),
                             text: &text,
                             font: &font,
+                            dialog_faces: &dialog_faces,
                         },
                     );
                 }
@@ -624,6 +873,22 @@ fn auto_script_error_title(error: AutoScriptError) -> String {
     }
 }
 
+fn update_debug_title(
+    window: &winit::window::Window,
+    collision: bool,
+    objects: bool,
+    script: bool,
+) {
+    let title = match (collision, objects, script) {
+        (false, false, false) => "Rust-PAL".to_owned(),
+        (true, false, false) => "Rust-PAL [Collision]".to_owned(),
+        (false, true, false) => "Rust-PAL [Objects]".to_owned(),
+        (false, false, true) => "Rust-PAL [Script]".to_owned(),
+        _ => "Rust-PAL [Debug]".to_owned(),
+    };
+    window.set_title(&title);
+}
+
 fn write_snapshot(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, bytes)?;
@@ -642,6 +907,8 @@ fn render_game(
     game: &GameState,
     role_sprites: &RoleSprites,
     show_collision: bool,
+    show_objects: bool,
+    script: ScriptDebugSnapshot,
     ui: UiRenderContext<'_>,
 ) {
     let viewport = Viewport::from(game.camera);
@@ -660,8 +927,12 @@ fn render_game(
     if show_collision {
         render_collision_overlay(renderer, &game.map, &game.player, viewport);
     }
+    if show_objects {
+        let focused_object_id = focused_debug_object(game, script).map(|object| object.id);
+        render_object_overlay(renderer, &game.scene_objects, viewport, focused_object_id);
+    }
     if let Some(dialog) = ui.dialog {
-        render_dialog(renderer, ui.text, ui.font, dialog);
+        render_dialog(renderer, ui.text, ui.font, ui.dialog_faces, dialog);
     } else if let Some(menu) = ui.confirmation_menu {
         render_confirmation_menu(renderer, ui.text, ui.font, *menu);
     } else if let Some(menu) = ui.shop_menu {
@@ -675,7 +946,7 @@ fn advance_script<L>(
     scripts: &mut ScriptRuntime,
     game: &mut GameState,
     dialog: &mut Option<ActiveDialog>,
-    role_sprites: &RoleSprites,
+    resources: ScriptRenderResources<'_>,
     load_scene: &mut L,
     services: &mut ScriptServices,
     set_title: &mut impl FnMut(&str),
@@ -686,12 +957,35 @@ fn advance_script<L>(
         Some(ScriptEvent::Message {
             message_id,
             position,
+            font_color,
+            face_index,
         }) => {
-            *dialog = Some(ActiveDialog {
-                message_id,
+            let mut next = ActiveDialog {
+                message_ids: vec![message_id],
                 position,
+                font_color,
+                face_index,
                 page: 0,
-            });
+                awaiting_input: position == DialogPosition::CenterWindow,
+                auto_wait_ticks: (position == DialogPosition::CenterWindow).then_some(28),
+            };
+            if let Some(active) = dialog.as_mut() {
+                if active.position == position
+                    && active.font_color == font_color
+                    && active.face_index == face_index
+                    && !active.awaiting_input
+                {
+                    active.message_ids.push(message_id);
+                    active.awaiting_input = dialog_body_lines(resources.text, active).len() >= 4;
+                } else {
+                    active.awaiting_input = true;
+                    next.awaiting_input |= dialog_body_lines(resources.text, &next).len() >= 4;
+                    services.pending_dialog = Some(next);
+                }
+            } else {
+                next.awaiting_input |= dialog_body_lines(resources.text, &next).len() >= 4;
+                *dialog = Some(next);
+            }
             set_title("Rust-PAL [Dialog]");
         }
         Some(ScriptEvent::Waiting) => {
@@ -729,7 +1023,7 @@ fn advance_script<L>(
             if scene_number == game.scene_number {
                 return;
             }
-            let Some(scene) = load_scene(scene_number, role_sprites) else {
+            let Some(scene) = load_scene(scene_number, resources.role_sprites) else {
                 set_title("Rust-PAL [failed to load scene]");
                 return;
             };
@@ -777,6 +1071,13 @@ fn advance_script<L>(
             ) {
                 scripts.branch_to(insufficient_entry);
             }
+        }
+        Some(ScriptEvent::Action(
+            action @ (pal_core::script::ScriptAction::AdjustPlayerHealth { .. }
+            | pal_core::script::ScriptAction::RevivePlayer { .. }),
+        )) => {
+            let succeeded = game.apply_script_action(action);
+            scripts.set_success(succeeded);
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::WalkObjectTo {
             object_id,
@@ -870,8 +1171,22 @@ fn advance_script<L>(
         Some(ScriptEvent::Completed {
             trigger,
             next_entry,
+            succeeded,
         }) => {
-            if trigger.object_id == 0xffff {
+            if trigger.kind == pal_core::scene::TriggerKind::Item {
+                if let Some(item_use) = services.item_use.take() {
+                    game.finish_item_use(item_use.item_id, next_entry, succeeded);
+                    let selected = item_use
+                        .inventory_selected
+                        .min(game.inventory().len().saturating_sub(1));
+                    services.inventory_menu = Some(InventoryMenu {
+                        selected,
+                        mode: InventoryMode::Items,
+                    });
+                    set_title("Rust-PAL [Inventory]");
+                }
+                return;
+            } else if trigger.object_id == 0xffff {
                 game.update_scene_enter_script(next_entry);
             } else {
                 if let Some(object) = game
@@ -892,24 +1207,48 @@ fn advance_script<L>(
             } else {
                 set_title("Rust-PAL");
             }
+            if let Some(active) = dialog.as_mut() {
+                active.awaiting_input = true;
+            }
         }
         Some(ScriptEvent::Unsupported {
-            trigger: _,
+            trigger,
             entry,
             opcode,
         }) => {
+            if trigger.kind == pal_core::scene::TriggerKind::Item {
+                resume_inventory_after_item_error(game, services);
+            }
             set_title(&format!(
                 "Rust-PAL [unsupported script {entry} opcode {opcode:04x}]"
             ));
         }
-        Some(ScriptEvent::InvalidEntry { trigger: _, entry }) => {
+        Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
+            if trigger.kind == pal_core::scene::TriggerKind::Item {
+                resume_inventory_after_item_error(game, services);
+            }
             set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
         }
-        Some(ScriptEvent::InstructionLimit { trigger: _, entry }) => {
+        Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
+            if trigger.kind == pal_core::scene::TriggerKind::Item {
+                resume_inventory_after_item_error(game, services);
+            }
             set_title(&format!("Rust-PAL [script loop at {entry}]"));
         }
         None => {}
     }
+}
+
+fn resume_inventory_after_item_error(game: &GameState, services: &mut ScriptServices) {
+    let Some(item_use) = services.item_use.take() else {
+        return;
+    };
+    services.inventory_menu = Some(InventoryMenu {
+        selected: item_use
+            .inventory_selected
+            .min(game.inventory().len().saturating_sub(1)),
+        mode: InventoryMode::Items,
+    });
 }
 
 fn update_trigger_world(
@@ -932,29 +1271,137 @@ fn render_dialog(
     renderer: &mut Renderer,
     text: &TextLibrary,
     font: &BitmapFont,
+    faces: &[Option<RleBitmap>],
     dialog: &ActiveDialog,
 ) {
-    let y = match dialog.position {
-        DialogPosition::Upper => 8,
-        DialogPosition::Lower => 130,
-        DialogPosition::Center | DialogPosition::CenterWindow => 68,
-    };
-    fill_rect(renderer, 8, y, 304, 62, [8, 8, 12, 255]);
-    fill_rect(renderer, 8, y, 304, 1, [224, 224, 208, 255]);
-    fill_rect(renderer, 8, y + 61, 304, 1, [224, 224, 208, 255]);
-    fill_rect(renderer, 8, y, 1, 62, [224, 224, 208, 255]);
-    fill_rect(renderer, 311, y, 1, 62, [224, 224, 208, 255]);
+    let layout = dialog_layout(dialog);
+    if let Some(face_index) = dialog.face_index {
+        if let Some(Some(face)) = faces.get(usize::from(face_index)) {
+            let (center_x, center_y) = match dialog.position {
+                DialogPosition::Upper => (48, 55),
+                DialogPosition::Lower => (270, 144),
+                _ => (0, 0),
+            };
+            if center_x != 0 {
+                renderer.blit_rle(
+                    face,
+                    center_x - i32::from(face.width) / 2,
+                    center_y - i32::from(face.height) / 2,
+                );
+            }
+        }
+    }
 
-    let Some(message) = text.message(usize::from(dialog.message_id)) else {
+    if let Some(title) = dialog_title(text, dialog) {
+        draw_dialog_text(renderer, font, title, layout.title_x, layout.title_y, 0x8c);
+    }
+
+    let lines = dialog_body_lines(text, dialog);
+    let visible = lines
+        .iter()
+        .skip(dialog.page * 4)
+        .take(4)
+        .copied()
+        .collect::<Vec<_>>();
+    if dialog.position == DialogPosition::CenterWindow {
+        render_center_dialog_window(renderer, font, dialog, &visible);
         return;
-    };
-    for (line, bytes) in wrap_big5_lines(message, 272)
-        .into_iter()
-        .skip(dialog.page * 3)
-        .take(3)
-        .enumerate()
-    {
-        renderer.draw_big5_text(font, bytes, 20, y + 8 + line as i32 * 16, 0x4f);
+    }
+
+    let mut last_end = None;
+    for (line, bytes) in visible.iter().enumerate() {
+        let y = layout.text_y + line as i32 * 18;
+        let end = draw_dialog_text(renderer, font, bytes, layout.text_x, y, dialog.font_color);
+        last_end = Some((end, y));
+    }
+    if dialog.awaiting_input {
+        if let Some((x, y)) = last_end {
+            draw_dialog_wait_icon(renderer, x + 2, y + 5);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DialogLayout {
+    title_x: i32,
+    title_y: i32,
+    text_x: i32,
+    text_y: i32,
+    max_width: usize,
+}
+
+fn dialog_layout(dialog: &ActiveDialog) -> DialogLayout {
+    let has_face = dialog.face_index.is_some();
+    match dialog.position {
+        DialogPosition::Upper => DialogLayout {
+            title_x: if has_face { 80 } else { 12 },
+            title_y: 8,
+            text_x: if has_face { 96 } else { 44 },
+            text_y: 26,
+            max_width: if has_face { 216 } else { 268 },
+        },
+        DialogPosition::Lower => DialogLayout {
+            title_x: if has_face { 4 } else { 12 },
+            title_y: 108,
+            text_x: if has_face { 20 } else { 44 },
+            text_y: 126,
+            max_width: if has_face { 220 } else { 268 },
+        },
+        DialogPosition::Center => DialogLayout {
+            title_x: 12,
+            title_y: 8,
+            text_x: 80,
+            text_y: 40,
+            max_width: 232,
+        },
+        DialogPosition::CenterWindow => DialogLayout {
+            title_x: 12,
+            title_y: 8,
+            text_x: 160,
+            text_y: 40,
+            max_width: 280,
+        },
+    }
+}
+
+fn render_center_dialog_window(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    dialog: &ActiveDialog,
+    lines: &[&[u8]],
+) {
+    let content_width = lines
+        .iter()
+        .map(|line| dialog_text_width(line))
+        .max()
+        .unwrap_or(0)
+        .clamp(16, 280) as i32;
+    let width = content_width + 24;
+    let height = lines.len().max(1) as i32 * 18 + 18;
+    let x = (320 - width) / 2;
+    let y = 40;
+    fill_rect(renderer, x + 6, y + 6, width, height, [0, 0, 0, 160]);
+    fill_rect(renderer, x, y, width, height, [16, 20, 24, 255]);
+    stroke_rect(renderer, x, y, width, height, [232, 224, 192, 255]);
+    stroke_rect(
+        renderer,
+        x + 2,
+        y + 2,
+        width - 4,
+        height - 4,
+        [72, 88, 96, 255],
+    );
+    let mut last_end = None;
+    for (line, bytes) in lines.iter().enumerate() {
+        let text_x = x + (width - dialog_text_width(bytes) as i32) / 2;
+        let text_y = y + 10 + line as i32 * 18;
+        let end = draw_dialog_text(renderer, font, bytes, text_x, text_y, dialog.font_color);
+        last_end = Some((end, text_y));
+    }
+    if dialog.awaiting_input {
+        if let Some((end, text_y)) = last_end {
+            draw_dialog_wait_icon(renderer, end + 2, text_y + 5);
+        }
     }
 }
 
@@ -1069,6 +1516,11 @@ fn render_inventory_menu(
     font: &BitmapFont,
     menu: InventoryMenu,
 ) {
+    if let InventoryMode::Target { selected, .. } = menu.mode {
+        render_item_target_menu(renderer, game, text, font, selected);
+        return;
+    }
+
     const PANEL_X: i32 = 132;
     const PANEL_Y: i32 = 12;
     const PANEL_WIDTH: i32 = 180;
@@ -1111,7 +1563,12 @@ fn render_inventory_menu(
             );
         }
         if let Some(name) = text.word(usize::from(item_id)) {
-            renderer.draw_big5_text(font, name, PANEL_X + 12, y, 0x4f);
+            let color = if game.usable_item(item_id).is_some() {
+                0x4f
+            } else {
+                0x1c
+            };
+            renderer.draw_big5_text(font, name, PANEL_X + 12, y, color);
         }
         draw_number(
             renderer,
@@ -1119,6 +1576,92 @@ fn render_inventory_menu(
             PANEL_X + PANEL_WIDTH - 14,
             y + 4,
             [240, 240, 224, 255],
+        );
+    }
+}
+
+fn render_item_target_menu(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    selected: usize,
+) {
+    const PANEL_X: i32 = 108;
+    const PANEL_Y: i32 = 10;
+    const PANEL_WIDTH: i32 = 204;
+    const ROW_HEIGHT: i32 = 34;
+
+    fill_rect(
+        renderer,
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        180,
+        [8, 8, 12, 255],
+    );
+    stroke_rect(
+        renderer,
+        PANEL_X,
+        PANEL_Y,
+        PANEL_WIDTH,
+        180,
+        [224, 224, 208, 255],
+    );
+    for (index, member) in game.party.members().iter().enumerate() {
+        let y = PANEL_Y + 8 + index as i32 * ROW_HEIGHT;
+        if index == selected {
+            stroke_rect(
+                renderer,
+                PANEL_X + 5,
+                y - 3,
+                PANEL_WIDTH - 10,
+                ROW_HEIGHT - 2,
+                [224, 192, 64, 255],
+            );
+        }
+        if let Some(name) = text.word(usize::from(member.attributes.name_word_id)) {
+            renderer.draw_big5_text(font, name, PANEL_X + 12, y, 0x4f);
+        }
+        for (offset, byte) in b"HP".iter().enumerate() {
+            draw_dialog_ascii(renderer, *byte, PANEL_X + 92 + offset as i32 * 8, y, 0x4f);
+        }
+        draw_number(
+            renderer,
+            u32::from(member.attributes.hp),
+            PANEL_X + 144,
+            y + 4,
+            [240, 224, 96, 255],
+        );
+        draw_number(
+            renderer,
+            u32::from(member.attributes.max_hp),
+            PANEL_X + 188,
+            y + 4,
+            [144, 184, 240, 255],
+        );
+        for (offset, byte) in b"MP".iter().enumerate() {
+            draw_dialog_ascii(
+                renderer,
+                *byte,
+                PANEL_X + 92 + offset as i32 * 8,
+                y + 16,
+                0x4f,
+            );
+        }
+        draw_number(
+            renderer,
+            u32::from(member.attributes.mp),
+            PANEL_X + 144,
+            y + 20,
+            [240, 224, 96, 255],
+        );
+        draw_number(
+            renderer,
+            u32::from(member.attributes.max_mp),
+            PANEL_X + 188,
+            y + 20,
+            [144, 184, 240, 255],
         );
     }
 }
@@ -1171,12 +1714,35 @@ fn draw_number(renderer: &mut Renderer, value: u32, right_x: i32, y: i32, color:
     }
 }
 
-fn dialog_page_count(text: &TextLibrary, message_id: u16) -> usize {
-    let line_count = text
-        .message(usize::from(message_id))
-        .map(|message| wrap_big5_lines(message, 272).len())
-        .unwrap_or(0);
-    line_count.max(1).div_ceil(3)
+fn dialog_page_count(text: &TextLibrary, dialog: &ActiveDialog) -> usize {
+    dialog_body_lines(text, dialog).len().max(1).div_ceil(4)
+}
+
+fn dialog_title<'a>(text: &'a TextLibrary, dialog: &ActiveDialog) -> Option<&'a [u8]> {
+    if dialog.position == DialogPosition::Center {
+        return None;
+    }
+    text.message(usize::from(*dialog.message_ids.first()?))
+        .filter(|message| is_dialog_title(message))
+}
+
+fn dialog_body_lines<'a>(text: &'a TextLibrary, dialog: &ActiveDialog) -> Vec<&'a [u8]> {
+    let layout = dialog_layout(dialog);
+    dialog
+        .message_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message_id)| {
+            text.message(usize::from(*message_id)).filter(|message| {
+                index != 0 || dialog.position == DialogPosition::Center || !is_dialog_title(message)
+            })
+        })
+        .flat_map(|message| wrap_big5_lines(message, layout.max_width))
+        .collect()
+}
+
+fn is_dialog_title(text: &[u8]) -> bool {
+    text.ends_with(b":") || text.ends_with(&[0xa1, 0x47])
 }
 
 fn fill_rect(renderer: &mut Renderer, x: i32, y: i32, width: i32, height: i32, color: [u8; 4]) {
@@ -1193,11 +1759,14 @@ fn wrap_big5_lines(text: &[u8], max_width: usize) -> Vec<&[u8]> {
     let mut index = 0;
     let mut width = 0;
     while index < text.len() {
-        let (bytes, character_width) = if text[index] >= 0x80 && index + 1 < text.len() {
-            (2, 16)
-        } else {
-            (1, 8)
-        };
+        if matches!(text[index], b'\r' | b'\n') {
+            lines.push(&text[start..index]);
+            index += 1;
+            start = index;
+            width = 0;
+            continue;
+        }
+        let (bytes, character_width) = dialog_token(text, index);
         if width + character_width > max_width && index > start {
             lines.push(&text[start..index]);
             start = index;
@@ -1210,6 +1779,125 @@ fn wrap_big5_lines(text: &[u8], max_width: usize) -> Vec<&[u8]> {
         lines.push(&text[start..]);
     }
     lines
+}
+
+fn dialog_token(text: &[u8], index: usize) -> (usize, usize) {
+    match text[index] {
+        b'-' | b'\'' | b'@' | b'"' | b'(' | b')' | b'\\' => (1, 0),
+        b'$' | b'~' => ((text.len() - index).min(3), 0),
+        byte if byte >= 0x80 && index + 1 < text.len() => (2, 16),
+        _ => (1, 8),
+    }
+}
+
+fn dialog_text_width(text: &[u8]) -> usize {
+    let mut width = 0;
+    let mut index = 0;
+    while index < text.len() {
+        if text[index] == b'~' || matches!(text[index], b'\r' | b'\n') {
+            break;
+        }
+        let (bytes, token_width) = dialog_token(text, index);
+        width += token_width;
+        index += bytes;
+    }
+    width
+}
+
+fn draw_dialog_text(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    text: &[u8],
+    x: i32,
+    y: i32,
+    base_color: u8,
+) -> i32 {
+    let mut cursor_x = x;
+    let mut color = base_color;
+    let mut index = 0;
+    let mut escaped = false;
+    while index < text.len() {
+        let byte = text[index];
+        if !escaped {
+            match byte {
+                b'-' => color = if color == 0x8d { base_color } else { 0x8d },
+                b'\'' => color = if color == 0x1a { base_color } else { 0x1a },
+                b'@' => color = if color == 0x17 { base_color } else { 0x17 },
+                b'"' | b'(' | b')' => {}
+                b'$' => {
+                    index += (text.len() - index).min(3);
+                    continue;
+                }
+                b'~' | b'\r' | b'\n' => break,
+                b'\\' => {
+                    escaped = true;
+                    index += 1;
+                    continue;
+                }
+                _ => {
+                    if byte >= 0x80 {
+                        let Some(&trail) = text.get(index + 1) else {
+                            break;
+                        };
+                        if let Some(glyph) = font.glyph(u16::from_be_bytes([byte, trail])) {
+                            renderer.draw_font_glyph(glyph, cursor_x, y, color);
+                        }
+                        cursor_x += 16;
+                        index += 2;
+                        continue;
+                    }
+                    draw_dialog_ascii(renderer, byte, cursor_x, y, color);
+                    cursor_x += 8;
+                }
+            }
+            if matches!(byte, b'-' | b'\'' | b'@' | b'"' | b'(' | b')') {
+                index += 1;
+                continue;
+            }
+        } else {
+            draw_dialog_ascii(renderer, byte, cursor_x, y, color);
+            cursor_x += 8;
+            escaped = false;
+        }
+        index += 1;
+    }
+    cursor_x
+}
+
+fn draw_dialog_ascii(renderer: &mut Renderer, byte: u8, x: i32, y: i32, palette_index: u8) {
+    if !byte.is_ascii_graphic() {
+        return;
+    }
+    let color = if byte.is_ascii_digit() {
+        0x2d
+    } else {
+        palette_index
+    };
+    for (row, bits) in glyph(char::from(byte)).iter().enumerate() {
+        for column in 0..5 {
+            if bits & (0b1_0000 >> column) != 0 {
+                put_palette_pixel(renderer, x + column, y + row as i32 + 4, color);
+            }
+        }
+    }
+}
+
+fn draw_dialog_wait_icon(renderer: &mut Renderer, x: i32, y: i32) {
+    for (row, (offset, width)) in [(2, 1), (1, 3), (0, 5), (1, 3), (2, 1)]
+        .into_iter()
+        .enumerate()
+    {
+        for column in 0..width {
+            put_palette_pixel(renderer, x + offset + column, y + row as i32, 0xf9);
+        }
+    }
+}
+
+fn put_palette_pixel(renderer: &mut Renderer, x: i32, y: i32, palette_index: u8) {
+    let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+        return;
+    };
+    renderer.put_pixel(x, y, palette_index);
 }
 
 /// Render the map and depth-sort characters with elevated covering tiles.
@@ -1258,6 +1946,12 @@ impl RenderBounds {
 const BLOCKED_COLOR: [u8; 4] = [255, 48, 48, 255];
 const WALKABLE_COLOR: [u8; 4] = [32, 224, 96, 255];
 const PLAYER_COLLISION_COLOR: [u8; 4] = [255, 224, 32, 255];
+const OBJECT_TRIGGER_COLOR: [u8; 4] = [255, 160, 32, 255];
+const OBJECT_AUTO_COLOR: [u8; 4] = [32, 208, 255, 255];
+const OBJECT_BOTH_COLOR: [u8; 4] = [255, 96, 224, 255];
+const OBJECT_INERT_COLOR: [u8; 4] = [176, 184, 192, 255];
+const OBJECT_HIDDEN_COLOR: [u8; 4] = [96, 104, 112, 255];
+const OBJECT_FOCUS_COLOR: [u8; 4] = [255, 255, 255, 255];
 
 fn render_collision_overlay(renderer: &mut Renderer, map: &Map, player: &Role, viewport: Viewport) {
     let bounds = RenderBounds::for_viewport(viewport);
@@ -1301,6 +1995,103 @@ fn render_collision_overlay(renderer: &mut Renderer, map: &Map, player: &Role, v
         player_y + 3,
         PLAYER_COLLISION_COLOR,
     );
+}
+
+fn focused_debug_object(game: &GameState, script: ScriptDebugSnapshot) -> Option<&SceneObject> {
+    script
+        .next_instruction
+        .or(script.last_instruction)
+        .map(|instruction| instruction.object_id)
+        .or_else(|| script.trigger.map(|trigger| trigger.object_id))
+        .filter(|object_id| *object_id != 0xffff)
+        .and_then(|object_id| {
+            game.scene_objects
+                .iter()
+                .find(|object| object.id == object_id)
+        })
+}
+
+fn debug_object_snapshot(object: &SceneObject) -> DebugObjectSnapshot {
+    DebugObjectSnapshot {
+        id: object.id,
+        world_x: object.world_x,
+        world_y: object.world_y,
+        state: object.state,
+        layer: object.layer,
+        trigger_mode: object.trigger_mode,
+        trigger_script: object.trigger_script,
+        auto_script: object.auto_script,
+        sprite_index: object.sprite_index,
+        frames_per_direction: object.frames_per_direction,
+        sprite_frame_count: object.sprite_frame_count,
+        direction: object.direction as u16,
+        current_frame: object.current_frame,
+        vanish_time: object.vanish_time,
+        visible: object.is_visible(),
+        blocker: object.is_blocker(),
+        can_search: object.can_search(),
+        can_touch: object.can_touch(),
+    }
+}
+
+fn render_object_overlay(
+    renderer: &mut Renderer,
+    objects: &[SceneObject],
+    viewport: Viewport,
+    focused_object_id: Option<u16>,
+) {
+    for object in objects {
+        let x = object.world_x - viewport.x;
+        let y = object.world_y - viewport.y;
+        if x < -32 || y < -16 || x >= viewport.width as i32 + 32 || y >= viewport.height as i32 + 16
+        {
+            continue;
+        }
+        let focused = focused_object_id == Some(object.id);
+        let color = object_debug_color(object, focused);
+        let radius = if focused { 5 } else { 3 };
+        draw_line(renderer, x - radius, y, x + radius, y, color);
+        draw_line(renderer, x, y - radius, x, y + radius, color);
+        if focused {
+            draw_debug_text(renderer, x + 4, y - 9, &format!("#{}", object.id), color);
+        }
+    }
+}
+
+fn object_debug_color(object: &SceneObject, focused: bool) -> [u8; 4] {
+    if focused {
+        return OBJECT_FOCUS_COLOR;
+    }
+    if object.state <= 0 || object.vanish_time > 0 {
+        return OBJECT_HIDDEN_COLOR;
+    }
+    match (object.trigger_script != 0, object.auto_script != 0) {
+        (true, true) => OBJECT_BOTH_COLOR,
+        (true, false) => OBJECT_TRIGGER_COLOR,
+        (false, true) => OBJECT_AUTO_COLOR,
+        (false, false) => OBJECT_INERT_COLOR,
+    }
+}
+
+fn draw_debug_text(renderer: &mut Renderer, x: i32, y: i32, text: &str, color: [u8; 4]) {
+    draw_debug_text_pixels(renderer, x + 1, y + 1, text, [0, 0, 0, 255]);
+    draw_debug_text_pixels(renderer, x, y, text, color);
+}
+
+fn draw_debug_text_pixels(renderer: &mut Renderer, x: i32, y: i32, text: &str, color: [u8; 4]) {
+    for (character_index, character) in text.chars().enumerate() {
+        for (row, bits) in glyph(character).iter().enumerate() {
+            for column in 0..5 {
+                if bits & (0b1_0000 >> column) != 0 {
+                    renderer.put_rgba(
+                        x + character_index as i32 * 6 + column,
+                        y + row as i32,
+                        color,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn draw_diamond(renderer: &mut Renderer, center_x: i32, center_y: i32, color: [u8; 4]) {
@@ -1550,6 +2341,55 @@ fn render_tile_row(
 mod tests {
     use super::*;
 
+    fn text_library(messages: &[&[u8]]) -> TextLibrary {
+        let word_data = [b' '; 10];
+        let mut message_data = Vec::new();
+        let mut message_index = Vec::new();
+        message_index.extend_from_slice(&0u32.to_le_bytes());
+        for message in messages {
+            message_data.extend_from_slice(message);
+            message_index.extend_from_slice(&(message_data.len() as u32).to_le_bytes());
+        }
+        TextLibrary::parse(&word_data, &message_data, &message_index).unwrap()
+    }
+
+    fn debug_object() -> SceneObject {
+        SceneObject {
+            id: 1,
+            world_x: 100,
+            world_y: 80,
+            layer: 0,
+            trigger_script: 10,
+            auto_script: 20,
+            state: 1,
+            trigger_mode: 1,
+            sprite_index: None,
+            frames_per_direction: 0,
+            sprite_frame_count: 0,
+            direction: Direction::South,
+            current_frame: 0,
+            vanish_time: 0,
+            auto_script_idle_frame: 0,
+        }
+    }
+
+    #[test]
+    fn object_debug_colors_distinguish_script_roles_and_focus() {
+        let mut object = debug_object();
+        assert_eq!(object_debug_color(&object, false), OBJECT_BOTH_COLOR);
+
+        object.auto_script = 0;
+        assert_eq!(object_debug_color(&object, false), OBJECT_TRIGGER_COLOR);
+        object.trigger_script = 0;
+        object.auto_script = 20;
+        assert_eq!(object_debug_color(&object, false), OBJECT_AUTO_COLOR);
+        object.auto_script = 0;
+        assert_eq!(object_debug_color(&object, false), OBJECT_INERT_COLOR);
+        object.state = 0;
+        assert_eq!(object_debug_color(&object, false), OBJECT_HIDDEN_COLOR);
+        assert_eq!(object_debug_color(&object, true), OBJECT_FOCUS_COLOR);
+    }
+
     #[test]
     fn covering_tiles_are_bottom_aligned_to_their_logical_tile() {
         assert_eq!(covering_tile_y(10, 0, 15, 0), 152);
@@ -1573,12 +2413,36 @@ mod tests {
     }
 
     #[test]
-    fn long_dialog_text_spans_multiple_three_line_pages() {
+    fn long_dialog_text_wraps_without_losing_bytes() {
         let text = [b'A'; 109];
         let lines = wrap_big5_lines(&text, 272);
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[..3].iter().map(|line| line.len()).sum::<usize>(), 102);
         assert_eq!(lines[3].len(), 7);
+    }
+
+    #[test]
+    fn dialog_title_does_not_consume_one_of_four_body_lines() {
+        let text = text_library(&[b"Name:", b"one", b"two", b"three", b"four"]);
+        let dialog = ActiveDialog {
+            message_ids: vec![0, 1, 2, 3, 4],
+            position: DialogPosition::Upper,
+            font_color: 0x4f,
+            face_index: None,
+            page: 0,
+            awaiting_input: true,
+            auto_wait_ticks: None,
+        };
+        assert_eq!(dialog_title(&text, &dialog), Some(b"Name:".as_slice()));
+        assert_eq!(dialog_body_lines(&text, &dialog).len(), 4);
+        assert_eq!(dialog_page_count(&text, &dialog), 1);
+    }
+
+    #[test]
+    fn dialog_controls_do_not_consume_layout_width() {
+        assert_eq!(dialog_text_width(b"A-$03B"), 16);
+        let lines = wrap_big5_lines(b"A-$03B", 8);
+        assert_eq!(lines, [b"A-$03".as_slice(), b"B".as_slice()]);
     }
 
     #[test]

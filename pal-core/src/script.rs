@@ -23,6 +23,8 @@ pub enum ScriptEvent {
     Message {
         message_id: u16,
         position: DialogPosition,
+        font_color: u8,
+        face_index: Option<u16>,
     },
     Waiting,
     Delay,
@@ -38,6 +40,7 @@ pub enum ScriptEvent {
     Completed {
         trigger: TriggerRequest,
         next_entry: u16,
+        succeeded: bool,
     },
     Unsupported {
         trigger: TriggerRequest,
@@ -163,6 +166,17 @@ pub enum ScriptAction {
     SetPlayerSprite {
         sprite_index: usize,
     },
+    AdjustPlayerHealth {
+        role_id: u16,
+        hp: i16,
+        mp: i16,
+        apply_to_all: bool,
+    },
+    RevivePlayer {
+        role_id: u16,
+        hp_tenths: u16,
+        apply_to_all: bool,
+    },
     OffsetPlayer {
         dx: i32,
         dy: i32,
@@ -241,9 +255,12 @@ struct Execution {
     entry: u16,
     next_entry: u16,
     dialog_position: DialogPosition,
+    dialog_color: u8,
+    dialog_face: Option<u16>,
     wait_frames: u16,
     wait_updates_auto_scripts: bool,
     viewport_frames_remaining: u16,
+    succeeded: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -252,12 +269,34 @@ struct CallFrame {
     return_entry: u16,
 }
 
+/// One script instruction captured for development diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptInstructionDebug {
+    pub object_id: u16,
+    pub entry: u16,
+    pub opcode: u16,
+    pub operands: [u16; 3],
+}
+
+/// Read-only execution details used by platform debug UIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptDebugSnapshot {
+    pub active: bool,
+    pub trigger: Option<TriggerRequest>,
+    pub last_instruction: Option<ScriptInstructionDebug>,
+    pub next_instruction: Option<ScriptInstructionDebug>,
+    pub call_depth: usize,
+    pub wait_frames: u16,
+}
+
 pub struct ScriptRuntime {
     table: ScriptTable,
     execution: Option<Execution>,
     call_stack: Vec<CallFrame>,
     random_state: u32,
     trigger_idle_frames: BTreeMap<u16, u16>,
+    last_trigger: Option<TriggerRequest>,
+    last_instruction: Option<ScriptInstructionDebug>,
 }
 
 impl ScriptRuntime {
@@ -268,6 +307,8 @@ impl ScriptRuntime {
             call_stack: Vec::new(),
             random_state: 0x4d59_5df4,
             trigger_idle_frames: BTreeMap::new(),
+            last_trigger: None,
+            last_instruction: None,
         }
     }
 
@@ -281,16 +322,42 @@ impl ScriptRuntime {
             entry: trigger.script_entry,
             next_entry: trigger.script_entry,
             dialog_position: DialogPosition::Lower,
+            dialog_color: 0x4f,
+            dialog_face: None,
             wait_frames: 0,
             wait_updates_auto_scripts: false,
             viewport_frames_remaining: 0,
+            succeeded: true,
         });
         self.call_stack.clear();
+        self.last_trigger = Some(trigger);
+        self.last_instruction = None;
         true
     }
 
     pub fn is_active(&self) -> bool {
         self.execution.is_some()
+    }
+
+    pub fn debug_snapshot(&self) -> ScriptDebugSnapshot {
+        let next_instruction = self.execution.and_then(|execution| {
+            self.table
+                .entry(execution.entry)
+                .map(|entry| ScriptInstructionDebug {
+                    object_id: execution.object_id,
+                    entry: execution.entry,
+                    opcode: entry.opcode,
+                    operands: entry.operands,
+                })
+        });
+        ScriptDebugSnapshot {
+            active: self.execution.is_some(),
+            trigger: self.last_trigger,
+            last_instruction: self.last_instruction,
+            next_instruction,
+            call_depth: self.call_stack.len(),
+            wait_frames: self.execution.map_or(0, |execution| execution.wait_frames),
+        }
     }
 
     /// Redirect an active script after a world-state condition fails.
@@ -300,6 +367,15 @@ impl ScriptRuntime {
         };
         execution.entry = entry;
         execution.viewport_frames_remaining = 0;
+        true
+    }
+
+    /// Record the success state of a world-dependent item effect.
+    pub fn set_success(&mut self, succeeded: bool) -> bool {
+        let Some(execution) = self.execution.as_mut() else {
+            return false;
+        };
+        execution.succeeded = succeeded;
         true
     }
 
@@ -323,6 +399,12 @@ impl ScriptRuntime {
                     entry: execution.entry,
                 });
             };
+            self.last_instruction = Some(ScriptInstructionDebug {
+                object_id: execution.object_id,
+                entry: execution.entry,
+                opcode: entry.opcode,
+                operands: entry.operands,
+            });
 
             match entry.opcode {
                 0x0000 => {
@@ -335,6 +417,7 @@ impl ScriptRuntime {
                     return Some(ScriptEvent::Completed {
                         trigger: execution.trigger,
                         next_entry: execution.next_entry,
+                        succeeded: execution.succeeded,
                     });
                 }
                 0x0001 => {
@@ -349,6 +432,7 @@ impl ScriptRuntime {
                     return Some(ScriptEvent::Completed {
                         trigger: execution.trigger,
                         next_entry: execution.next_entry,
+                        succeeded: execution.succeeded,
                     });
                 }
                 0x0002 => {
@@ -364,6 +448,7 @@ impl ScriptRuntime {
                         return Some(ScriptEvent::Completed {
                             trigger: execution.trigger,
                             next_entry,
+                            succeeded: execution.succeeded,
                         });
                     }
                     execution.entry = execution.entry.wrapping_add(1);
@@ -536,6 +621,21 @@ impl ScriptRuntime {
                     }));
                 }
                 0x0016 => execution.entry = execution.entry.wrapping_add(1),
+                0x001b..=0x001d => {
+                    let (hp, mp) = match entry.opcode {
+                        0x001b => (entry.operands[1] as i16, 0),
+                        0x001c => (0, entry.operands[1] as i16),
+                        _ => (entry.operands[1] as i16, entry.operands[1] as i16),
+                    };
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::AdjustPlayerHealth {
+                        role_id: execution.object_id,
+                        hp,
+                        mp,
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
                 0x001e => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -559,6 +659,15 @@ impl ScriptRuntime {
                         item_id: entry.operands[0],
                         amount: entry.operands[1].max(1),
                         insufficient_entry: entry.operands[2],
+                    }));
+                }
+                0x0022 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::RevivePlayer {
+                        role_id: execution.object_id,
+                        hp_tenths: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
                     }));
                 }
                 0x0026 => {
@@ -878,18 +987,34 @@ impl ScriptRuntime {
                 }
                 0x003b => {
                     execution.dialog_position = DialogPosition::Center;
+                    if entry.operands[0] != 0 {
+                        execution.dialog_color = entry.operands[0] as u8;
+                    }
+                    execution.dialog_face = None;
                     execution.entry = execution.entry.wrapping_add(1);
                 }
                 0x003c => {
                     execution.dialog_position = DialogPosition::Upper;
+                    if entry.operands[1] != 0 {
+                        execution.dialog_color = entry.operands[1] as u8;
+                    }
+                    execution.dialog_face = (entry.operands[0] != 0).then_some(entry.operands[0]);
                     execution.entry = execution.entry.wrapping_add(1);
                 }
                 0x003d => {
                     execution.dialog_position = DialogPosition::Lower;
+                    if entry.operands[1] != 0 {
+                        execution.dialog_color = entry.operands[1] as u8;
+                    }
+                    execution.dialog_face = (entry.operands[0] != 0).then_some(entry.operands[0]);
                     execution.entry = execution.entry.wrapping_add(1);
                 }
                 0x003e => {
                     execution.dialog_position = DialogPosition::CenterWindow;
+                    if entry.operands[0] != 0 {
+                        execution.dialog_color = entry.operands[0] as u8;
+                    }
+                    execution.dialog_face = None;
                     execution.entry = execution.entry.wrapping_add(1);
                 }
                 0x0040 if entry.operands[0] != 0 => {
@@ -915,6 +1040,8 @@ impl ScriptRuntime {
                     return Some(ScriptEvent::Message {
                         message_id: entry.operands[0],
                         position: execution.dialog_position,
+                        font_color: execution.dialog_color,
+                        face_index: execution.dialog_face,
                     });
                 }
                 opcode => {
@@ -1007,6 +1134,48 @@ mod tests {
         ScriptTable::parse(&data).unwrap()
     }
 
+    #[test]
+    fn debug_snapshot_tracks_trigger_and_instructions_after_completion() {
+        let mut runtime =
+            ScriptRuntime::new(table(&[[0, 0, 0, 0], [0x0005, 2, 0, 0], [0, 0, 0, 0]]));
+        let request = trigger(1);
+
+        assert!(runtime.start(request));
+        assert_eq!(
+            runtime.debug_snapshot(),
+            ScriptDebugSnapshot {
+                active: true,
+                trigger: Some(request),
+                last_instruction: None,
+                next_instruction: Some(ScriptInstructionDebug {
+                    object_id: request.object_id,
+                    entry: 1,
+                    opcode: 0x0005,
+                    operands: [2, 0, 0],
+                }),
+                call_depth: 0,
+                wait_frames: 0,
+            }
+        );
+
+        assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+        let waiting = runtime.debug_snapshot();
+        assert_eq!(waiting.last_instruction.unwrap().entry, 1);
+        assert_eq!(waiting.next_instruction.unwrap().entry, 2);
+        assert_eq!(waiting.wait_frames, 1);
+
+        assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
+        let completed = runtime.debug_snapshot();
+        assert!(!completed.active);
+        assert_eq!(completed.trigger, Some(request));
+        assert_eq!(completed.last_instruction.unwrap().entry, 2);
+        assert_eq!(completed.next_instruction, None);
+    }
+
     fn trigger(entry: u16) -> TriggerRequest {
         TriggerRequest {
             object_id: 7,
@@ -1030,6 +1199,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 42,
                 position: DialogPosition::Upper,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
         assert_eq!(
@@ -1037,6 +1208,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 43,
                 position: DialogPosition::Upper,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
         assert_eq!(
@@ -1044,9 +1217,97 @@ mod tests {
             Some(ScriptEvent::Completed {
                 trigger: trigger(1),
                 next_entry: 1,
+                succeeded: true,
             })
         );
         assert!(!runtime.is_active());
+    }
+
+    #[test]
+    fn yields_item_recovery_actions_and_reports_script_success() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x001b, 0, 50, 0],
+            [0x001c, 1, 20, 0],
+            [0x001d, 0, 10, 0],
+            [0x0022, 0, 3, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::AdjustPlayerHealth {
+                role_id: 7,
+                hp: 50,
+                mp: 0,
+                apply_to_all: false,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::AdjustPlayerHealth {
+                role_id: 7,
+                hp: 0,
+                mp: 20,
+                apply_to_all: true,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::AdjustPlayerHealth {
+                role_id: 7,
+                hp: 10,
+                mp: 10,
+                apply_to_all: false,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::RevivePlayer {
+                role_id: 7,
+                hp_tenths: 3,
+                apply_to_all: false,
+            }))
+        );
+        assert!(runtime.set_success(false));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed {
+                trigger: trigger(1),
+                next_entry: 1,
+                succeeded: false,
+            })
+        );
+    }
+
+    #[test]
+    fn dialog_opcodes_preserve_face_and_font_color() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x003c, 5, 0x2d, 0],
+            [0xffff, 42, 0, 0],
+            [0x003d, 6, 0x1a, 0],
+            [0xffff, 43, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Message {
+                message_id: 42,
+                position: DialogPosition::Upper,
+                font_color: 0x2d,
+                face_index: Some(5),
+            })
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Message {
+                message_id: 43,
+                position: DialogPosition::Lower,
+                font_color: 0x1a,
+                face_index: Some(6),
+            })
+        );
     }
 
     #[test]
@@ -1064,6 +1325,7 @@ mod tests {
             Some(ScriptEvent::Completed {
                 trigger: trigger(1),
                 next_entry: 4,
+                succeeded: true,
             })
         );
     }
@@ -1084,6 +1346,7 @@ mod tests {
             Some(ScriptEvent::Completed {
                 trigger: trigger(1),
                 next_entry: 4,
+                succeeded: true,
             })
         );
 
@@ -1093,6 +1356,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 9,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
 
@@ -1108,6 +1373,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 20,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
     }
@@ -1136,6 +1403,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 42,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
         assert!(matches!(
@@ -1160,6 +1429,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 42,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
     }
@@ -1179,6 +1450,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 20,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
 
@@ -1194,6 +1467,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 30,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
     }
@@ -1213,6 +1488,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 12,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
     }
@@ -1381,6 +1658,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 11,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
     }
@@ -1745,6 +2024,8 @@ mod tests {
             Some(ScriptEvent::Message {
                 message_id: 20,
                 position: DialogPosition::Lower,
+                font_color: 0x4f,
+                face_index: None,
             })
         );
     }

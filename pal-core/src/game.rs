@@ -19,12 +19,24 @@ use crate::script::ScriptAction;
 
 pub const UPDATE_INTERVAL_MS: u64 = 50;
 const MAX_INVENTORY: usize = 1024;
+const ITEM_FLAG_USABLE: u16 = 1 << 0;
+const ITEM_FLAG_CONSUMING: u16 = 1 << 3;
+const ITEM_FLAG_APPLY_TO_ALL: u16 = 1 << 4;
 const ITEM_FLAG_SELLABLE: u16 = 1 << 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreItem {
     pub item_id: u16,
     pub price: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsableItem {
+    pub item_id: u16,
+    pub amount: u16,
+    pub script_entry: u16,
+    pub consuming: bool,
+    pub apply_to_all: bool,
 }
 
 /// Platform-independent commands sampled for one fixed update.
@@ -91,6 +103,7 @@ pub struct GameState<M = Map> {
     stores: Option<Stores>,
     global_objects: Option<GlobalObjects>,
     inventory: BTreeMap<u16, u16>,
+    item_use_scripts: BTreeMap<u16, u16>,
     inactive_objects: BTreeMap<u16, SceneObject>,
     scene_enter_scripts: BTreeMap<u16, u16>,
     scene_teleport_scripts: BTreeMap<u16, u16>,
@@ -120,6 +133,7 @@ pub struct GameSnapshot {
     current_music: Option<u16>,
     cash: u32,
     inventory: BTreeMap<u16, u16>,
+    item_use_scripts: BTreeMap<u16, u16>,
     inactive_objects: BTreeMap<u16, SceneObject>,
     scene_enter_scripts: BTreeMap<u16, u16>,
     scene_teleport_scripts: BTreeMap<u16, u16>,
@@ -138,9 +152,9 @@ impl GameSnapshot {
     }
 }
 
-// Version 9 stores all six mutable player-role records. Version 8 added the
-// scripted viewport mode and position.
-const SNAPSHOT_VERSION: u16 = 9;
+// Version 10 stores persistent item-use script entries. Version 9 added all
+// six mutable player-role records.
+const SNAPSHOT_VERSION: u16 = 10;
 
 #[derive(Serialize, Deserialize)]
 struct SnapshotData {
@@ -152,6 +166,7 @@ struct SnapshotData {
     current_music: Option<u16>,
     cash: u32,
     inventory: Vec<(u16, u16)>,
+    item_use_scripts: Vec<(u16, u16)>,
     inactive_objects: Vec<SavedSceneObject>,
     scene_enter_scripts: Vec<(u16, u16)>,
     scene_teleport_scripts: Vec<(u16, u16)>,
@@ -391,6 +406,7 @@ impl<M: CollisionMap> GameState<M> {
             stores: None,
             global_objects: None,
             inventory: BTreeMap::new(),
+            item_use_scripts: BTreeMap::new(),
             inactive_objects: BTreeMap::new(),
             scene_enter_scripts: BTreeMap::new(),
             scene_teleport_scripts: BTreeMap::new(),
@@ -487,6 +503,73 @@ impl<M: CollisionMap> GameState<M> {
         self.inventory
             .iter()
             .map(|(&item_id, &amount)| (item_id, amount))
+    }
+
+    pub fn usable_item(&self, item_id: u16) -> Option<UsableItem> {
+        let amount = self.inventory_count(item_id);
+        let object = self.global_objects.as_ref()?.get(item_id)?;
+        let flags = object.item_flags();
+        (amount > 0 && flags & ITEM_FLAG_USABLE != 0).then_some(UsableItem {
+            item_id,
+            amount,
+            script_entry: self
+                .item_use_scripts
+                .get(&item_id)
+                .copied()
+                .unwrap_or_else(|| object.item_use_script()),
+            consuming: flags & ITEM_FLAG_CONSUMING != 0,
+            apply_to_all: flags & ITEM_FLAG_APPLY_TO_ALL != 0,
+        })
+    }
+
+    pub fn usable_inventory(&self) -> Vec<UsableItem> {
+        self.inventory()
+            .filter_map(|(item_id, _)| self.usable_item(item_id))
+            .collect()
+    }
+
+    pub fn item_use_request(&self, item_id: u16, role_id: Option<u16>) -> Option<TriggerRequest> {
+        let item = self.usable_item(item_id)?;
+        let object_id = if item.apply_to_all {
+            role_id.is_none().then_some(0xffff)?
+        } else {
+            let role_id = role_id?;
+            self.party
+                .members()
+                .iter()
+                .any(|member| member.role_id == role_id)
+                .then_some(role_id)?
+        };
+        (item.script_entry != 0).then_some(TriggerRequest {
+            object_id,
+            script_entry: item.script_entry,
+            kind: crate::scene::TriggerKind::Item,
+        })
+    }
+
+    /// Persist an item's script entry and consume it only after a successful script.
+    pub fn finish_item_use(&mut self, item_id: u16, next_entry: u16, succeeded: bool) -> bool {
+        let Some(item) = self.usable_item(item_id) else {
+            return false;
+        };
+        self.item_use_scripts.insert(item_id, next_entry);
+        if succeeded && item.consuming {
+            return self.consume_inventory_item(item_id);
+        }
+        true
+    }
+
+    fn consume_inventory_item(&mut self, item_id: u16) -> bool {
+        let amount = self.inventory_count(item_id);
+        if amount == 0 {
+            return false;
+        }
+        if amount == 1 {
+            self.inventory.remove(&item_id);
+        } else {
+            self.inventory.insert(item_id, amount - 1);
+        }
+        true
     }
 
     pub fn store_items(&self, store_number: u16) -> Option<Vec<StoreItem>> {
@@ -707,6 +790,7 @@ impl<M: CollisionMap> GameState<M> {
             current_music: self.current_music,
             cash: self.cash,
             inventory: self.inventory.clone(),
+            item_use_scripts: self.item_use_scripts.clone(),
             inactive_objects: self.inactive_objects.clone(),
             scene_enter_scripts: self.scene_enter_scripts.clone(),
             scene_teleport_scripts: self.scene_teleport_scripts.clone(),
@@ -740,6 +824,7 @@ impl<M: CollisionMap> GameState<M> {
             current_music: snapshot.current_music,
             cash: snapshot.cash,
             inventory: snapshot.inventory.into_iter().collect(),
+            item_use_scripts: snapshot.item_use_scripts.into_iter().collect(),
             inactive_objects: snapshot
                 .inactive_objects
                 .values()
@@ -786,6 +871,7 @@ impl<M: CollisionMap> GameState<M> {
             || data.scene_enter_scripts.len() > MAX_SCENES
             || data.scene_teleport_scripts.len() > MAX_SCENES
             || data.inventory.len() > MAX_INVENTORY
+            || data.item_use_scripts.len() > MAX_INVENTORY
             || data.scene_objects.len() > MAX_OBJECTS
             || data.inactive_objects.len() > MAX_OBJECTS
             || data.scene_objects.len() + data.inactive_objects.len() > MAX_OBJECTS
@@ -830,6 +916,16 @@ impl<M: CollisionMap> GameState<M> {
         {
             return None;
         }
+        let item_use_script_count = data.item_use_scripts.len();
+        let item_use_scripts = data
+            .item_use_scripts
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        if item_use_scripts.len() != item_use_script_count
+            || item_use_scripts.keys().any(|&item_id| item_id == 0)
+        {
+            return None;
+        }
         let inactive_objects = data
             .inactive_objects
             .into_iter()
@@ -867,6 +963,7 @@ impl<M: CollisionMap> GameState<M> {
             current_music: data.current_music,
             cash: data.cash,
             inventory,
+            item_use_scripts,
             inactive_objects,
             scene_enter_scripts,
             scene_teleport_scripts,
@@ -891,6 +988,7 @@ impl<M: CollisionMap> GameState<M> {
         self.current_music = snapshot.current_music;
         self.cash = snapshot.cash;
         self.inventory = snapshot.inventory;
+        self.item_use_scripts = snapshot.item_use_scripts;
         self.inactive_objects = snapshot.inactive_objects;
         self.scene_enter_scripts = snapshot.scene_enter_scripts;
         self.scene_teleport_scripts = snapshot.scene_teleport_scripts;
@@ -1123,6 +1221,17 @@ impl<M: CollisionMap> GameState<M> {
                 self.player.sprite_index = sprite_index;
                 self.player.anim_frame = 0;
             }
+            ScriptAction::AdjustPlayerHealth {
+                role_id,
+                hp,
+                mp,
+                apply_to_all,
+            } => return self.adjust_player_health(role_id, hp, mp, apply_to_all),
+            ScriptAction::RevivePlayer {
+                role_id,
+                hp_tenths,
+                apply_to_all,
+            } => return self.revive_player(role_id, hp_tenths, apply_to_all),
             ScriptAction::OffsetPlayer { dx, dy } => {
                 self.shift_party(dx, dy);
             }
@@ -1195,6 +1304,69 @@ impl<M: CollisionMap> GameState<M> {
             }
         }
         true
+    }
+
+    fn adjust_player_health(&mut self, role_id: u16, hp: i16, mp: i16, apply_to_all: bool) -> bool {
+        let role_ids = if apply_to_all {
+            self.party
+                .members()
+                .iter()
+                .map(|member| member.role_id)
+                .collect::<Vec<_>>()
+        } else {
+            vec![role_id]
+        };
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for role_id in role_ids {
+            let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                continue;
+            };
+            if role.hp == 0 {
+                continue;
+            }
+            let new_hp = (i32::from(role.hp) + i32::from(hp)).clamp(0, i32::from(role.max_hp));
+            let new_mp = (i32::from(role.mp) + i32::from(mp)).clamp(0, i32::from(role.max_mp));
+            changed |= i32::from(role.hp) != new_hp || i32::from(role.mp) != new_mp;
+            role.hp = new_hp as u16;
+            role.mp = new_mp as u16;
+        }
+        self.party.sync_from_roles(roles);
+        changed
+    }
+
+    fn revive_player(&mut self, role_id: u16, hp_tenths: u16, apply_to_all: bool) -> bool {
+        let role_ids = if apply_to_all {
+            self.party
+                .members()
+                .iter()
+                .map(|member| member.role_id)
+                .collect::<Vec<_>>()
+        } else {
+            vec![role_id]
+        };
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let mut revived = false;
+        for role_id in role_ids {
+            let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                continue;
+            };
+            if role.hp != 0 {
+                continue;
+            }
+            role.hp = u32::from(role.max_hp)
+                .saturating_mul(u32::from(hp_tenths))
+                .checked_div(10)
+                .unwrap_or(0)
+                .min(u32::from(u16::MAX)) as u16;
+            revived = true;
+        }
+        self.party.sync_from_roles(roles);
+        revived
     }
 
     /// Move an event object one script tick toward a PAL tile position.
@@ -2434,6 +2606,131 @@ mod tests {
     }
 
     #[test]
+    fn item_use_validates_targets_applies_recovery_and_consumes_on_success() {
+        let mut role_data = vec![0; 900];
+        let mut set_role_value = |array: usize, role: usize, value: u16| {
+            let offset = array * PLAYER_ROLE_COUNT * 2 + role * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        };
+        for role in 0..2 {
+            set_role_value(7, role, 100);
+            set_role_value(8, role, 80);
+            set_role_value(9, role, if role == 0 { 40 } else { 0 });
+            set_role_value(10, role, 20);
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let mut party = Party::single(0, &roles).unwrap();
+        assert!(party.add(1, &roles));
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let objects = GlobalObjects::parse(
+            &[
+                [0u16; 6],
+                [0, 0, 123, 0, 0, ITEM_FLAG_USABLE | ITEM_FLAG_CONSUMING],
+                [
+                    0,
+                    0,
+                    200,
+                    0,
+                    0,
+                    ITEM_FLAG_USABLE | ITEM_FLAG_CONSUMING | ITEM_FLAG_APPLY_TO_ALL,
+                ],
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+            pal_assets::objects::ObjectLayout::Dos,
+        )
+        .unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects);
+        for item_id in [1, 2] {
+            assert!(state.apply_script_action(ScriptAction::AddItem { item_id, amount: 1 }));
+        }
+
+        let request = state.item_use_request(1, Some(0)).unwrap();
+        assert_eq!(request.object_id, 0);
+        assert_eq!(request.script_entry, 123);
+        assert_eq!(request.kind, crate::scene::TriggerKind::Item);
+        assert!(state.item_use_request(1, Some(5)).is_none());
+        assert!(state.item_use_request(1, None).is_none());
+        assert!(state.item_use_request(2, Some(0)).is_none());
+        assert_eq!(state.item_use_request(2, None).unwrap().object_id, 0xffff);
+
+        assert!(state.apply_script_action(ScriptAction::AdjustPlayerHealth {
+            role_id: 0,
+            hp: 50,
+            mp: 30,
+            apply_to_all: false,
+        }));
+        assert_eq!(state.player_role(0).unwrap().hp, 90);
+        assert_eq!(state.player_role(0).unwrap().mp, 50);
+        assert!(state.finish_item_use(1, 321, false));
+        assert_eq!(state.inventory_count(1), 1);
+        assert_eq!(
+            state.item_use_request(1, Some(0)).unwrap().script_entry,
+            321
+        );
+        let saved = state
+            .decode_snapshot(&state.encode_snapshot().unwrap())
+            .unwrap();
+        state.restore_snapshot(saved, test_map());
+        assert_eq!(
+            state.item_use_request(1, Some(0)).unwrap().script_entry,
+            321
+        );
+
+        assert!(state.apply_script_action(ScriptAction::RevivePlayer {
+            role_id: 0xffff,
+            hp_tenths: 3,
+            apply_to_all: true,
+        }));
+        assert_eq!(state.player_role(1).unwrap().hp, 30);
+        assert_eq!(state.party.members()[1].attributes.hp, 30);
+
+        assert!(state.finish_item_use(1, 321, true));
+        assert_eq!(state.inventory_count(1), 0);
+        assert!(state.item_use_request(1, Some(0)).is_none());
+    }
+
+    #[test]
+    fn recovery_rejects_dead_or_full_targets_without_mutating_them() {
+        let mut role_data = vec![0; 900];
+        for (array, value) in [(7, 100u16), (8, 80), (9, 100), (10, 80)] {
+            let offset = array * PLAYER_ROLE_COUNT * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let mut state = state(&[]).with_party(party).with_player_roles(roles);
+        assert!(
+            !state.apply_script_action(ScriptAction::AdjustPlayerHealth {
+                role_id: 0,
+                hp: 50,
+                mp: 50,
+                apply_to_all: false,
+            })
+        );
+        assert!(!state.apply_script_action(ScriptAction::RevivePlayer {
+            role_id: 0,
+            hp_tenths: 5,
+            apply_to_all: false,
+        }));
+        state.player_roles.as_mut().unwrap().role_mut(0).unwrap().hp = 0;
+        assert!(
+            !state.apply_script_action(ScriptAction::AdjustPlayerHealth {
+                role_id: 0,
+                hp: 50,
+                mp: 0,
+                apply_to_all: false,
+            })
+        );
+        assert_eq!(state.player_role(0).unwrap().hp, 0);
+    }
+
+    #[test]
     fn store_transactions_use_prices_flags_and_inventory() {
         let stores = Stores::parse(
             &[2u16, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -2664,7 +2961,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":9", "\"version\":8");
+            .replace("\"version\":10", "\"version\":9");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 

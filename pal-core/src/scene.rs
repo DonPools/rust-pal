@@ -15,6 +15,7 @@ pub const TRIGGER_TOUCH_FARTHEST: u16 = 8;
 pub enum TriggerKind {
     Search,
     Touch,
+    Item,
 }
 
 /// A script invocation produced by scene interaction and consumed by the script runtime.

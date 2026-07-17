@@ -7,6 +7,7 @@ use pal_assets::mkf::MkfArchive;
 use pal_assets::objects::{GlobalObjects, ObjectLayout};
 use pal_assets::palette::Palette;
 use pal_assets::player_roles::PlayerRoles;
+use pal_assets::rle::RleBitmap;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::store::Stores;
@@ -32,7 +33,7 @@ fn main() {
     let data_dir = workspace_data_dir();
     let check_only = std::env::args().any(|argument| argument == "--check-assets");
 
-    println!("Rust-PAL M3 complete");
+    println!("Rust-PAL M4 in progress");
     println!("data: {}", data_dir.display());
 
     let palette = load_palette(&data_dir, DEFAULT_PALETTE).expect("failed to load palette");
@@ -52,6 +53,7 @@ fn main() {
         .expect("default scene is missing");
     let map = load_map(&data_dir, scene.scene.map_num as usize).expect("failed to load map");
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
+    let dialog_faces = load_dialog_faces(&data_dir).expect("failed to load RGM.MKF dialog faces");
     let leader = party.leader().expect("initial party has no leader");
     let role_sprite_index = leader.attributes.scene_sprite_num as usize;
     let walk_frames = leader.attributes.frames_per_direction();
@@ -118,6 +120,10 @@ fn main() {
                     .character_frame_count(event.sprite_num as usize)
                     .is_some()),
             "scene event object references an unavailable MGO.MKF sprite"
+        );
+        assert!(
+            dialog_faces.iter().any(Option::is_some),
+            "RGM.MKF contains no valid dialog faces"
         );
         render_tile_map(
             &mut renderer,
@@ -408,6 +414,45 @@ fn main() {
         }
         assert_eq!(game.item_count(99), 1);
 
+        assert!(game.apply_script_action(ScriptAction::AdjustPlayerHealth {
+            role_id: 0,
+            hp: -25,
+            mp: 0,
+            apply_to_all: false,
+        }));
+        let damaged_hp = game.player_role(0).unwrap().hp;
+        let use_request = game
+            .item_use_request(99, Some(0))
+            .expect("scene item 99 is not usable by the initial role");
+        assert!(scripts.start(use_request));
+        loop {
+            match scripts
+                .advance()
+                .expect("item use script stopped without an event")
+            {
+                ScriptEvent::Action(
+                    action @ (ScriptAction::AdjustPlayerHealth { .. }
+                    | ScriptAction::RevivePlayer { .. }),
+                ) => {
+                    let succeeded = game.apply_script_action(action);
+                    assert!(scripts.set_success(succeeded));
+                }
+                ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
+                ScriptEvent::Completed {
+                    next_entry,
+                    succeeded,
+                    ..
+                } => {
+                    assert!(succeeded, "item 99 recovery script reported failure");
+                    assert!(game.finish_item_use(99, next_entry, succeeded));
+                    break;
+                }
+                event => panic!("item 99 use did not complete: {event:?}"),
+            }
+        }
+        assert!(game.player_role(0).unwrap().hp > damaged_hp);
+        assert_eq!(game.inventory_count(99), 0);
+
         game.player.world_x = 1152;
         game.player.world_y = 384;
         assert!(game.update(Default::default()));
@@ -533,7 +578,7 @@ fn main() {
         game.restore_snapshot(snapshot, snapshot_scene.map);
         assert_eq!(game.scene_number, 3);
         assert_eq!(game.cash, 1_234);
-        assert_eq!(game.item_count(99), 1);
+        assert_eq!(game.item_count(99), 0);
 
         game.player.world_x = 1472;
         game.player.world_y = 1520;
@@ -632,7 +677,7 @@ fn main() {
             global_objects.layout(),
         );
         println!(
-            "M3 flow passed: {intro_messages} intro messages, {intro_actions} intro actions, item 99 acquired, scene 3 loaded, snapshot restored"
+            "M4 flow passed: {intro_messages} intro messages, {intro_actions} intro actions, item 99 acquired and used, scene 3 loaded, snapshot restored"
         );
         println!(
             "asset check passed: {visible_pixels} visible pixels, \
@@ -651,6 +696,7 @@ fn main() {
             initial_enter_script: scene.scene.script_on_enter,
             text,
             font,
+            dialog_faces,
             voc_mkf,
             midi_mkf,
             sound_font,
@@ -753,6 +799,16 @@ fn validate_sound_effects(data: &[u8]) -> Option<usize> {
 fn load_role_sprites(data_dir: &Path) -> Option<RoleSprites> {
     let data = std::fs::read(data_dir.join("MGO.MKF")).ok()?;
     RoleSprites::load(&data)
+}
+
+fn load_dialog_faces(data_dir: &Path) -> Option<Vec<Option<RleBitmap>>> {
+    let data = std::fs::read(data_dir.join("RGM.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    Some(
+        (0..archive.chunk_count())
+            .map(|index| RleBitmap::decode(archive.read_chunk(index)?))
+            .collect(),
+    )
 }
 
 fn create_scene_objects(

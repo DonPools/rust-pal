@@ -25,6 +25,10 @@ impl GlobalObject {
         self.data[1]
     }
 
+    pub fn item_use_script(self) -> u16 {
+        self.data[2]
+    }
+
     pub fn item_flags(self) -> u16 {
         self.data[6]
     }
@@ -98,6 +102,7 @@ mod tests {
         let objects = GlobalObjects::parse(&data, ObjectLayout::Dos).unwrap();
         assert_eq!(objects.layout(), ObjectLayout::Dos);
         assert_eq!(objects.len(), 1);
+        assert_eq!(objects.get(0).unwrap().item_use_script(), 30);
         assert_eq!(
             objects.get(0).unwrap().data,
             [10, 20, 30, 40, 50, 0, 0x1234]

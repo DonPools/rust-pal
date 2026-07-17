@@ -2,6 +2,7 @@
 //! 负责窗口创建、事件循环、渲染
 
 pub mod audio;
+mod debug_overlay;
 pub mod renderer;
 pub mod window;
 
