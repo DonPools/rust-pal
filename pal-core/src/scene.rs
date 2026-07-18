@@ -16,6 +16,8 @@ pub enum TriggerKind {
     Search,
     Touch,
     Item,
+    Equip,
+    Magic,
 }
 
 /// A script invocation produced by scene interaction and consumed by the script runtime.

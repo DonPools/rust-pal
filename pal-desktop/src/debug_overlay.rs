@@ -433,6 +433,8 @@ fn script_trigger(trigger: Option<TriggerRequest>) -> String {
         TriggerKind::Search => "SEARCH",
         TriggerKind::Touch => "TOUCH",
         TriggerKind::Item => "ITEM",
+        TriggerKind::Equip => "EQUIP",
+        TriggerKind::Magic => "MAGIC",
     };
     format!(
         "ROOT {kind} {} @{}",

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use pal_assets::magic::Magics;
 use pal_assets::midi::MidiSong;
 use pal_assets::mkf::MkfArchive;
 use pal_assets::objects::{GlobalObjects, ObjectLayout};
@@ -44,6 +45,7 @@ fn main() {
     let midi_mkf = load_music(&data_dir).expect("failed to load MIDI music");
     let sound_font = load_sound_font(&data_dir).expect("failed to load data/TimGM6mb.sf2");
     let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
+    let magics = load_magics(&data_dir).expect("failed to load magic data");
     let global_objects =
         load_global_objects(&data_dir).expect("failed to load global object definitions");
     let stores = load_stores(&data_dir).expect("failed to load store definitions");
@@ -75,7 +77,8 @@ fn main() {
         .with_global_objects(global_scene_objects)
         .with_party(party)
         .with_player_roles(player_roles.clone())
-        .with_economy_data(stores, global_objects.clone());
+        .with_economy_data(stores, global_objects.clone())
+        .with_magic_data(magics);
     let viewport = Viewport::from(game.camera);
     println!(
         "scene {} loaded: map {}, {} event objects, {} tile frames, palette {}, viewport ({}, {})",
@@ -878,6 +881,12 @@ fn load_player_roles(data_dir: &Path) -> Option<PlayerRoles> {
     let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
     PlayerRoles::parse(archive.read_chunk(3)?)
+}
+
+fn load_magics(data_dir: &Path) -> Option<Magics> {
+    let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    Magics::parse(archive.read_chunk(4)?)
 }
 
 fn load_stores(data_dir: &Path) -> Option<Stores> {

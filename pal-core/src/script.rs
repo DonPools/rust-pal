@@ -127,10 +127,10 @@ define_script_opcodes! {
     SetObjectGesture = 0x0014, "OBJ_GESTURE", "Set the current event object's gesture while facing south.", Implemented;
     SetPartyMemberPose = 0x0015, "PARTY_POSE", "Set a party member's direction and gesture.", Implemented;
     SetSelectedObjectPose = 0x0016, "OBJ_POSE_AT", "Set a selected event object's direction and gesture.", Implemented;
-    SetEquipmentEffect = 0x0017, "EQUIP_EFFECT", "Set an equipment-derived extra player attribute.", Unsupported;
-    EquipItem = 0x0018, "EQUIP", "Equip the selected item on the script owner role.", Unsupported;
-    AdjustPlayerAttribute = 0x0019, "STAT_ADD", "Increase or decrease a player attribute.", Unsupported;
-    SetPlayerAttribute = 0x001A, "STAT_SET", "Set a player attribute to an absolute value.", Unsupported;
+    SetEquipmentEffect = 0x0017, "EQUIP_EFFECT", "Set an equipment-derived extra player attribute.", Implemented;
+    EquipItem = 0x0018, "EQUIP", "Equip the selected item on the script owner role.", Implemented;
+    AdjustPlayerAttribute = 0x0019, "STAT_ADD", "Increase or decrease a player attribute.", Implemented;
+    SetPlayerAttribute = 0x001A, "STAT_SET", "Set a player attribute to an absolute value.", Implemented;
     AdjustPlayerHp = 0x001B, "HP_ADD", "Increase or decrease one player's or the party's HP.", Implemented;
     AdjustPlayerMp = 0x001C, "MP_ADD", "Increase or decrease one player's or the party's MP.", Implemented;
     AdjustPlayerHpMp = 0x001D, "HPMP_ADD", "Increase or decrease HP and MP by the same amount.", Implemented;
@@ -139,7 +139,7 @@ define_script_opcodes! {
     RemoveItem = 0x0020, "ITEM_REMOVE", "Remove an item from inventory or equipped party items.", Implemented;
     DamageEnemy = 0x0021, "ENEMY_DAMAGE", "Inflict direct damage on one enemy or all enemies.", Unsupported;
     RevivePlayer = 0x0022, "REVIVE", "Revive one player or all fallen party members.", Implemented;
-    RemoveEquipment = 0x0023, "UNEQUIP", "Remove one or all equipment slots from a player.", Unsupported;
+    RemoveEquipment = 0x0023, "UNEQUIP", "Remove one or all equipment slots from a player.", Implemented;
     SetObjectAutoScript = 0x0024, "OBJ_AUTO", "Set an event object's automatic script entry.", Implemented;
     SetObjectTriggerScript = 0x0025, "OBJ_TRIGGER", "Set an event object's trigger script entry.", Implemented;
     OpenBuyMenu = 0x0026, "SHOP_BUY", "Open the specified store's buy menu.", Implemented;
@@ -187,8 +187,8 @@ define_script_opcodes! {
     HideObject = 0x0052, "OBJ_HIDE", "Hide the current event object for a configurable period.", Implemented;
     UseDayPalette = 0x0053, "PALETTE_DAY", "Switch to the day palette.", Unsupported;
     UseNightPalette = 0x0054, "PALETTE_NIGHT", "Switch to the night palette.", Unsupported;
-    AddMagic = 0x0055, "MAGIC_ADD", "Teach a magic object to a player.", Unsupported;
-    RemoveMagic = 0x0056, "MAGIC_REMOVE", "Remove a magic object from a player.", Unsupported;
+    AddMagic = 0x0055, "MAGIC_ADD", "Teach a magic object to a player.", Implemented;
+    RemoveMagic = 0x0056, "MAGIC_REMOVE", "Remove a magic object from a player.", Implemented;
     ScaleMagicByMp = 0x0057, "MAGIC_SCALE_MP", "Set magic base damage from the consumed MP amount.", Unsupported;
     JumpIfItemCountLess = 0x0058, "JLT_ITEM", "Jump when fewer than the requested number of items are held.", Implemented;
     ChangeScene = 0x0059, "SCENE", "Change to the specified scene.", Implemented;
@@ -446,6 +446,32 @@ pub enum ScriptAction {
         role_id: u16,
         hp_tenths: u16,
         apply_to_all: bool,
+    },
+    SetEquipmentEffect {
+        role_id: u16,
+        attribute: u16,
+        slot: u16,
+        value: i16,
+    },
+    EquipItem {
+        role_id: u16,
+        slot: u16,
+        item_id: u16,
+    },
+    ChangePlayerAttribute {
+        role_id: u16,
+        attribute: u16,
+        value: i16,
+        absolute: bool,
+    },
+    RemoveEquipment {
+        role_id: u16,
+        slot: Option<u16>,
+    },
+    ChangeMagic {
+        role_id: u16,
+        magic_id: u16,
+        add: bool,
     },
     OffsetPlayer {
         dx: i32,
@@ -914,6 +940,38 @@ impl ScriptRuntime {
                     }));
                 }
                 SetSelectedObjectPose => execution.entry = execution.entry.wrapping_add(1),
+                SetEquipmentEffect if entry.operands[0] >= 0x0b => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetEquipmentEffect {
+                        role_id: execution.object_id,
+                        attribute: entry.operands[1],
+                        slot: entry.operands[0] - 0x0b,
+                        value: entry.operands[2] as i16,
+                    }));
+                }
+                EquipItem if entry.operands[0] >= 0x0b => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::EquipItem {
+                        role_id: execution.object_id,
+                        slot: entry.operands[0] - 0x0b,
+                        item_id: entry.operands[1],
+                    }));
+                }
+                AdjustPlayerAttribute | SetPlayerAttribute => {
+                    let role_id = entry.operands[2]
+                        .checked_sub(1)
+                        .unwrap_or(execution.object_id);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::ChangePlayerAttribute {
+                        role_id,
+                        attribute: entry.operands[0],
+                        value: entry.operands[1] as i16,
+                        absolute: opcode == SetPlayerAttribute,
+                    }));
+                }
                 AdjustPlayerHp | AdjustPlayerMp | AdjustPlayerHpMp => {
                     let (hp, mp) = match opcode {
                         AdjustPlayerHp => (entry.operands[1] as i16, 0),
@@ -961,6 +1019,14 @@ impl ScriptRuntime {
                         role_id: execution.object_id,
                         hp_tenths: entry.operands[1],
                         apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                RemoveEquipment => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::RemoveEquipment {
+                        role_id: entry.operands[0],
+                        slot: entry.operands[1].checked_sub(1),
                     }));
                 }
                 OpenBuyMenu => {
@@ -1358,6 +1424,18 @@ impl ScriptRuntime {
                     execution.succeeded = false;
                     execution.entry = execution.entry.wrapping_add(1);
                 }
+                AddMagic | RemoveMagic => {
+                    let role_id = entry.operands[1]
+                        .checked_sub(1)
+                        .unwrap_or(execution.object_id);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::ChangeMagic {
+                        role_id,
+                        magic_id: entry.operands[0],
+                        add: opcode == AddMagic,
+                    }));
+                }
                 Delay => {
                     execution.entry = execution.entry.wrapping_add(1);
                     execution.wait_frames = delay_80ms_ticks(entry.operands[0]).saturating_sub(1);
@@ -1379,10 +1457,7 @@ impl ScriptRuntime {
                 StartBattle
                 | SetEquipmentEffect
                 | EquipItem
-                | AdjustPlayerAttribute
-                | SetPlayerAttribute
                 | DamageEnemy
-                | RemoveEquipment
                 | PoisonEnemy
                 | PoisonPlayer
                 | CureEnemyPoison
@@ -1409,8 +1484,6 @@ impl ScriptRuntime {
                 | FadeIn
                 | UseDayPalette
                 | UseNightPalette
-                | AddMagic
-                | RemoveMagic
                 | ScaleMagicByMp
                 | HalvePlayerHp
                 | HalveEnemyHp
@@ -1578,7 +1651,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [79, 6, 80]);
+        assert_eq!(support_counts, [86, 6, 73]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2200,6 +2273,79 @@ mod tests {
                 next_entry: 1,
                 succeeded: false,
             })
+        );
+    }
+
+    #[test]
+    fn yields_equipment_attribute_and_magic_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x0018, 0x0e, 163, 0],
+            [0x0017, 0x0e, 17, 20],
+            [0x001a, 4, 1, 0],
+            [0x0019, 17, 3, 2],
+            [0x0023, 1, 4, 0],
+            [0x0055, 88, 0, 0],
+            [0x0056, 89, 2, 0],
+            [0, 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::EquipItem {
+                role_id: 7,
+                slot: 3,
+                item_id: 163,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetEquipmentEffect {
+                role_id: 7,
+                attribute: 17,
+                slot: 3,
+                value: 20,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::ChangePlayerAttribute {
+                role_id: 7,
+                attribute: 4,
+                value: 1,
+                absolute: true,
+            }))
+        );
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::ChangePlayerAttribute {
+                role_id: 1,
+                absolute: false,
+                ..
+            }))
+        ));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::RemoveEquipment {
+                role_id: 1,
+                slot: Some(3),
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::ChangeMagic {
+                role_id: 7,
+                magic_id: 88,
+                add: true,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::ChangeMagic {
+                role_id: 1,
+                magic_id: 89,
+                add: false,
+            }))
         );
     }
 

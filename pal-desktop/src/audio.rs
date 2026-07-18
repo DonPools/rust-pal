@@ -17,6 +17,7 @@ const RELEASE_TAIL_SECONDS: f64 = 2.0;
 pub struct SoundEffects {
     archive: MkfArchive,
     output: Option<(OutputStream, OutputStreamHandle)>,
+    enabled: bool,
 }
 
 pub struct BackgroundMusic {
@@ -25,6 +26,7 @@ pub struct BackgroundMusic {
     output: Option<(OutputStream, OutputStreamHandle)>,
     sink: Option<Sink>,
     current: Option<u16>,
+    enabled: bool,
 }
 
 impl BackgroundMusic {
@@ -35,6 +37,7 @@ impl BackgroundMusic {
             output: OutputStream::try_default().ok(),
             sink: None,
             current: None,
+            enabled: true,
         })
     }
 
@@ -42,6 +45,10 @@ impl BackgroundMusic {
     pub fn play(&mut self, music_id: u16, looped: bool, fade_seconds: u8) -> bool {
         if music_id == 0 {
             self.stop();
+            return true;
+        }
+        if !self.enabled {
+            self.current = Some(music_id);
             return true;
         }
         if self.current == Some(music_id) && self.sink.as_ref().is_some_and(|sink| !sink.empty()) {
@@ -79,6 +86,22 @@ impl BackgroundMusic {
             sink.stop();
         }
         self.current = None;
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            if let Some(sink) = self.sink.take() {
+                sink.stop();
+            }
+        }
     }
 }
 
@@ -151,6 +174,7 @@ impl SoundEffects {
         Some(Self {
             archive: MkfArchive::new(voc_mkf)?,
             output: OutputStream::try_default().ok(),
+            enabled: true,
         })
     }
 
@@ -162,6 +186,9 @@ impl SoundEffects {
         let Some(chunk) = self.archive.read_chunk(usize::from(sound_id)) else {
             return false;
         };
+        if !self.enabled {
+            return true;
+        }
         if chunk.is_empty() {
             return true;
         }
@@ -182,6 +209,14 @@ impl SoundEffects {
         sink.append(SamplesBuffer::new(1, clip.sample_rate, samples));
         sink.detach();
         true
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 }
 

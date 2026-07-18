@@ -150,7 +150,36 @@ struct ActiveDialog {
     auto_wait_ticks: Option<u16>,
 }
 
-const INVENTORY_VISIBLE_ROWS: usize = 8;
+const INVENTORY_COLUMNS: usize = 3;
+const INVENTORY_VISIBLE_ROWS: usize = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldMenu {
+    Main {
+        selected: usize,
+    },
+    InventoryAction {
+        selected: usize,
+    },
+    Status {
+        selected: usize,
+    },
+    MagicCaster {
+        selected: usize,
+    },
+    MagicList {
+        caster: usize,
+        selected: usize,
+    },
+    MagicTarget {
+        caster: usize,
+        magic_id: u16,
+        selected: usize,
+    },
+    System {
+        selected: usize,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InventoryMenu {
@@ -161,6 +190,8 @@ struct InventoryMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InventoryMode {
     Items,
+    EquipItems,
+    EquipTarget { item_id: u16, selected: usize },
     Target { item_id: u16, selected: usize },
 }
 
@@ -177,6 +208,22 @@ impl Default for InventoryMenu {
 struct ItemUseSession {
     item_id: u16,
     inventory_selected: usize,
+    apply_to_all: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EquipSession {
+    item_id: u16,
+    inventory_selected: usize,
+    role_selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MagicSession {
+    caster_selected: usize,
+    magic_id: u16,
+    target_selected: Option<usize>,
+    success_phase: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +243,7 @@ struct ShopMenu {
     mode: ShopMode,
     selected: usize,
     confirming: bool,
+    selected_yes: bool,
 }
 
 impl ShopMenu {
@@ -207,15 +255,7 @@ impl ShopMenu {
     }
 
     fn update_selection(&mut self, direction: Option<Direction>, item_count: usize) {
-        if item_count == 0 {
-            self.selected = 0;
-            return;
-        }
-        match direction {
-            Some(Direction::North) => self.selected = self.selected.saturating_sub(1),
-            Some(Direction::South) => self.selected = (self.selected + 1).min(item_count - 1),
-            _ => {}
-        }
+        update_wrapping_selection(&mut self.selected, direction, item_count);
     }
 }
 
@@ -226,22 +266,46 @@ impl InventoryMenu {
             return;
         }
         match direction {
-            Some(Direction::North) => self.selected = self.selected.saturating_sub(1),
-            Some(Direction::South) => self.selected = (self.selected + 1).min(item_count - 1),
+            Some(Direction::North) => {
+                self.selected = self.selected.saturating_sub(INVENTORY_COLUMNS)
+            }
+            Some(Direction::South) => {
+                self.selected = (self.selected + INVENTORY_COLUMNS).min(item_count - 1)
+            }
+            Some(Direction::West) => self.selected = self.selected.saturating_sub(1),
+            Some(Direction::East) => self.selected = (self.selected + 1).min(item_count - 1),
             _ => {}
         }
     }
 
     fn first_visible(self, item_count: usize) -> usize {
-        self.selected
-            .min(item_count.saturating_sub(1))
-            .saturating_sub(INVENTORY_VISIBLE_ROWS - 1)
+        let selected_row = self.selected.min(item_count.saturating_sub(1)) / INVENTORY_COLUMNS;
+        selected_row.saturating_sub(INVENTORY_VISIBLE_ROWS.div_ceil(2)) * INVENTORY_COLUMNS
+    }
+}
+
+fn update_wrapping_selection(selected: &mut usize, direction: Option<Direction>, count: usize) {
+    if count == 0 {
+        *selected = 0;
+        return;
+    }
+    match direction {
+        Some(Direction::North | Direction::West) => {
+            *selected = if *selected == 0 {
+                count - 1
+            } else {
+                *selected - 1
+            };
+        }
+        Some(Direction::South | Direction::East) => *selected = (*selected + 1) % count,
+        None => {}
     }
 }
 
 #[derive(Clone, Copy)]
 struct UiRenderContext<'a> {
     dialog: Option<&'a ActiveDialog>,
+    field_menu: Option<&'a FieldMenu>,
     inventory_menu: Option<&'a InventoryMenu>,
     confirmation_menu: Option<&'a ConfirmationMenu>,
     shop_menu: Option<&'a ShopMenu>,
@@ -253,10 +317,21 @@ struct UiRenderContext<'a> {
 struct ScriptServices {
     pending_enter_script: Option<u16>,
     pending_dialog: Option<ActiveDialog>,
+    field_menu: Option<FieldMenu>,
+    main_menu_selected: usize,
+    inventory_action_selected: usize,
+    inventory_selected: usize,
+    item_target_selected: usize,
+    magic_caster_selected: usize,
+    magic_selected: usize,
+    magic_target_selected: usize,
+    system_selected: usize,
     confirmation_menu: Option<ConfirmationMenu>,
     shop_menu: Option<ShopMenu>,
     inventory_menu: Option<InventoryMenu>,
     item_use: Option<ItemUseSession>,
+    equip: Option<EquipSession>,
+    magic: Option<MagicSession>,
     auto_scripts: ScriptTable,
     sound_effects: SoundEffects,
     music: BackgroundMusic,
@@ -323,10 +398,21 @@ pub fn run_game_window<L>(
     let mut script_services = ScriptServices {
         pending_enter_script: None,
         pending_dialog: None,
+        field_menu: None,
+        main_menu_selected: 0,
+        inventory_action_selected: 0,
+        inventory_selected: 0,
+        item_target_selected: 0,
+        magic_caster_selected: 0,
+        magic_selected: 0,
+        magic_target_selected: 0,
+        system_selected: 0,
         confirmation_menu: None,
         shop_menu: None,
         inventory_menu: None,
         item_use: None,
+        equip: None,
+        magic: None,
         auto_scripts,
         sound_effects: SoundEffects::new(&voc_mkf).expect("failed to load VOC sound effects"),
         music: BackgroundMusic::new(&midi_mkf, &sound_font)
@@ -349,6 +435,7 @@ pub fn run_game_window<L>(
         scripts.debug_snapshot(),
         UiRenderContext {
             dialog: dialog.as_ref(),
+            field_menu: script_services.field_menu.as_ref(),
             inventory_menu: script_services.inventory_menu.as_ref(),
             confirmation_menu: script_services.confirmation_menu.as_ref(),
             shop_menu: script_services.shop_menu.as_ref(),
@@ -433,6 +520,9 @@ pub fn run_game_window<L>(
                                                 script_services.music.stop();
                                             }
                                             script_services.inventory_menu = None;
+                                            script_services.field_menu = None;
+                                            script_services.shop_menu = None;
+                                            script_services.confirmation_menu = None;
                                             script_services.pending_enter_script = None;
                                             input = HeldInput::default();
                                             window.set_title("Rust-PAL [Snapshot restored]");
@@ -457,6 +547,7 @@ pub fn run_game_window<L>(
                                 scripts.debug_snapshot(),
                                 UiRenderContext {
                                     dialog: dialog.as_ref(),
+                                    field_menu: script_services.field_menu.as_ref(),
                                     inventory_menu: script_services.inventory_menu.as_ref(),
                                     confirmation_menu: script_services.confirmation_menu.as_ref(),
                                     shop_menu: script_services.shop_menu.as_ref(),
@@ -618,6 +709,273 @@ pub fn run_game_window<L>(
                                 &mut |title| window.set_title(title),
                             );
                         }
+                    } else if let Some(mut menu) = script_services.field_menu.take() {
+                        changed = sampled.confirm || sampled.cancel || sampled.direction.is_some();
+                        let mut keep_menu = true;
+                        match &mut menu {
+                            FieldMenu::Main { selected } => {
+                                update_wrapping_selection(selected, sampled.direction, 4);
+                                script_services.main_menu_selected = *selected;
+                                if sampled.cancel {
+                                    keep_menu = false;
+                                    window.set_title("Rust-PAL");
+                                } else if sampled.confirm {
+                                    match *selected {
+                                        0 => {
+                                            menu = FieldMenu::Status { selected: 0 };
+                                            window.set_title("Rust-PAL [Status]");
+                                        }
+                                        1 => {
+                                            let selected = script_services
+                                                .magic_caster_selected
+                                                .min(game.party.members().len().saturating_sub(1));
+                                            menu = FieldMenu::MagicCaster { selected };
+                                            window.set_title("Rust-PAL [Magic]");
+                                        }
+                                        2 => {
+                                            menu = FieldMenu::InventoryAction {
+                                                selected: script_services.inventory_action_selected,
+                                            };
+                                            window.set_title("Rust-PAL [Inventory]");
+                                        }
+                                        3 => {
+                                            menu = FieldMenu::System {
+                                                selected: script_services.system_selected,
+                                            };
+                                            window.set_title("Rust-PAL [System]");
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                            FieldMenu::InventoryAction { selected } => {
+                                update_wrapping_selection(selected, sampled.direction, 2);
+                                script_services.inventory_action_selected = *selected;
+                                if sampled.cancel {
+                                    keep_menu = false;
+                                    window.set_title("Rust-PAL");
+                                } else if sampled.confirm {
+                                    keep_menu = false;
+                                    let selected_index = script_services.inventory_selected;
+                                    script_services.inventory_menu = Some(InventoryMenu {
+                                        selected: selected_index,
+                                        mode: if *selected == 0 {
+                                            InventoryMode::EquipItems
+                                        } else {
+                                            InventoryMode::Items
+                                        },
+                                    });
+                                    window.set_title(if *selected == 0 {
+                                        "Rust-PAL [Equip item]"
+                                    } else {
+                                        "Rust-PAL [Use item]"
+                                    });
+                                }
+                            }
+                            FieldMenu::Status { selected } => {
+                                update_wrapping_selection(
+                                    selected,
+                                    sampled.direction,
+                                    game.party.members().len(),
+                                );
+                                if sampled.cancel {
+                                    keep_menu = false;
+                                    window.set_title("Rust-PAL");
+                                }
+                            }
+                            FieldMenu::MagicCaster { selected } => {
+                                let member_count = game.party.members().len();
+                                update_wrapping_selection(
+                                    selected,
+                                    sampled.direction,
+                                    member_count,
+                                );
+                                script_services.magic_caster_selected = *selected;
+                                if sampled.cancel {
+                                    keep_menu = false;
+                                    window.set_title("Rust-PAL");
+                                } else if sampled.confirm {
+                                    let role_id = game.party.members()[*selected].role_id;
+                                    if game.player_role(role_id).is_some_and(|role| role.hp > 0) {
+                                        menu = FieldMenu::MagicList {
+                                            caster: *selected,
+                                            selected: script_services.magic_selected,
+                                        };
+                                        window.set_title("Rust-PAL [Magic list]");
+                                    }
+                                }
+                            }
+                            FieldMenu::MagicList { caster, selected } => {
+                                let role_id = game.party.members()[*caster].role_id;
+                                let magics = game.field_magics(role_id);
+                                update_wrapping_selection(
+                                    selected,
+                                    sampled.direction,
+                                    magics.len(),
+                                );
+                                script_services.magic_selected = *selected;
+                                if sampled.cancel {
+                                    keep_menu = false;
+                                    window.set_title("Rust-PAL");
+                                } else if sampled.confirm {
+                                    if let Some(magic) =
+                                        magics.get(*selected).filter(|magic| magic.enabled)
+                                    {
+                                        if magic.apply_to_all {
+                                            if let Some(request) = game.magic_request(
+                                                role_id,
+                                                magic.magic_id,
+                                                None,
+                                                false,
+                                            ) {
+                                                keep_menu = false;
+                                                if scripts.start(request) {
+                                                    script_services.magic = Some(MagicSession {
+                                                        caster_selected: *caster,
+                                                        magic_id: magic.magic_id,
+                                                        target_selected: None,
+                                                        success_phase: false,
+                                                    });
+                                                    advance_script(
+                                                        &mut scripts,
+                                                        &mut game,
+                                                        &mut dialog,
+                                                        ScriptRenderResources {
+                                                            text: &text,
+                                                            role_sprites: &role_sprites,
+                                                        },
+                                                        &mut load_scene,
+                                                        &mut script_services,
+                                                        &mut |title| window.set_title(title),
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            menu = FieldMenu::MagicTarget {
+                                                caster: *caster,
+                                                magic_id: magic.magic_id,
+                                                selected: script_services.magic_target_selected,
+                                            };
+                                            window.set_title("Rust-PAL [Magic target]");
+                                        }
+                                    }
+                                }
+                            }
+                            FieldMenu::MagicTarget {
+                                caster,
+                                magic_id,
+                                selected,
+                            } => {
+                                update_wrapping_selection(
+                                    selected,
+                                    sampled.direction,
+                                    game.party.members().len(),
+                                );
+                                script_services.magic_target_selected = *selected;
+                                if sampled.cancel {
+                                    menu = FieldMenu::MagicList {
+                                        caster: *caster,
+                                        selected: script_services.magic_selected,
+                                    };
+                                    window.set_title("Rust-PAL [Magic list]");
+                                } else if sampled.confirm {
+                                    let caster_role = game.party.members()[*caster].role_id;
+                                    let target_role = game.party.members()[*selected].role_id;
+                                    if let Some(request) = game.magic_request(
+                                        caster_role,
+                                        *magic_id,
+                                        Some(target_role),
+                                        false,
+                                    ) {
+                                        keep_menu = false;
+                                        if scripts.start(request) {
+                                            script_services.magic = Some(MagicSession {
+                                                caster_selected: *caster,
+                                                magic_id: *magic_id,
+                                                target_selected: Some(*selected),
+                                                success_phase: false,
+                                            });
+                                            advance_script(
+                                                &mut scripts,
+                                                &mut game,
+                                                &mut dialog,
+                                                ScriptRenderResources {
+                                                    text: &text,
+                                                    role_sprites: &role_sprites,
+                                                },
+                                                &mut load_scene,
+                                                &mut script_services,
+                                                &mut |title| window.set_title(title),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            FieldMenu::System { selected } => {
+                                update_wrapping_selection(selected, sampled.direction, 5);
+                                script_services.system_selected = *selected;
+                                if sampled.cancel {
+                                    menu = FieldMenu::Main {
+                                        selected: script_services.main_menu_selected,
+                                    };
+                                    window.set_title("Rust-PAL [Menu]");
+                                } else if sampled.confirm {
+                                    match *selected {
+                                        0 => {
+                                            if game.encode_snapshot().is_some_and(|bytes| {
+                                                write_snapshot(&snapshot_path, &bytes).is_ok()
+                                            }) {
+                                                window.set_title("Rust-PAL [Saved]");
+                                            } else {
+                                                window.set_title("Rust-PAL [Save failed]");
+                                            }
+                                            keep_menu = false;
+                                        }
+                                        1 => {
+                                            let saved = std::fs::read(&snapshot_path)
+                                                .ok()
+                                                .and_then(|bytes| game.decode_snapshot(&bytes));
+                                            if let Some(saved) = saved.and_then(|saved| {
+                                                Some((
+                                                    load_scene(
+                                                        saved.scene_number(),
+                                                        &role_sprites,
+                                                    )?,
+                                                    saved,
+                                                ))
+                                            }) {
+                                                game.restore_snapshot(saved.1, saved.0.map);
+                                                window.set_title("Rust-PAL [Loaded]");
+                                                keep_menu = false;
+                                            } else {
+                                                window.set_title("Rust-PAL [No save]");
+                                            }
+                                        }
+                                        2 => {
+                                            let enabled = !script_services.music.enabled();
+                                            script_services.music.set_enabled(enabled);
+                                            if enabled {
+                                                if let Some(music_id) = game.current_music {
+                                                    script_services.music.play(music_id, true, 0);
+                                                }
+                                            }
+                                        }
+                                        3 => {
+                                            let enabled = !script_services.sound_effects.enabled();
+                                            script_services.sound_effects.set_enabled(enabled);
+                                        }
+                                        4 => {
+                                            keep_menu = false;
+                                            target.exit();
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                        }
+                        if keep_menu {
+                            script_services.field_menu = Some(menu);
+                        }
                     } else if script_services.shop_menu.is_some() {
                         let mut close_shop = false;
                         {
@@ -631,27 +989,56 @@ pub fn run_game_window<L>(
                             if menu.confirming {
                                 if sampled.cancel {
                                     menu.confirming = false;
-                                } else if sampled.confirm {
-                                    if let Some(item) = items.get(menu.selected) {
-                                        match menu.mode {
-                                            ShopMode::Buy { .. } => {
-                                                game.buy_item(item.item_id);
-                                            }
-                                            ShopMode::Sell => {
-                                                game.sell_item(item.item_id);
+                                } else {
+                                    if matches!(
+                                        sampled.direction,
+                                        Some(Direction::West | Direction::North)
+                                    ) {
+                                        menu.selected_yes = false;
+                                    } else if matches!(
+                                        sampled.direction,
+                                        Some(Direction::East | Direction::South)
+                                    ) {
+                                        menu.selected_yes = true;
+                                    }
+                                    if sampled.confirm && menu.selected_yes {
+                                        if let Some(item) = items.get(menu.selected) {
+                                            match menu.mode {
+                                                ShopMode::Buy { .. } => {
+                                                    game.buy_item(item.item_id);
+                                                }
+                                                ShopMode::Sell => {
+                                                    game.sell_item(item.item_id);
+                                                }
                                             }
                                         }
                                     }
-                                    menu.confirming = false;
-                                    let remaining = menu.items(&game).len();
-                                    menu.selected = menu.selected.min(remaining.saturating_sub(1));
+                                    if sampled.confirm {
+                                        menu.confirming = false;
+                                        let remaining = menu.items(&game).len();
+                                        menu.selected =
+                                            menu.selected.min(remaining.saturating_sub(1));
+                                    }
                                 }
                             } else if sampled.cancel {
                                 close_shop = true;
                             } else {
                                 menu.update_selection(sampled.direction, items.len());
-                                if sampled.confirm && items.get(menu.selected).is_some() {
-                                    menu.confirming = true;
+                                if sampled.confirm {
+                                    if let Some(item) = items.get(menu.selected) {
+                                        match menu.mode {
+                                            ShopMode::Buy { .. } => {
+                                                if game.cash >= u32::from(item.price) {
+                                                    menu.confirming = true;
+                                                    menu.selected_yes = false;
+                                                }
+                                            }
+                                            ShopMode::Sell => {
+                                                menu.confirming = true;
+                                                menu.selected_yes = false;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -678,6 +1065,7 @@ pub fn run_game_window<L>(
                         changed = sampled.confirm || sampled.cancel || sampled.direction.is_some();
                         let mut close_menu = false;
                         let mut item_request = None;
+                        let mut equip_request = None;
                         match menu.mode {
                             InventoryMode::Items => {
                                 let inventory = game.inventory().collect::<Vec<_>>();
@@ -691,11 +1079,18 @@ pub fn run_game_window<L>(
                                                 if item.apply_to_all {
                                                     item_request = game
                                                         .item_use_request(item_id, None)
-                                                        .map(|request| (item_id, request));
+                                                        .map(|request| (item_id, request, true));
                                                 } else {
                                                     menu.mode = InventoryMode::Target {
                                                         item_id,
-                                                        selected: 0,
+                                                        selected: script_services
+                                                            .item_target_selected
+                                                            .min(
+                                                                game.party
+                                                                    .members()
+                                                                    .len()
+                                                                    .saturating_sub(1),
+                                                            ),
                                                     };
                                                     window.set_title("Rust-PAL [Item target]");
                                                 }
@@ -704,21 +1099,64 @@ pub fn run_game_window<L>(
                                     }
                                 }
                             }
+                            InventoryMode::EquipItems => {
+                                let inventory = game.equippable_inventory();
+                                menu.selected =
+                                    menu.selected.min(inventory.len().saturating_sub(1));
+                                if sampled.cancel {
+                                    close_menu = true;
+                                } else {
+                                    menu.update(sampled.direction, inventory.len());
+                                    if sampled.confirm {
+                                        if let Some(&(item_id, _)) = inventory.get(menu.selected) {
+                                            menu.mode = InventoryMode::EquipTarget {
+                                                item_id,
+                                                selected: script_services.item_target_selected.min(
+                                                    game.party.members().len().saturating_sub(1),
+                                                ),
+                                            };
+                                            window.set_title("Rust-PAL [Equip target]");
+                                        }
+                                    }
+                                }
+                            }
+                            InventoryMode::EquipTarget {
+                                item_id,
+                                mut selected,
+                            } => {
+                                update_wrapping_selection(
+                                    &mut selected,
+                                    sampled.direction,
+                                    game.party.members().len(),
+                                );
+                                script_services.item_target_selected = selected;
+                                menu.mode = InventoryMode::EquipTarget { item_id, selected };
+                                if sampled.cancel {
+                                    menu.mode = InventoryMode::EquipItems;
+                                    window.set_title("Rust-PAL [Equip item]");
+                                } else if sampled.confirm {
+                                    equip_request = game
+                                        .party
+                                        .members()
+                                        .get(selected)
+                                        .and_then(|member| {
+                                            game.item_equip_request(item_id, member.role_id)
+                                        })
+                                        .map(|request| (item_id, selected, request));
+                                }
+                            }
                             InventoryMode::Target {
                                 item_id,
                                 mut selected,
                             } => {
                                 let member_count = game.party.members().len();
-                                match sampled.direction {
-                                    Some(Direction::North) => {
-                                        selected = selected.saturating_sub(1);
-                                    }
-                                    Some(Direction::South) => {
-                                        selected =
-                                            (selected + 1).min(member_count.saturating_sub(1));
-                                    }
-                                    _ => {}
-                                }
+                                update_wrapping_selection(
+                                    &mut selected,
+                                    sampled.direction,
+                                    member_count,
+                                );
+                                script_services.item_target_selected = selected;
+                                menu.mode = InventoryMode::Target { item_id, selected };
                                 if sampled.cancel {
                                     menu.mode = InventoryMode::Items;
                                     window.set_title("Rust-PAL [Inventory]");
@@ -730,17 +1168,40 @@ pub fn run_game_window<L>(
                                         .and_then(|member| {
                                             game.item_use_request(item_id, Some(member.role_id))
                                         })
-                                        .map(|request| (item_id, request));
-                                } else {
-                                    menu.mode = InventoryMode::Target { item_id, selected };
+                                        .map(|request| (item_id, request, false));
                                 }
                             }
                         }
-                        if let Some((item_id, request)) = item_request {
+                        script_services.inventory_selected = menu.selected;
+                        if let Some((item_id, role_selected, request)) = equip_request {
+                            if scripts.start(request) {
+                                script_services.equip = Some(EquipSession {
+                                    item_id,
+                                    inventory_selected: menu.selected,
+                                    role_selected,
+                                });
+                                window.set_title("Rust-PAL [Equipping]");
+                                advance_script(
+                                    &mut scripts,
+                                    &mut game,
+                                    &mut dialog,
+                                    ScriptRenderResources {
+                                        text: &text,
+                                        role_sprites: &role_sprites,
+                                    },
+                                    &mut load_scene,
+                                    &mut script_services,
+                                    &mut |title| window.set_title(title),
+                                );
+                            } else {
+                                script_services.inventory_menu = Some(menu);
+                            }
+                        } else if let Some((item_id, request, apply_to_all)) = item_request {
                             if scripts.start(request) {
                                 script_services.item_use = Some(ItemUseSession {
                                     item_id,
                                     inventory_selected: menu.selected,
+                                    apply_to_all,
                                 });
                                 window.set_title("Rust-PAL [Using item]");
                                 advance_script(
@@ -779,8 +1240,10 @@ pub fn run_game_window<L>(
                         changed = true;
                     } else {
                         if sampled.cancel {
-                            script_services.inventory_menu = Some(InventoryMenu::default());
-                            window.set_title("Rust-PAL [Inventory]");
+                            script_services.field_menu = Some(FieldMenu::Main {
+                                selected: script_services.main_menu_selected,
+                            });
+                            window.set_title("Rust-PAL [Menu]");
                             changed = true;
                             accumulator -= tick;
                             continue;
@@ -831,6 +1294,7 @@ pub fn run_game_window<L>(
                         scripts.debug_snapshot(),
                         UiRenderContext {
                             dialog: dialog.as_ref(),
+                            field_menu: script_services.field_menu.as_ref(),
                             inventory_menu: script_services.inventory_menu.as_ref(),
                             confirmation_menu: script_services.confirmation_menu.as_ref(),
                             shop_menu: script_services.shop_menu.as_ref(),
@@ -938,6 +1402,8 @@ fn render_game(
         render_dialog(renderer, ui.text, ui.font, ui.dialog_faces, dialog);
     } else if let Some(menu) = ui.confirmation_menu {
         render_confirmation_menu(renderer, ui.text, ui.font, *menu);
+    } else if let Some(menu) = ui.field_menu {
+        render_field_menu(renderer, game, ui.text, ui.font, *menu);
     } else if let Some(menu) = ui.shop_menu {
         render_shop_menu(renderer, game, ui.text, ui.font, *menu);
     } else if let Some(menu) = ui.inventory_menu {
@@ -1011,6 +1477,7 @@ fn advance_script<L>(
                 mode: ShopMode::Buy { store_number },
                 selected: 0,
                 confirming: false,
+                selected_yes: false,
             });
             set_title("Rust-PAL [Buy]");
         }
@@ -1019,6 +1486,7 @@ fn advance_script<L>(
                 mode: ShopMode::Sell,
                 selected: 0,
                 confirming: false,
+                selected_yes: false,
             });
             set_title("Rust-PAL [Sell]");
         }
@@ -1200,11 +1668,95 @@ fn advance_script<L>(
                     let selected = item_use
                         .inventory_selected
                         .min(game.inventory().len().saturating_sub(1));
+                    services.inventory_selected = selected;
+                    if item_use.apply_to_all {
+                        services.inventory_menu = None;
+                        set_title("Rust-PAL");
+                    } else if game.usable_item(item_use.item_id).is_some() {
+                        let target_selected = game
+                            .party
+                            .members()
+                            .iter()
+                            .position(|member| member.role_id == trigger.object_id)
+                            .unwrap_or(0);
+                        services.item_target_selected = target_selected;
+                        services.inventory_menu = Some(InventoryMenu {
+                            selected,
+                            mode: InventoryMode::Target {
+                                item_id: item_use.item_id,
+                                selected: target_selected,
+                            },
+                        });
+                        set_title("Rust-PAL [Item target]");
+                    } else {
+                        services.inventory_menu = Some(InventoryMenu {
+                            selected,
+                            mode: InventoryMode::Items,
+                        });
+                        set_title("Rust-PAL [Use item]");
+                    }
+                }
+                return;
+            } else if trigger.kind == pal_core::scene::TriggerKind::Equip {
+                if let Some(equip) = services.equip.take() {
+                    game.finish_item_equip(equip.item_id, next_entry);
+                    let selected = equip
+                        .inventory_selected
+                        .min(game.equippable_inventory().len().saturating_sub(1));
+                    services.inventory_selected = selected;
+                    services.item_target_selected = equip.role_selected;
                     services.inventory_menu = Some(InventoryMenu {
                         selected,
-                        mode: InventoryMode::Items,
+                        mode: InventoryMode::EquipItems,
                     });
-                    set_title("Rust-PAL [Inventory]");
+                    set_title("Rust-PAL [Equip item]");
+                }
+                return;
+            } else if trigger.kind == pal_core::scene::TriggerKind::Magic {
+                if let Some(mut magic) = services.magic.take() {
+                    game.finish_magic_script(magic.magic_id, next_entry, magic.success_phase);
+                    let caster_role = game.party.members()[magic.caster_selected].role_id;
+                    if succeeded && !magic.success_phase {
+                        let target_role = magic
+                            .target_selected
+                            .map(|selected| game.party.members()[selected].role_id);
+                        if let Some(request) =
+                            game.magic_request(caster_role, magic.magic_id, target_role, true)
+                        {
+                            magic.success_phase = true;
+                            services.magic = Some(magic);
+                            scripts.start(request);
+                            set_title("Rust-PAL [Casting]");
+                            return;
+                        }
+                    }
+                    if succeeded {
+                        game.consume_magic_mp(caster_role, magic.magic_id);
+                    }
+                    let available = game
+                        .field_magics(caster_role)
+                        .into_iter()
+                        .any(|field_magic| {
+                            field_magic.magic_id == magic.magic_id && field_magic.enabled
+                        });
+                    if available {
+                        if let Some(selected) = magic.target_selected {
+                            services.field_menu = Some(FieldMenu::MagicTarget {
+                                caster: magic.caster_selected,
+                                magic_id: magic.magic_id,
+                                selected,
+                            });
+                            set_title("Rust-PAL [Magic target]");
+                        } else {
+                            services.field_menu = Some(FieldMenu::MagicList {
+                                caster: magic.caster_selected,
+                                selected: services.magic_selected,
+                            });
+                            set_title("Rust-PAL [Magic list]");
+                        }
+                    } else {
+                        set_title("Rust-PAL");
+                    }
                 }
                 return;
             } else if trigger.object_id == 0xffff {
@@ -1237,24 +1789,18 @@ fn advance_script<L>(
             entry,
             opcode,
         }) => {
-            if trigger.kind == pal_core::scene::TriggerKind::Item {
-                resume_inventory_after_item_error(game, services);
-            }
+            resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!(
                 "Rust-PAL [unsupported script {entry} {}]",
                 opcode_label(opcode)
             ));
         }
         Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
-            if trigger.kind == pal_core::scene::TriggerKind::Item {
-                resume_inventory_after_item_error(game, services);
-            }
+            resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
         }
         Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
-            if trigger.kind == pal_core::scene::TriggerKind::Item {
-                resume_inventory_after_item_error(game, services);
-            }
+            resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!("Rust-PAL [script loop at {entry}]"));
         }
         None => {}
@@ -1272,12 +1818,43 @@ fn resume_inventory_after_item_error(game: &GameState, services: &mut ScriptServ
     let Some(item_use) = services.item_use.take() else {
         return;
     };
+    let selected = item_use
+        .inventory_selected
+        .min(game.inventory().len().saturating_sub(1));
+    services.inventory_selected = selected;
     services.inventory_menu = Some(InventoryMenu {
-        selected: item_use
-            .inventory_selected
-            .min(game.inventory().len().saturating_sub(1)),
+        selected,
         mode: InventoryMode::Items,
     });
+}
+
+fn resume_script_menu_after_error(
+    game: &GameState,
+    services: &mut ScriptServices,
+    kind: pal_core::scene::TriggerKind,
+) {
+    match kind {
+        pal_core::scene::TriggerKind::Item => resume_inventory_after_item_error(game, services),
+        pal_core::scene::TriggerKind::Equip => {
+            if let Some(equip) = services.equip.take() {
+                services.inventory_menu = Some(InventoryMenu {
+                    selected: equip
+                        .inventory_selected
+                        .min(game.equippable_inventory().len().saturating_sub(1)),
+                    mode: InventoryMode::EquipItems,
+                });
+            }
+        }
+        pal_core::scene::TriggerKind::Magic => {
+            if let Some(magic) = services.magic.take() {
+                services.field_menu = Some(FieldMenu::MagicList {
+                    caster: magic.caster_selected,
+                    selected: services.magic_selected,
+                });
+            }
+        }
+        pal_core::scene::TriggerKind::Search | pal_core::scene::TriggerKind::Touch => {}
+    }
 }
 
 fn update_trigger_world(
@@ -1462,6 +2039,226 @@ fn render_confirmation_menu(
     }
 }
 
+fn render_field_menu(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    menu: FieldMenu,
+) {
+    match menu {
+        FieldMenu::Main { selected } => {
+            const LABELS: [usize; 4] = [3, 4, 5, 6];
+            fill_rect(renderer, 3, 37, 90, 82, [8, 8, 12, 255]);
+            stroke_rect(renderer, 3, 37, 90, 82, [224, 224, 208, 255]);
+            for (index, word_id) in LABELS.into_iter().enumerate() {
+                let Some(label) = text.word(word_id) else {
+                    continue;
+                };
+                let enabled = true;
+                let color = match (index == selected, enabled) {
+                    (true, true) => 0xf9,
+                    (true, false) => 0x1c,
+                    (false, true) => 0x4f,
+                    (false, false) => 0x18,
+                };
+                renderer.draw_big5_text(font, label, 16, 50 + index as i32 * 18, color);
+            }
+
+            fill_rect(renderer, 3, 4, 112, 28, [8, 8, 12, 255]);
+            stroke_rect(renderer, 3, 4, 112, 28, [224, 224, 208, 255]);
+            if let Some(label) = text.word(21) {
+                renderer.draw_big5_text(font, label, 12, 11, 0x4f);
+            }
+            draw_number(renderer, game.cash, 104, 16, [240, 224, 96, 255]);
+        }
+        FieldMenu::InventoryAction { selected } => {
+            const LABELS: [usize; 2] = [22, 23];
+            fill_rect(renderer, 30, 60, 82, 48, [8, 8, 12, 255]);
+            stroke_rect(renderer, 30, 60, 82, 48, [224, 224, 208, 255]);
+            for (index, word_id) in LABELS.into_iter().enumerate() {
+                let Some(label) = text.word(word_id) else {
+                    continue;
+                };
+                let enabled = true;
+                let color = match (index == selected, enabled) {
+                    (true, true) => 0xf9,
+                    (true, false) => 0x1c,
+                    (false, true) => 0x4f,
+                    (false, false) => 0x18,
+                };
+                renderer.draw_big5_text(font, label, 43, 73 + index as i32 * 18, color);
+            }
+        }
+        FieldMenu::Status { selected } => render_status_menu(renderer, game, text, font, selected),
+        FieldMenu::MagicCaster { selected } => {
+            render_role_selection(renderer, game, text, font, selected, "Magic")
+        }
+        FieldMenu::MagicList { caster, selected } => {
+            render_magic_list(renderer, game, text, font, caster, selected)
+        }
+        FieldMenu::MagicTarget {
+            caster,
+            magic_id,
+            selected,
+        } => {
+            render_magic_list(renderer, game, text, font, caster, usize::MAX);
+            render_role_selection(renderer, game, text, font, selected, "Target");
+            if let Some(name) = text.word(usize::from(magic_id)) {
+                renderer.draw_big5_text(font, name, 12, 176, 0xf9);
+            }
+        }
+        FieldMenu::System { selected } => {
+            const LABELS: [usize; 5] = [11, 12, 13, 14, 15];
+            fill_rect(renderer, 40, 60, 108, 102, [8, 8, 12, 255]);
+            stroke_rect(renderer, 40, 60, 108, 102, [224, 224, 208, 255]);
+            for (index, word_id) in LABELS.into_iter().enumerate() {
+                if let Some(label) = text.word(word_id) {
+                    renderer.draw_big5_text(
+                        font,
+                        label,
+                        53,
+                        72 + index as i32 * 18,
+                        if index == selected { 0xf9 } else { 0x4f },
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn render_role_selection(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    selected: usize,
+    _title: &str,
+) {
+    let height = 20 + game.party.members().len() as i32 * 22;
+    fill_rect(renderer, 35, 62, 120, height, [8, 8, 12, 255]);
+    stroke_rect(renderer, 35, 62, 120, height, [224, 224, 208, 255]);
+    for (index, member) in game.party.members().iter().enumerate() {
+        let Some(role) = game.player_role(member.role_id) else {
+            continue;
+        };
+        if let Some(name) = text.word(usize::from(role.name_word_id)) {
+            let color = match (index == selected, role.hp > 0) {
+                (true, true) => 0xf9,
+                (true, false) => 0x1c,
+                (false, true) => 0x4f,
+                (false, false) => 0x18,
+            };
+            renderer.draw_big5_text(font, name, 48, 75 + index as i32 * 22, color);
+        }
+        draw_number(
+            renderer,
+            u32::from(role.hp),
+            140,
+            80 + index as i32 * 22,
+            [144, 224, 176, 255],
+        );
+    }
+}
+
+fn render_magic_list(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    caster: usize,
+    selected: usize,
+) {
+    let Some(member) = game.party.members().get(caster) else {
+        return;
+    };
+    let magics = game.field_magics(member.role_id);
+    fill_rect(renderer, 2, 0, 316, 148, [8, 8, 12, 255]);
+    stroke_rect(renderer, 2, 0, 316, 148, [224, 224, 208, 255]);
+    for (index, magic) in magics.iter().enumerate() {
+        let column = index % INVENTORY_COLUMNS;
+        let row = index / INVENTORY_COLUMNS;
+        let x = 15 + column as i32 * 100;
+        let y = 12 + row as i32 * 18;
+        if let Some(name) = text.word(usize::from(magic.magic_id)) {
+            let color = match (index == selected, magic.enabled) {
+                (true, true) => 0xf9,
+                (true, false) => 0x1c,
+                (false, true) => 0x4f,
+                (false, false) => 0x18,
+            };
+            renderer.draw_big5_text(font, name, x, y, color);
+        }
+        draw_number(
+            renderer,
+            u32::from(magic.mp_cost),
+            x + 88,
+            y + 5,
+            [96, 224, 240, 255],
+        );
+    }
+}
+
+fn render_status_menu(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    selected: usize,
+) {
+    let Some(member) = game.party.members().get(selected) else {
+        return;
+    };
+    let Some(role) = game.effective_player_role(member.role_id) else {
+        return;
+    };
+    fill_rect(renderer, 8, 6, 304, 188, [8, 8, 12, 255]);
+    stroke_rect(renderer, 8, 6, 304, 188, [224, 224, 208, 255]);
+    if let Some(name) = text.word(usize::from(role.name_word_id)) {
+        renderer.draw_big5_text(font, name, 24, 18, 0xf9);
+    }
+    let stats = [
+        (48usize, u32::from(role.level)),
+        (49, u32::from(role.hp)),
+        (50, u32::from(role.mp)),
+        (51, u32::from(role.attack_strength)),
+        (52, u32::from(role.magic_strength)),
+        (53, u32::from(role.defense)),
+        (54, u32::from(role.dexterity)),
+        (55, u32::from(role.flee_rate)),
+    ];
+    for (row, (word_id, value)) in stats.into_iter().enumerate() {
+        let y = 16 + row as i32 * 20;
+        if let Some(label) = text.word(word_id) {
+            renderer.draw_big5_text(font, label, 180, y, 0xbb);
+        }
+        draw_number(renderer, value, 292, y + 5, [240, 224, 96, 255]);
+    }
+    draw_number(
+        renderer,
+        u32::from(role.max_hp),
+        150,
+        41,
+        [144, 184, 240, 255],
+    );
+    draw_number(
+        renderer,
+        u32::from(role.max_mp),
+        150,
+        61,
+        [144, 184, 240, 255],
+    );
+
+    for (slot, &item_id) in role.equipment.iter().enumerate() {
+        if item_id == 0 {
+            continue;
+        }
+        if let Some(name) = text.word(usize::from(item_id)) {
+            renderer.draw_big5_text(font, name, 24, 56 + slot as i32 * 20, 0xbe);
+        }
+    }
+}
+
 fn render_shop_menu(
     renderer: &mut Renderer,
     game: &GameState,
@@ -1532,7 +2329,7 @@ fn render_shop_menu(
             font,
             ConfirmationMenu {
                 no_entry: 0,
-                selected_yes: true,
+                selected_yes: menu.selected_yes,
             },
         );
     }
@@ -1545,24 +2342,36 @@ fn render_inventory_menu(
     font: &BitmapFont,
     menu: InventoryMenu,
 ) {
-    if let InventoryMode::Target { selected, .. } = menu.mode {
-        render_item_target_menu(renderer, game, text, font, selected);
-        return;
+    match menu.mode {
+        InventoryMode::Target { selected, .. } => {
+            render_item_target_menu(renderer, game, text, font, selected, None);
+            return;
+        }
+        InventoryMode::EquipTarget { item_id, selected } => {
+            render_item_target_menu(renderer, game, text, font, selected, Some(item_id));
+            return;
+        }
+        InventoryMode::Items | InventoryMode::EquipItems => {}
     }
 
-    const PANEL_X: i32 = 132;
-    const PANEL_Y: i32 = 12;
-    const PANEL_WIDTH: i32 = 180;
-    const ROW_HEIGHT: i32 = 20;
+    const PANEL_X: i32 = 2;
+    const PANEL_Y: i32 = 0;
+    const PANEL_WIDTH: i32 = 316;
+    const ROW_HEIGHT: i32 = 18;
+    const COLUMN_WIDTH: i32 = 100;
 
-    let inventory = game.inventory().collect::<Vec<_>>();
+    let inventory = if menu.mode == InventoryMode::EquipItems {
+        game.equippable_inventory()
+    } else {
+        game.inventory().collect::<Vec<_>>()
+    };
     let first = menu.first_visible(inventory.len());
     fill_rect(
         renderer,
         PANEL_X,
         PANEL_Y,
         PANEL_WIDTH,
-        176,
+        136,
         [8, 8, 12, 255],
     );
     stroke_rect(
@@ -1570,42 +2379,41 @@ fn render_inventory_menu(
         PANEL_X,
         PANEL_Y,
         PANEL_WIDTH,
-        176,
+        136,
         [224, 224, 208, 255],
     );
 
     for (row, &(item_id, amount)) in inventory
         .iter()
         .skip(first)
-        .take(INVENTORY_VISIBLE_ROWS)
+        .take(INVENTORY_VISIBLE_ROWS * INVENTORY_COLUMNS)
         .enumerate()
     {
-        let y = PANEL_Y + 8 + row as i32 * ROW_HEIGHT;
-        if first + row == menu.selected {
-            stroke_rect(
+        let column = row % INVENTORY_COLUMNS;
+        let line = row / INVENTORY_COLUMNS;
+        let x = PANEL_X + 13 + column as i32 * COLUMN_WIDTH;
+        let y = PANEL_Y + 12 + line as i32 * ROW_HEIGHT;
+        let selected = first + row == menu.selected;
+        if let Some(name) = text.word(usize::from(item_id)) {
+            let usable =
+                menu.mode == InventoryMode::EquipItems || game.usable_item(item_id).is_some();
+            let color = match (selected, usable) {
+                (true, true) => 0xf9,
+                (true, false) => 0x1c,
+                (false, true) => 0x4f,
+                (false, false) => 0x18,
+            };
+            renderer.draw_big5_text(font, name, x, y, color);
+        }
+        if amount > 1 {
+            draw_number(
                 renderer,
-                PANEL_X + 5,
-                y - 3,
-                PANEL_WIDTH - 10,
-                19,
-                [224, 192, 64, 255],
+                u32::from(amount),
+                x + COLUMN_WIDTH - 10,
+                y + 5,
+                [96, 224, 240, 255],
             );
         }
-        if let Some(name) = text.word(usize::from(item_id)) {
-            let color = if game.usable_item(item_id).is_some() {
-                0x4f
-            } else {
-                0x1c
-            };
-            renderer.draw_big5_text(font, name, PANEL_X + 12, y, color);
-        }
-        draw_number(
-            renderer,
-            u32::from(amount),
-            PANEL_X + PANEL_WIDTH - 14,
-            y + 4,
-            [240, 240, 224, 255],
-        );
     }
 }
 
@@ -1615,6 +2423,7 @@ fn render_item_target_menu(
     text: &TextLibrary,
     font: &BitmapFont,
     selected: usize,
+    equip_item: Option<u16>,
 ) {
     const PANEL_X: i32 = 108;
     const PANEL_Y: i32 = 10;
@@ -1650,7 +2459,15 @@ fn render_item_target_menu(
             );
         }
         if let Some(name) = text.word(usize::from(member.attributes.name_word_id)) {
-            renderer.draw_big5_text(font, name, PANEL_X + 12, y, 0x4f);
+            let enabled = equip_item
+                .is_none_or(|item_id| game.equippable_item(item_id, member.role_id).is_some());
+            let color = match (index == selected, enabled) {
+                (true, true) => 0xf9,
+                (true, false) => 0x1c,
+                (false, true) => 0x4f,
+                (false, false) => 0x18,
+            };
+            renderer.draw_big5_text(font, name, PANEL_X + 12, y, color);
         }
         for (offset, byte) in b"HP".iter().enumerate() {
             draw_dialog_ascii(renderer, *byte, PANEL_X + 92 + offset as i32 * 8, y, 0x4f);
@@ -2475,20 +3292,51 @@ mod tests {
     }
 
     #[test]
-    fn inventory_menu_clamps_selection_and_scrolls_visible_rows() {
+    fn inventory_menu_uses_original_three_column_navigation_and_scrolling() {
         let mut menu = InventoryMenu::default();
         menu.update(Some(Direction::North), 10);
         assert_eq!(menu.selected, 0);
         menu.update(Some(Direction::South), 10);
-        assert_eq!(menu.selected, 1);
-        for _ in 0..20 {
-            menu.update(Some(Direction::South), 10);
-        }
+        assert_eq!(menu.selected, 3);
+        menu.update(Some(Direction::East), 10);
+        assert_eq!(menu.selected, 4);
+        menu.update(Some(Direction::West), 10);
+        assert_eq!(menu.selected, 3);
+        menu.update(Some(Direction::North), 10);
+        assert_eq!(menu.selected, 0);
+
+        menu.selected = 8;
+        menu.update(Some(Direction::South), 10);
         assert_eq!(menu.selected, 9);
-        assert_eq!(menu.first_visible(10), 2);
+        menu.selected = 29;
+        assert_eq!(menu.first_visible(30), 15);
 
         menu.update(None, 0);
         assert_eq!(menu.selected, 0);
         assert_eq!(menu.first_visible(0), 0);
+    }
+
+    #[test]
+    fn main_and_target_menus_wrap_at_both_ends() {
+        let mut selected = 0;
+        update_wrapping_selection(&mut selected, Some(Direction::North), 4);
+        assert_eq!(selected, 3);
+        update_wrapping_selection(&mut selected, Some(Direction::South), 4);
+        assert_eq!(selected, 0);
+        update_wrapping_selection(&mut selected, Some(Direction::West), 4);
+        assert_eq!(selected, 3);
+        update_wrapping_selection(&mut selected, Some(Direction::East), 4);
+        assert_eq!(selected, 0);
+
+        let mut shop = ShopMenu {
+            mode: ShopMode::Sell,
+            selected: 0,
+            confirming: false,
+            selected_yes: false,
+        };
+        shop.update_selection(Some(Direction::North), 3);
+        assert_eq!(shop.selected, 2);
+        shop.update_selection(Some(Direction::South), 3);
+        assert_eq!(shop.selected, 0);
     }
 }

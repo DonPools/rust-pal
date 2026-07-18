@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use pal_assets::magic::Magics;
 use pal_assets::objects::GlobalObjects;
 use pal_assets::player_roles::{PlayerRole, PlayerRoles, PLAYER_ROLE_COUNT};
 use pal_assets::script::ScriptTable;
@@ -20,9 +21,13 @@ use crate::script::{ScriptAction, ScriptOpcode};
 pub const UPDATE_INTERVAL_MS: u64 = 50;
 const MAX_INVENTORY: usize = 1024;
 const ITEM_FLAG_USABLE: u16 = 1 << 0;
+const ITEM_FLAG_EQUIPPABLE: u16 = 1 << 1;
 const ITEM_FLAG_CONSUMING: u16 = 1 << 3;
 const ITEM_FLAG_APPLY_TO_ALL: u16 = 1 << 4;
 const ITEM_FLAG_SELLABLE: u16 = 1 << 5;
+const ITEM_FLAG_ROLE_FIRST: u16 = 1 << 6;
+const MAGIC_FLAG_USABLE_OUTSIDE_BATTLE: u16 = 1 << 0;
+const MAGIC_FLAG_APPLY_TO_ALL: u16 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreItem {
@@ -37,6 +42,23 @@ pub struct UsableItem {
     pub script_entry: u16,
     pub consuming: bool,
     pub apply_to_all: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquippableItem {
+    pub item_id: u16,
+    pub amount: u16,
+    pub script_entry: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldMagic {
+    pub magic_id: u16,
+    pub mp_cost: u16,
+    pub use_script: u16,
+    pub success_script: u16,
+    pub apply_to_all: bool,
+    pub enabled: bool,
 }
 
 /// Platform-independent commands sampled for one fixed update.
@@ -102,8 +124,14 @@ pub struct GameState<M = Map> {
     player_roles: Option<PlayerRoles>,
     stores: Option<Stores>,
     global_objects: Option<GlobalObjects>,
-    inventory: BTreeMap<u16, u16>,
+    magics: Option<Magics>,
+    inventory: Vec<(u16, u16)>,
     item_use_scripts: BTreeMap<u16, u16>,
+    item_equip_scripts: BTreeMap<u16, u16>,
+    magic_use_scripts: BTreeMap<u16, u16>,
+    magic_success_scripts: BTreeMap<u16, u16>,
+    equipment_effects: BTreeMap<(u16, u16, u16), i16>,
+    current_equipment_slot: Option<u16>,
     inactive_objects: BTreeMap<u16, SceneObject>,
     scene_enter_scripts: BTreeMap<u16, u16>,
     scene_teleport_scripts: BTreeMap<u16, u16>,
@@ -132,8 +160,12 @@ pub struct GameSnapshot {
     party: Party,
     current_music: Option<u16>,
     cash: u32,
-    inventory: BTreeMap<u16, u16>,
+    inventory: Vec<(u16, u16)>,
     item_use_scripts: BTreeMap<u16, u16>,
+    item_equip_scripts: BTreeMap<u16, u16>,
+    magic_use_scripts: BTreeMap<u16, u16>,
+    magic_success_scripts: BTreeMap<u16, u16>,
+    equipment_effects: BTreeMap<(u16, u16, u16), i16>,
     inactive_objects: BTreeMap<u16, SceneObject>,
     scene_enter_scripts: BTreeMap<u16, u16>,
     scene_teleport_scripts: BTreeMap<u16, u16>,
@@ -152,9 +184,9 @@ impl GameSnapshot {
     }
 }
 
-// Version 10 stores persistent item-use script entries. Version 9 added all
-// six mutable player-role records.
-const SNAPSHOT_VERSION: u16 = 10;
+// Version 12 stores field-menu script state and equipment effects. Version 11
+// started preserving original inventory slot order.
+const SNAPSHOT_VERSION: u16 = 12;
 
 #[derive(Serialize, Deserialize)]
 struct SnapshotData {
@@ -167,6 +199,10 @@ struct SnapshotData {
     cash: u32,
     inventory: Vec<(u16, u16)>,
     item_use_scripts: Vec<(u16, u16)>,
+    item_equip_scripts: Vec<(u16, u16)>,
+    magic_use_scripts: Vec<(u16, u16)>,
+    magic_success_scripts: Vec<(u16, u16)>,
+    equipment_effects: Vec<(u16, u16, u16, i16)>,
     inactive_objects: Vec<SavedSceneObject>,
     scene_enter_scripts: Vec<(u16, u16)>,
     scene_teleport_scripts: Vec<(u16, u16)>,
@@ -405,8 +441,14 @@ impl<M: CollisionMap> GameState<M> {
             player_roles: None,
             stores: None,
             global_objects: None,
-            inventory: BTreeMap::new(),
+            magics: None,
+            inventory: Vec::new(),
             item_use_scripts: BTreeMap::new(),
+            item_equip_scripts: BTreeMap::new(),
+            magic_use_scripts: BTreeMap::new(),
+            magic_success_scripts: BTreeMap::new(),
+            equipment_effects: BTreeMap::new(),
+            current_equipment_slot: None,
             inactive_objects: BTreeMap::new(),
             scene_enter_scripts: BTreeMap::new(),
             scene_teleport_scripts: BTreeMap::new(),
@@ -468,12 +510,27 @@ impl<M: CollisionMap> GameState<M> {
         self
     }
 
+    pub fn with_magic_data(mut self, magics: Magics) -> Self {
+        self.magics = Some(magics);
+        self
+    }
+
     pub fn party_followers(&self) -> &[Role] {
         &self.party_followers
     }
 
     pub fn player_role(&self, role_id: u16) -> Option<&PlayerRole> {
         self.player_roles.as_ref()?.role(usize::from(role_id))
+    }
+
+    pub fn effective_player_role(&self, role_id: u16) -> Option<PlayerRole> {
+        let mut role = self.player_role(role_id)?.clone();
+        for (&(_, effect_role, attribute), &value) in &self.equipment_effects {
+            if effect_role == role_id {
+                apply_role_attribute(&mut role, attribute, value, false)?;
+            }
+        }
+        Some(role)
     }
 
     pub fn item_count(&self, item_id: u16) -> u16 {
@@ -523,14 +580,34 @@ impl<M: CollisionMap> GameState<M> {
     }
 
     pub fn inventory_count(&self, item_id: u16) -> u16 {
-        self.inventory.get(&item_id).copied().unwrap_or(0)
-    }
-
-    /// Return inventory entries in stable object-ID order.
-    pub fn inventory(&self) -> impl ExactSizeIterator<Item = (u16, u16)> + '_ {
         self.inventory
             .iter()
-            .map(|(&item_id, &amount)| (item_id, amount))
+            .find_map(|&(id, amount)| (id == item_id).then_some(amount))
+            .unwrap_or(0)
+    }
+
+    /// Return inventory entries in original acquisition-slot order.
+    pub fn inventory(&self) -> impl ExactSizeIterator<Item = (u16, u16)> + '_ {
+        self.inventory.iter().copied()
+    }
+
+    fn set_inventory_amount(&mut self, item_id: u16, amount: u16) -> bool {
+        if let Some(index) = self.inventory.iter().position(|&(id, _)| id == item_id) {
+            if amount == 0 {
+                self.inventory.remove(index);
+            } else {
+                self.inventory[index].1 = amount;
+            }
+            return true;
+        }
+        if amount == 0 {
+            return true;
+        }
+        if self.inventory.len() >= MAX_INVENTORY {
+            return false;
+        }
+        self.inventory.push((item_id, amount));
+        true
     }
 
     pub fn usable_item(&self, item_id: u16) -> Option<UsableItem> {
@@ -554,6 +631,157 @@ impl<M: CollisionMap> GameState<M> {
         self.inventory()
             .filter_map(|(item_id, _)| self.usable_item(item_id))
             .collect()
+    }
+
+    pub fn equippable_item(&self, item_id: u16, role_id: u16) -> Option<EquippableItem> {
+        let amount = self.inventory_count(item_id);
+        let object = self.global_objects.as_ref()?.get(item_id)?;
+        let role_flag = ITEM_FLAG_ROLE_FIRST.checked_shl(u32::from(role_id))?;
+        let flags = object.item_flags();
+        (amount > 0
+            && flags & ITEM_FLAG_EQUIPPABLE != 0
+            && flags & role_flag != 0
+            && self.player_role(role_id).is_some())
+        .then_some(EquippableItem {
+            item_id,
+            amount,
+            script_entry: self
+                .item_equip_scripts
+                .get(&item_id)
+                .copied()
+                .unwrap_or_else(|| object.item_equip_script()),
+        })
+    }
+
+    pub fn equippable_inventory(&self) -> Vec<(u16, u16)> {
+        let Some(objects) = self.global_objects.as_ref() else {
+            return Vec::new();
+        };
+        self.inventory()
+            .filter(|&(item_id, _)| {
+                objects
+                    .get(item_id)
+                    .is_some_and(|object| object.item_flags() & ITEM_FLAG_EQUIPPABLE != 0)
+            })
+            .collect()
+    }
+
+    pub fn item_equip_request(&self, item_id: u16, role_id: u16) -> Option<TriggerRequest> {
+        let item = self.equippable_item(item_id, role_id)?;
+        (item.script_entry != 0).then_some(TriggerRequest {
+            object_id: role_id,
+            script_entry: item.script_entry,
+            kind: crate::scene::TriggerKind::Equip,
+        })
+    }
+
+    pub fn finish_item_equip(&mut self, item_id: u16, next_entry: u16) {
+        self.item_equip_scripts.insert(item_id, next_entry);
+        self.current_equipment_slot = None;
+    }
+
+    pub fn field_magics(&self, role_id: u16) -> Vec<FieldMagic> {
+        let Some(role) = self.player_role(role_id) else {
+            return Vec::new();
+        };
+        let Some(objects) = self.global_objects.as_ref() else {
+            return Vec::new();
+        };
+        let Some(magics) = self.magics.as_ref() else {
+            return Vec::new();
+        };
+        let mut result = role
+            .magic
+            .into_iter()
+            .filter(|&magic_id| magic_id != 0)
+            .filter_map(|magic_id| {
+                let object = objects.get(magic_id)?;
+                let definition = magics.get(object.magic_number())?;
+                let flags = object.magic_flags();
+                Some(FieldMagic {
+                    magic_id,
+                    mp_cost: definition.mp_cost,
+                    use_script: self
+                        .magic_use_scripts
+                        .get(&magic_id)
+                        .copied()
+                        .unwrap_or_else(|| object.magic_use_script()),
+                    success_script: self
+                        .magic_success_scripts
+                        .get(&magic_id)
+                        .copied()
+                        .unwrap_or_else(|| object.magic_success_script()),
+                    apply_to_all: flags & MAGIC_FLAG_APPLY_TO_ALL != 0,
+                    enabled: role.hp > 0
+                        && role.mp >= definition.mp_cost
+                        && flags & MAGIC_FLAG_USABLE_OUTSIDE_BATTLE != 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        result.sort_unstable_by_key(|magic| magic.magic_id);
+        result
+    }
+
+    pub fn magic_request(
+        &self,
+        caster_role: u16,
+        magic_id: u16,
+        target_role: Option<u16>,
+        success_phase: bool,
+    ) -> Option<TriggerRequest> {
+        let magic = self
+            .field_magics(caster_role)
+            .into_iter()
+            .find(|magic| magic.magic_id == magic_id && magic.enabled)?;
+        let owner = if magic.apply_to_all {
+            target_role.is_none().then_some(0)?
+        } else {
+            let target = target_role?;
+            self.party
+                .members()
+                .iter()
+                .any(|member| member.role_id == target)
+                .then_some(target)?
+        };
+        let script_entry = if success_phase {
+            magic.success_script
+        } else {
+            magic.use_script
+        };
+        (script_entry != 0).then_some(TriggerRequest {
+            object_id: owner,
+            script_entry,
+            kind: crate::scene::TriggerKind::Magic,
+        })
+    }
+
+    pub fn finish_magic_script(&mut self, magic_id: u16, next_entry: u16, success_phase: bool) {
+        let entries = if success_phase {
+            &mut self.magic_success_scripts
+        } else {
+            &mut self.magic_use_scripts
+        };
+        entries.insert(magic_id, next_entry);
+    }
+
+    pub fn consume_magic_mp(&mut self, role_id: u16, magic_id: u16) -> bool {
+        let Some(cost) = self
+            .field_magics(role_id)
+            .into_iter()
+            .find(|magic| magic.magic_id == magic_id && magic.enabled)
+            .map(|magic| magic.mp_cost)
+        else {
+            return false;
+        };
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let Some(role) = roles.role_mut(usize::from(role_id)) else {
+            return false;
+        };
+        role.mp -= cost;
+        self.party.sync_from_roles(roles);
+        true
     }
 
     pub fn item_use_request(&self, item_id: u16, role_id: Option<u16>) -> Option<TriggerRequest> {
@@ -592,11 +820,7 @@ impl<M: CollisionMap> GameState<M> {
         if amount == 0 {
             return false;
         }
-        if amount == 1 {
-            self.inventory.remove(&item_id);
-        } else {
-            self.inventory.insert(item_id, amount - 1);
-        }
+        self.set_inventory_amount(item_id, amount - 1);
         true
     }
 
@@ -647,7 +871,7 @@ impl<M: CollisionMap> GameState<M> {
             return false;
         }
         self.cash -= price;
-        self.inventory.insert(item_id, amount + 1);
+        self.set_inventory_amount(item_id, amount + 1);
         true
     }
 
@@ -696,14 +920,10 @@ impl<M: CollisionMap> GameState<M> {
 
         let inventory_amount = self.inventory_count(item_id);
         let removed_from_inventory = inventory_amount.min(amount);
-        if removed_from_inventory == inventory_amount {
-            self.inventory.remove(&item_id);
-        } else {
-            self.inventory
-                .insert(item_id, inventory_amount - removed_from_inventory);
-        }
+        self.set_inventory_amount(item_id, inventory_amount - removed_from_inventory);
 
         let mut remaining = amount - removed_from_inventory;
+        let mut removed_slots = Vec::new();
         if remaining > 0 {
             let role_ids = self
                 .party
@@ -716,9 +936,10 @@ impl<M: CollisionMap> GameState<M> {
                     let Some(role) = roles.role_mut(usize::from(role_id)) else {
                         continue;
                     };
-                    for equipment in &mut role.equipment {
+                    for (slot, equipment) in role.equipment.iter_mut().enumerate() {
                         if *equipment == item_id {
                             *equipment = 0;
+                            removed_slots.push((role_id, slot));
                             remaining -= 1;
                             if remaining == 0 {
                                 break 'roles;
@@ -729,7 +950,155 @@ impl<M: CollisionMap> GameState<M> {
                 self.party.sync_from_roles(roles);
             }
         }
+        for (role_id, slot) in removed_slots {
+            self.equipment_effects
+                .retain(|&(effect_slot, effect_role, _), _| {
+                    usize::from(effect_slot) != slot || effect_role != role_id
+                });
+        }
         remaining == 0 || insufficient_entry == 0
+    }
+
+    fn set_equipment_effect(
+        &mut self,
+        role_id: u16,
+        slot: u16,
+        attribute: u16,
+        value: i16,
+    ) -> bool {
+        if usize::from(slot) >= pal_assets::player_roles::PLAYER_EQUIPMENT_COUNT
+            || self.player_role(role_id).is_none()
+            || !valid_role_attribute(attribute)
+        {
+            return false;
+        }
+        let key = (slot, role_id, attribute);
+        if value == 0 {
+            self.equipment_effects.remove(&key);
+        } else {
+            self.equipment_effects.insert(key, value);
+        }
+        true
+    }
+
+    fn equip_item(&mut self, role_id: u16, slot: u16, item_id: u16) -> bool {
+        let slot_index = usize::from(slot);
+        if slot_index >= pal_assets::player_roles::PLAYER_EQUIPMENT_COUNT
+            || self.player_role(role_id).is_none()
+        {
+            return false;
+        }
+        let old_item = self.player_role(role_id).unwrap().equipment[slot_index];
+        if old_item != item_id && (item_id == 0 || self.inventory_count(item_id) == 0) {
+            return false;
+        }
+
+        self.equipment_effects
+            .retain(|&(effect_slot, effect_role, _), _| {
+                effect_slot != slot || effect_role != role_id
+            });
+        self.current_equipment_slot = Some(slot);
+
+        if old_item != item_id {
+            let replacing_only_copy = self.inventory_count(item_id) == 1
+                && old_item != 0
+                && self.inventory_count(old_item) == 0;
+            if replacing_only_copy {
+                let Some(index) = self.inventory.iter().position(|&(id, _)| id == item_id) else {
+                    return false;
+                };
+                self.inventory[index] = (old_item, 1);
+            } else {
+                if !self.consume_inventory_item(item_id) {
+                    return false;
+                }
+                if old_item != 0
+                    && !self.set_inventory_amount(
+                        old_item,
+                        self.inventory_count(old_item).saturating_add(1),
+                    )
+                {
+                    return false;
+                }
+            }
+            let Some(roles) = self.player_roles.as_mut() else {
+                return false;
+            };
+            let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                return false;
+            };
+            role.equipment[slot_index] = item_id;
+            self.party.sync_from_roles(roles);
+        }
+        true
+    }
+
+    fn remove_equipment(&mut self, role_id: u16, slot: Option<u16>) -> bool {
+        let slots = match slot {
+            Some(slot) if usize::from(slot) < pal_assets::player_roles::PLAYER_EQUIPMENT_COUNT => {
+                usize::from(slot)..usize::from(slot) + 1
+            }
+            Some(_) => return false,
+            None => 0..pal_assets::player_roles::PLAYER_EQUIPMENT_COUNT,
+        };
+        let Some(role) = self.player_role(role_id) else {
+            return false;
+        };
+        let removed = slots
+            .clone()
+            .map(|index| (index, role.equipment[index]))
+            .collect::<Vec<_>>();
+        for &(index, item_id) in &removed {
+            if item_id != 0
+                && !self
+                    .set_inventory_amount(item_id, self.inventory_count(item_id).saturating_add(1))
+            {
+                return false;
+            }
+            self.equipment_effects
+                .retain(|&(effect_slot, effect_role, _), _| {
+                    usize::from(effect_slot) != index || effect_role != role_id
+                });
+        }
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let Some(role) = roles.role_mut(usize::from(role_id)) else {
+            return false;
+        };
+        for (index, _) in removed {
+            role.equipment[index] = 0;
+        }
+        self.party.sync_from_roles(roles);
+        true
+    }
+
+    fn change_magic(&mut self, role_id: u16, magic_id: u16, add: bool) -> bool {
+        if magic_id == 0 {
+            return false;
+        }
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let Some(role) = roles.role_mut(usize::from(role_id)) else {
+            return false;
+        };
+        if add {
+            if !role.magic.contains(&magic_id) {
+                let Some(slot) = role.magic.iter_mut().find(|magic| **magic == 0) else {
+                    return false;
+                };
+                *slot = magic_id;
+            }
+        } else {
+            for magic in &mut role.magic {
+                if *magic == magic_id {
+                    *magic = 0;
+                }
+            }
+        }
+        self.party.sync_from_roles(roles);
+        true
     }
 
     pub fn object_state(&self, object_id: u16) -> Option<i16> {
@@ -851,6 +1220,10 @@ impl<M: CollisionMap> GameState<M> {
             cash: self.cash,
             inventory: self.inventory.clone(),
             item_use_scripts: self.item_use_scripts.clone(),
+            item_equip_scripts: self.item_equip_scripts.clone(),
+            magic_use_scripts: self.magic_use_scripts.clone(),
+            magic_success_scripts: self.magic_success_scripts.clone(),
+            equipment_effects: self.equipment_effects.clone(),
             inactive_objects: self.inactive_objects.clone(),
             scene_enter_scripts: self.scene_enter_scripts.clone(),
             scene_teleport_scripts: self.scene_teleport_scripts.clone(),
@@ -883,8 +1256,16 @@ impl<M: CollisionMap> GameState<M> {
                 .collect(),
             current_music: snapshot.current_music,
             cash: snapshot.cash,
-            inventory: snapshot.inventory.into_iter().collect(),
+            inventory: snapshot.inventory,
             item_use_scripts: snapshot.item_use_scripts.into_iter().collect(),
+            item_equip_scripts: snapshot.item_equip_scripts.into_iter().collect(),
+            magic_use_scripts: snapshot.magic_use_scripts.into_iter().collect(),
+            magic_success_scripts: snapshot.magic_success_scripts.into_iter().collect(),
+            equipment_effects: snapshot
+                .equipment_effects
+                .into_iter()
+                .map(|((slot, role, attribute), value)| (slot, role, attribute, value))
+                .collect(),
             inactive_objects: snapshot
                 .inactive_objects
                 .values()
@@ -932,6 +1313,10 @@ impl<M: CollisionMap> GameState<M> {
             || data.scene_teleport_scripts.len() > MAX_SCENES
             || data.inventory.len() > MAX_INVENTORY
             || data.item_use_scripts.len() > MAX_INVENTORY
+            || data.item_equip_scripts.len() > MAX_INVENTORY
+            || data.magic_use_scripts.len() > MAX_INVENTORY
+            || data.magic_success_scripts.len() > MAX_INVENTORY
+            || data.equipment_effects.len() > MAX_INVENTORY
             || data.scene_objects.len() > MAX_OBJECTS
             || data.inactive_objects.len() > MAX_OBJECTS
             || data.scene_objects.len() + data.inactive_objects.len() > MAX_OBJECTS
@@ -968,11 +1353,15 @@ impl<M: CollisionMap> GameState<M> {
             .collect::<Option<Vec<_>>>()?
             .try_into()
             .ok()?;
-        let inventory = data.inventory.into_iter().collect::<BTreeMap<_, _>>();
+        let inventory = data.inventory;
         if inventory.len() > MAX_INVENTORY
             || inventory
                 .iter()
-                .any(|(&id, &amount)| id == 0 || amount == 0 || amount > 99)
+                .any(|&(id, amount)| id == 0 || amount == 0 || amount > 99)
+            || inventory
+                .iter()
+                .enumerate()
+                .any(|(index, &(id, _))| inventory[..index].iter().any(|&(other, _)| other == id))
         {
             return None;
         }
@@ -983,6 +1372,24 @@ impl<M: CollisionMap> GameState<M> {
             .collect::<BTreeMap<_, _>>();
         if item_use_scripts.len() != item_use_script_count
             || item_use_scripts.keys().any(|&item_id| item_id == 0)
+        {
+            return None;
+        }
+        let item_equip_scripts = unique_script_entries(data.item_equip_scripts)?;
+        let magic_use_scripts = unique_script_entries(data.magic_use_scripts)?;
+        let magic_success_scripts = unique_script_entries(data.magic_success_scripts)?;
+        let equipment_effect_count = data.equipment_effects.len();
+        let equipment_effects = data
+            .equipment_effects
+            .into_iter()
+            .map(|(slot, role, attribute, value)| ((slot, role, attribute), value))
+            .collect::<BTreeMap<_, _>>();
+        if equipment_effects.len() != equipment_effect_count
+            || equipment_effects.keys().any(|&(slot, role, attribute)| {
+                usize::from(slot) >= pal_assets::player_roles::PLAYER_EQUIPMENT_COUNT
+                    || usize::from(role) >= pal_assets::player_roles::PLAYER_ROLE_COUNT
+                    || !valid_role_attribute(attribute)
+            })
         {
             return None;
         }
@@ -1024,6 +1431,10 @@ impl<M: CollisionMap> GameState<M> {
             cash: data.cash,
             inventory,
             item_use_scripts,
+            item_equip_scripts,
+            magic_use_scripts,
+            magic_success_scripts,
+            equipment_effects,
             inactive_objects,
             scene_enter_scripts,
             scene_teleport_scripts,
@@ -1049,6 +1460,11 @@ impl<M: CollisionMap> GameState<M> {
         self.cash = snapshot.cash;
         self.inventory = snapshot.inventory;
         self.item_use_scripts = snapshot.item_use_scripts;
+        self.item_equip_scripts = snapshot.item_equip_scripts;
+        self.magic_use_scripts = snapshot.magic_use_scripts;
+        self.magic_success_scripts = snapshot.magic_success_scripts;
+        self.equipment_effects = snapshot.equipment_effects;
+        self.current_equipment_slot = None;
         self.inactive_objects = snapshot.inactive_objects;
         self.scene_enter_scripts = snapshot.scene_enter_scripts;
         self.scene_teleport_scripts = snapshot.scene_teleport_scripts;
@@ -1077,10 +1493,8 @@ impl<M: CollisionMap> GameState<M> {
                 let amount = if amount == 0 { 1 } else { amount };
                 let current = i32::from(self.inventory_count(item_id));
                 let updated = (current + i32::from(amount)).clamp(0, 99) as u16;
-                if updated == 0 {
-                    self.inventory.remove(&item_id);
-                } else {
-                    self.inventory.insert(item_id, updated);
+                if !self.set_inventory_amount(item_id, updated) {
+                    return false;
                 }
             }
             ScriptAction::RemoveItem {
@@ -1295,6 +1709,47 @@ impl<M: CollisionMap> GameState<M> {
                 hp_tenths,
                 apply_to_all,
             } => return self.revive_player(role_id, hp_tenths, apply_to_all),
+            ScriptAction::SetEquipmentEffect {
+                role_id,
+                attribute,
+                slot,
+                value,
+            } => return self.set_equipment_effect(role_id, slot, attribute, value),
+            ScriptAction::EquipItem {
+                role_id,
+                slot,
+                item_id,
+            } => return self.equip_item(role_id, slot, item_id),
+            ScriptAction::ChangePlayerAttribute {
+                role_id,
+                attribute,
+                value,
+                absolute,
+            } => {
+                if absolute {
+                    if let Some(slot) = self.current_equipment_slot {
+                        return self.set_equipment_effect(role_id, slot, attribute, value);
+                    }
+                }
+                let Some(roles) = self.player_roles.as_mut() else {
+                    return false;
+                };
+                let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                    return false;
+                };
+                if apply_role_attribute(role, attribute, value, absolute).is_none() {
+                    return false;
+                }
+                self.party.sync_from_roles(roles);
+            }
+            ScriptAction::RemoveEquipment { role_id, slot } => {
+                return self.remove_equipment(role_id, slot);
+            }
+            ScriptAction::ChangeMagic {
+                role_id,
+                magic_id,
+                add,
+            } => return self.change_magic(role_id, magic_id, add),
             ScriptAction::OffsetPlayer { dx, dy } => {
                 self.shift_party(dx, dy);
             }
@@ -2573,6 +3028,80 @@ fn direction_toward(x_offset: i32, y_offset: i32) -> Direction {
     }
 }
 
+fn valid_role_attribute(attribute: u16) -> bool {
+    matches!(attribute, 0..=4 | 6..=27 | 31..=64)
+}
+
+fn unique_script_entries(entries: Vec<(u16, u16)>) -> Option<BTreeMap<u16, u16>> {
+    let count = entries.len();
+    let entries = entries.into_iter().collect::<BTreeMap<_, _>>();
+    (entries.len() == count && !entries.contains_key(&0)).then_some(entries)
+}
+
+fn apply_role_attribute(
+    role: &mut PlayerRole,
+    attribute: u16,
+    value: i16,
+    absolute: bool,
+) -> Option<()> {
+    fn update(target: &mut u16, value: i16, absolute: bool) {
+        *target = if absolute {
+            value as u16
+        } else {
+            target.wrapping_add_signed(value)
+        };
+    }
+
+    match attribute {
+        0 => update(&mut role.avatar, value, absolute),
+        1 => {
+            if value != 0 {
+                role.battle_sprite_num = value as u16;
+            }
+        }
+        2 => update(&mut role.scene_sprite_num, value, absolute),
+        3 => update(&mut role.name_word_id, value, absolute),
+        4 => {
+            role.attack_all = if absolute {
+                value != 0
+            } else {
+                role.attack_all || value != 0
+            }
+        }
+        6 => update(&mut role.level, value, absolute),
+        7 => update(&mut role.max_hp, value, absolute),
+        8 => update(&mut role.max_mp, value, absolute),
+        9 => update(&mut role.hp, value, absolute),
+        10 => update(&mut role.mp, value, absolute),
+        11..=16 => update(
+            role.equipment.get_mut(usize::from(attribute - 11))?,
+            value,
+            absolute,
+        ),
+        17 => update(&mut role.attack_strength, value, absolute),
+        18 => update(&mut role.magic_strength, value, absolute),
+        19 => update(&mut role.defense, value, absolute),
+        20 => update(&mut role.dexterity, value, absolute),
+        21 => update(&mut role.flee_rate, value, absolute),
+        22 => update(&mut role.poison_resistance, value, absolute),
+        23..=27 => update(
+            role.elemental_resistance
+                .get_mut(usize::from(attribute - 23))?,
+            value,
+            absolute,
+        ),
+        31 => update(&mut role.covered_by, value, absolute),
+        32..=63 => update(
+            role.magic.get_mut(usize::from(attribute - 32))?,
+            value,
+            absolute,
+        ),
+        64 => update(&mut role.walk_frames, value, absolute),
+        _ => return None,
+    }
+    Some(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoScriptError {
     InvalidEntry {
@@ -2823,7 +3352,7 @@ mod tests {
             item_id: 7,
             amount: 2,
         }));
-        assert_eq!(state.inventory().collect::<Vec<_>>(), vec![(7, 2), (42, 3)]);
+        assert_eq!(state.inventory().collect::<Vec<_>>(), vec![(42, 3), (7, 2)]);
         assert!(state.apply_script_action(ScriptAction::PlayMusic {
             music_id: 6,
             looped: true,
@@ -3006,6 +3535,135 @@ mod tests {
             .unwrap()
             .equipment[0] = 0;
         assert_eq!(state.equipped_item_count(274), 1);
+    }
+
+    #[test]
+    fn equipment_scripts_preserve_inventory_slots_and_refresh_effective_stats() {
+        let mut roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
+        let role = roles.role_mut(0).unwrap();
+        role.attack_strength = 10;
+        role.hp = 20;
+        let party = Party::single(0, &roles).unwrap();
+
+        let mut object_data = vec![0; 24];
+        for (index, word) in [
+            0u16,
+            0,
+            0,
+            42,
+            0,
+            ITEM_FLAG_EQUIPPABLE | ITEM_FLAG_ROLE_FIRST,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            object_data[12 + index * 2..14 + index * 2].copy_from_slice(&word.to_le_bytes());
+        }
+        let objects =
+            GlobalObjects::parse(&object_data, pal_assets::objects::ObjectLayout::Dos).unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects);
+        assert!(state.apply_script_action(ScriptAction::AddItem {
+            item_id: 1,
+            amount: 1,
+        }));
+        assert_eq!(state.equippable_item(1, 0).unwrap().script_entry, 42);
+        assert_eq!(
+            state.item_equip_request(1, 0).unwrap().kind,
+            crate::scene::TriggerKind::Equip
+        );
+
+        assert!(state.apply_script_action(ScriptAction::EquipItem {
+            role_id: 0,
+            slot: 0,
+            item_id: 1,
+        }));
+        assert!(state.apply_script_action(ScriptAction::SetEquipmentEffect {
+            role_id: 0,
+            attribute: 17,
+            slot: 0,
+            value: 5,
+        }));
+        assert!(
+            state.apply_script_action(ScriptAction::ChangePlayerAttribute {
+                role_id: 0,
+                attribute: 4,
+                value: 1,
+                absolute: true,
+            })
+        );
+        assert_eq!(state.inventory_count(1), 0);
+        assert_eq!(state.player_role(0).unwrap().equipment[0], 1);
+        let effective = state.effective_player_role(0).unwrap();
+        assert_eq!(effective.attack_strength, 15);
+        assert!(effective.attack_all);
+
+        state.finish_item_equip(1, 43);
+        assert!(state.apply_script_action(ScriptAction::RemoveEquipment {
+            role_id: 0,
+            slot: Some(0),
+        }));
+        assert_eq!(state.inventory().collect::<Vec<_>>(), vec![(1, 1)]);
+        assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 10);
+    }
+
+    #[test]
+    fn field_magic_uses_object_scripts_and_consumes_mp_after_success() {
+        let mut roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
+        let role = roles.role_mut(0).unwrap();
+        role.hp = 20;
+        role.mp = 10;
+        role.magic[0] = 1;
+        let party = Party::single(0, &roles).unwrap();
+
+        let mut object_data = vec![0; 24];
+        for (index, word) in [0u16, 0, 44, 43, 0, MAGIC_FLAG_USABLE_OUTSIDE_BATTLE]
+            .into_iter()
+            .enumerate()
+        {
+            object_data[12 + index * 2..14 + index * 2].copy_from_slice(&word.to_le_bytes());
+        }
+        let objects =
+            GlobalObjects::parse(&object_data, pal_assets::objects::ObjectLayout::Dos).unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let mut magic_data = vec![0; 32];
+        magic_data[26..28].copy_from_slice(&3u16.to_le_bytes());
+        let magics = Magics::parse(&magic_data).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects)
+            .with_magic_data(magics);
+
+        let magic = state.field_magics(0)[0];
+        assert_eq!((magic.magic_id, magic.mp_cost), (1, 3));
+        assert!(magic.enabled);
+        assert_eq!(
+            state
+                .magic_request(0, 1, Some(0), false)
+                .unwrap()
+                .script_entry,
+            43
+        );
+        assert_eq!(
+            state
+                .magic_request(0, 1, Some(0), true)
+                .unwrap()
+                .script_entry,
+            44
+        );
+        state.finish_magic_script(1, 45, false);
+        assert!(state.consume_magic_mp(0, 1));
+        assert_eq!(state.player_role(0).unwrap().mp, 7);
+        assert!(state.apply_script_action(ScriptAction::ChangeMagic {
+            role_id: 0,
+            magic_id: 1,
+            add: false,
+        }));
+        assert!(state.field_magics(0).is_empty());
     }
 
     #[test]
@@ -3362,9 +4020,22 @@ mod tests {
             item_id: 9,
             amount: 4,
         }));
+        assert!(state.apply_script_action(ScriptAction::AddItem {
+            item_id: 7,
+            amount: 2,
+        }));
         assert!(state.adjust_cash(123));
         state.update_scene_enter_script(321);
         state.player_roles.as_mut().unwrap().role_mut(0).unwrap().hp = 321;
+        assert!(state.apply_script_action(ScriptAction::SetEquipmentEffect {
+            role_id: 0,
+            attribute: 17,
+            slot: 0,
+            value: 7,
+        }));
+        state.finish_item_equip(9, 44);
+        state.finish_magic_script(88, 55, false);
+        state.finish_magic_script(88, 66, true);
 
         let encoded = state.encode_snapshot().unwrap();
         let decoded = state.decode_snapshot(&encoded).unwrap();
@@ -3372,8 +4043,10 @@ mod tests {
         state.restore_snapshot(decoded, test_map());
         assert_eq!(state.party_followers().len(), 1);
         assert_eq!(state.item_count(9), 4);
+        assert_eq!(state.inventory().collect::<Vec<_>>(), vec![(9, 4), (7, 2)]);
         assert_eq!(state.cash, 123);
         assert_eq!(state.player_role(0).unwrap().hp, 321);
+        assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 7);
         assert_eq!(state.scene_enter_script(0), 321);
         assert_eq!(
             (
@@ -3389,7 +4062,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":10", "\"version\":9");
+            .replace("\"version\":12", "\"version\":11");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 
