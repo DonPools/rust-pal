@@ -1,7 +1,7 @@
 use pal_assets::text::TextLibrary;
 use pal_core::script::DialogPosition;
 
-use super::ActiveDialog;
+use super::dialog::ActiveDialog;
 
 #[derive(Clone, Copy)]
 pub(super) struct DialogLayout {
