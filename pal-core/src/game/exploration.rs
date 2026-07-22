@@ -5,6 +5,8 @@ use crate::role::Direction;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct GameInput {
     pub direction: Option<Direction>,
+    /// Direction pressed during this sample, for edge-triggered UI controls.
+    pub direction_pressed: Option<Direction>,
     pub confirm: bool,
     pub cancel: bool,
 }

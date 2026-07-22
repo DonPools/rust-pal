@@ -83,6 +83,40 @@ impl Renderer {
         self.blit_bitmap(&bitmap, dx, dy);
     }
 
+    /// Darken destination pixels under an RLE mask using PAL's palette-index rule.
+    pub fn blit_rle_shadow(&mut self, rle: &RleBitmap, dx: i32, dy: i32) {
+        for sy in 0..i32::from(rle.height) {
+            let y = dy + sy;
+            if y < 0 || y >= self.height as i32 {
+                continue;
+            }
+            for sx in 0..i32::from(rle.width) {
+                let source = sy as usize * usize::from(rle.width) + sx as usize;
+                if !rle.opaque[source] {
+                    continue;
+                }
+                let x = dx + sx;
+                if x < 0 || x >= self.width as i32 {
+                    continue;
+                }
+                let destination = (y as usize * self.width + x as usize) * 4;
+                let rgb = (
+                    self.screen[destination],
+                    self.screen[destination + 1],
+                    self.screen[destination + 2],
+                );
+                let Some(index) = (0u8..=u8::MAX).find(|&index| self.palette.get_rgb(index) == rgb)
+                else {
+                    continue;
+                };
+                let shadow = (index & 0xf0) | ((index & 0x0f) >> 1);
+                let (r, g, b) = self.palette.get_rgb(shadow);
+                self.screen[destination..destination + 4].copy_from_slice(&[r, g, b, 255]);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// 用索引色值绘制单个像素
     pub fn put_pixel(&mut self, x: usize, y: usize, palette_index: u8) {
         if x >= self.width || y >= self.height {
@@ -150,6 +184,21 @@ impl Renderer {
             cursor_x += 16;
             index += 2;
         }
+    }
+
+    /// Draw PAL text with the three one-pixel shadow layers used by the DOS UI.
+    pub fn draw_big5_text_shadowed(
+        &mut self,
+        font: &BitmapFont,
+        text: &[u8],
+        x: i32,
+        y: i32,
+        palette_index: u8,
+    ) {
+        self.draw_big5_text(font, text, x + 1, y, 0);
+        self.draw_big5_text(font, text, x, y + 1, 0);
+        self.draw_big5_text(font, text, x + 1, y + 1, 0);
+        self.draw_big5_text(font, text, x, y, palette_index);
     }
 
     /// 清屏为黑色

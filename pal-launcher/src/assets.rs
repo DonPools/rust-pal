@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use pal_assets::bitmap::Bitmap;
 use pal_assets::magic::Magics;
 use pal_assets::midi::MidiSong;
 use pal_assets::mkf::MkfArchive;
@@ -9,9 +10,11 @@ use pal_assets::player_roles::PlayerRoles;
 use pal_assets::rle::RleBitmap;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
+use pal_assets::sprite::{sprite_from_yj1_chunk, Sprite};
 use pal_assets::store::Stores;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_assets::voc::VocClip;
+use pal_assets::yj1;
 use pal_core::map::Map;
 use pal_core::role::RoleSprites;
 use pal_core::scene::SceneObject;
@@ -78,6 +81,44 @@ pub(super) fn load_dialog_faces(data_dir: &Path) -> Option<Vec<Option<RleBitmap>
             .map(|index| RleBitmap::decode(archive.read_chunk(index)?))
             .collect(),
     )
+}
+
+pub(super) fn load_ui_sprites(data_dir: &Path) -> Option<Vec<RleBitmap>> {
+    let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    let chunk = archive.read_chunk(9)?;
+    let sprite = Sprite::from_gop_chunk(chunk).or_else(|| sprite_from_yj1_chunk(chunk))?;
+    let frames = sprite.decode_frames()?;
+    (frames.len() > 70).then_some(frames)
+}
+
+pub(super) fn load_item_sprites(data_dir: &Path) -> Option<Vec<Option<RleBitmap>>> {
+    let data = std::fs::read(data_dir.join("BALL.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    Some(
+        (0..archive.chunk_count())
+            .map(|index| {
+                let chunk = archive.read_chunk(index)?;
+                RleBitmap::decode(chunk).or_else(|| RleBitmap::decode(&yj1::decompress(chunk)?))
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn load_fbp_background(
+    data_dir: &Path,
+    palette: &Palette,
+    index: usize,
+) -> Option<Bitmap> {
+    let data = std::fs::read(data_dir.join("FBP.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    let chunk = archive.read_chunk(index)?;
+    let pixels = if chunk.len() == 320 * 200 {
+        chunk.to_vec()
+    } else {
+        yj1::decompress(chunk)?
+    };
+    (pixels.len() == 320 * 200).then(|| Bitmap::from_indexed(pixels, 320, 200, palette))
 }
 
 pub(super) fn load_runtime_scene(

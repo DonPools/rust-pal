@@ -1,3 +1,4 @@
+use pal_assets::bitmap::Bitmap;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::GameState;
@@ -24,6 +25,11 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) text: &'a TextLibrary,
     pub(super) font: &'a BitmapFont,
     pub(super) dialog_faces: &'a [Option<RleBitmap>],
+    pub(super) ui_sprites: &'a [RleBitmap],
+    pub(super) item_sprites: &'a [Option<RleBitmap>],
+    pub(super) status_background: &'a Bitmap,
+    pub(super) equip_background: &'a Bitmap,
+    pub(super) ui_ticks: u64,
 }
 
 pub(super) fn render_game(
@@ -58,12 +64,49 @@ pub(super) fn render_game(
     if let Some(dialog) = ui.dialog {
         render_dialog(renderer, ui.text, ui.font, ui.dialog_faces, dialog);
     } else if let Some(menu) = ui.confirmation_menu {
-        render_confirmation_menu(renderer, ui.text, ui.font, *menu);
+        render_confirmation_menu(
+            renderer,
+            ui.text,
+            ui.font,
+            ui.ui_sprites,
+            *menu,
+            ui.ui_ticks,
+        );
     } else if let Some(menu) = ui.field_menu {
-        render_field_menu(renderer, game, ui.text, ui.font, *menu);
+        render_field_menu(
+            renderer,
+            game,
+            ui.text,
+            ui.font,
+            ui.dialog_faces,
+            ui.ui_sprites,
+            ui.item_sprites,
+            ui.status_background,
+            *menu,
+            ui.ui_ticks,
+        );
     } else if let Some(menu) = ui.shop_menu {
-        render_shop_menu(renderer, game, ui.text, ui.font, *menu);
+        render_shop_menu(
+            renderer,
+            game,
+            ui.text,
+            ui.font,
+            ui.ui_sprites,
+            ui.item_sprites,
+            *menu,
+            ui.ui_ticks,
+        );
     } else if let Some(menu) = ui.inventory_menu {
-        render_inventory_menu(renderer, game, ui.text, ui.font, *menu);
+        render_inventory_menu(
+            renderer,
+            game,
+            ui.text,
+            ui.font,
+            ui.ui_sprites,
+            ui.item_sprites,
+            ui.equip_background,
+            *menu,
+            ui.ui_ticks,
+        );
     }
 }

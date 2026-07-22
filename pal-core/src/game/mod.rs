@@ -205,6 +205,10 @@ impl<M: CollisionMap> GameState<M> {
         inventory.saturating_add(u16::try_from(equipped).unwrap_or(u16::MAX))
     }
 
+    pub fn item_bitmap(&self, item_id: u16) -> Option<u16> {
+        Some(self.global_objects.as_ref()?.get(item_id)?.item_bitmap())
+    }
+
     /// Count an item in the active party's equipment slots only.
     pub fn equipped_item_count(&self, item_id: u16) -> u16 {
         let Some(roles) = self.player_roles.as_ref() else {

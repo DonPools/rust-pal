@@ -60,6 +60,14 @@ impl Sprite {
     pub fn frame_data(&self, index: usize) -> Option<&[u8]> {
         self.frames.get(index).map(Vec::as_slice)
     }
+
+    /// Decode every frame in this sprite as an RLE bitmap.
+    pub fn decode_frames(&self) -> Option<Vec<RleBitmap>> {
+        self.frames
+            .iter()
+            .map(|frame| RleBitmap::decode(frame))
+            .collect()
+    }
 }
 
 /// Parse a sprite from a YJ_1-compressed GOP chunk, as used by `MGO.MKF`.

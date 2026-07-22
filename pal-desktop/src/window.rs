@@ -80,6 +80,10 @@ pub fn run_game_window<L>(
         text,
         font,
         dialog_faces,
+        ui_sprites,
+        item_sprites,
+        status_background,
+        equip_background,
         voc_mkf,
         midi_mkf,
         sound_font,
@@ -142,6 +146,11 @@ pub fn run_game_window<L>(
             text: &text,
             font: &font,
             dialog_faces: &dialog_faces,
+            ui_sprites: &ui_sprites,
+            item_sprites: &item_sprites,
+            status_background: &status_background,
+            equip_background: &equip_background,
+            ui_ticks: 0,
         },
     );
 
@@ -149,6 +158,7 @@ pub fn run_game_window<L>(
     let mut last_update = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut input = HeldInput::default();
+    let mut ui_ticks = 0u64;
 
     event_loop
         .run(move |event, target| match event {
@@ -253,6 +263,11 @@ pub fn run_game_window<L>(
                                     text: &text,
                                     font: &font,
                                     dialog_faces: &dialog_faces,
+                                    ui_sprites: &ui_sprites,
+                                    item_sprites: &item_sprites,
+                                    status_background: &status_background,
+                                    equip_background: &equip_background,
+                                    ui_ticks,
                                 },
                             );
                         } else {
@@ -452,7 +467,16 @@ pub fn run_game_window<L>(
                     }
                     accumulator -= tick;
                 }
+                if dialog.is_none()
+                    && (script_services.field_menu.is_some()
+                        || script_services.inventory_menu.is_some()
+                        || script_services.confirmation_menu.is_some()
+                        || script_services.shop_menu.is_some())
+                {
+                    changed = true;
+                }
                 if changed {
+                    ui_ticks = ui_ticks.wrapping_add(1);
                     render_game(
                         &mut renderer,
                         &game,
@@ -469,6 +493,11 @@ pub fn run_game_window<L>(
                             text: &text,
                             font: &font,
                             dialog_faces: &dialog_faces,
+                            ui_sprites: &ui_sprites,
+                            item_sprites: &item_sprites,
+                            status_background: &status_background,
+                            equip_background: &equip_background,
+                            ui_ticks,
                         },
                     );
                 }

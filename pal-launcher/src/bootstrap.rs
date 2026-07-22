@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use pal_assets::bitmap::Bitmap;
 use pal_assets::objects::GlobalObjects;
 use pal_assets::player_roles::PlayerRoles;
 use pal_assets::rle::RleBitmap;
@@ -16,7 +17,7 @@ use crate::assets::{
     create_global_scene_objects, create_scene_objects, load_dialog_faces, load_global_objects,
     load_magics, load_map, load_music, load_palette, load_player_roles, load_role_sprites,
     load_scene_data, load_script_table, load_sound_effects, load_sound_font, load_stores,
-    load_text_resources,
+    load_text_resources, load_ui_sprites,
 };
 use crate::{DEFAULT_PALETTE, DEFAULT_SCENE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -37,6 +38,10 @@ pub(super) struct BootstrappedGame {
     pub(super) global_objects: GlobalObjects,
     pub(super) role_sprites: RoleSprites,
     pub(super) dialog_faces: Vec<Option<RleBitmap>>,
+    pub(super) ui_sprites: Vec<RleBitmap>,
+    pub(super) item_sprites: Vec<Option<RleBitmap>>,
+    pub(super) status_background: Bitmap,
+    pub(super) equip_background: Bitmap,
     pub(super) game: GameState,
     pub(super) renderer: Renderer,
 }
@@ -61,6 +66,13 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
     let map = load_map(&data_dir, usize::from(scene.scene.map_num)).expect("failed to load map");
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
     let dialog_faces = load_dialog_faces(&data_dir).expect("failed to load RGM.MKF dialog faces");
+    let ui_sprites = load_ui_sprites(&data_dir).expect("failed to load DATA.MKF UI sprites");
+    let item_sprites =
+        crate::assets::load_item_sprites(&data_dir).expect("failed to load BALL.MKF item sprites");
+    let status_background = crate::assets::load_fbp_background(&data_dir, &palette, 0)
+        .expect("failed to load FBP.MKF status background");
+    let equip_background = crate::assets::load_fbp_background(&data_dir, &palette, 1)
+        .expect("failed to load FBP.MKF equipment background");
     let leader = party.leader().expect("initial party has no leader");
     let player = create_player(
         &role_sprites,
@@ -108,6 +120,10 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         global_objects,
         role_sprites,
         dialog_faces,
+        ui_sprites,
+        item_sprites,
+        status_background,
+        equip_background,
         game,
         renderer: Renderer::new(palette, SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize),
     }

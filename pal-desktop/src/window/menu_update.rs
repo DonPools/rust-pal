@@ -68,7 +68,7 @@ where
     E: FnMut(),
 {
     let changed =
-        context.input.confirm || context.input.cancel || context.input.direction.is_some();
+        context.input.confirm || context.input.cancel || context.input.direction_pressed.is_some();
     if context.services.confirmation_menu.is_some() {
         update_confirmation_menu(context);
     } else if context.services.field_menu.is_some() {
@@ -95,12 +95,12 @@ where
         .take()
         .expect("confirmation menu was checked above");
     if matches!(
-        context.input.direction,
+        context.input.direction_pressed,
         Some(Direction::West | Direction::North)
     ) {
         menu.selected_yes = false;
     } else if matches!(
-        context.input.direction,
+        context.input.direction_pressed,
         Some(Direction::East | Direction::South)
     ) {
         menu.selected_yes = true;
@@ -129,7 +129,7 @@ where
     let mut keep_menu = true;
     match &mut menu {
         FieldMenu::Main { selected } => {
-            update_wrapping_selection(selected, context.input.direction, 4);
+            update_wrapping_selection(selected, context.input.direction_pressed, 4);
             context.services.main_menu_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
@@ -165,7 +165,7 @@ where
             }
         }
         FieldMenu::InventoryAction { selected } => {
-            update_wrapping_selection(selected, context.input.direction, 2);
+            update_wrapping_selection(selected, context.input.direction_pressed, 2);
             context.services.inventory_action_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
@@ -190,7 +190,7 @@ where
         FieldMenu::Status { selected } => {
             update_wrapping_selection(
                 selected,
-                context.input.direction,
+                context.input.direction_pressed,
                 context.game.party.members().len(),
             );
             if context.input.cancel {
@@ -201,7 +201,7 @@ where
         FieldMenu::MagicCaster { selected } => {
             update_wrapping_selection(
                 selected,
-                context.input.direction,
+                context.input.direction_pressed,
                 context.game.party.members().len(),
             );
             context.services.magic_caster_selected = *selected;
@@ -226,7 +226,7 @@ where
         FieldMenu::MagicList { caster, selected } => {
             let role_id = context.game.party.members()[*caster].role_id;
             let magics = context.game.field_magics(role_id);
-            update_wrapping_selection(selected, context.input.direction, magics.len());
+            update_wrapping_selection(selected, context.input.direction_pressed, magics.len());
             context.services.magic_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
@@ -268,7 +268,7 @@ where
         } => {
             update_wrapping_selection(
                 selected,
-                context.input.direction,
+                context.input.direction_pressed,
                 context.game.party.members().len(),
             );
             context.services.magic_target_selected = *selected;
@@ -300,7 +300,7 @@ where
             }
         }
         FieldMenu::System { selected } => {
-            update_wrapping_selection(selected, context.input.direction, 5);
+            update_wrapping_selection(selected, context.input.direction_pressed, 5);
             context.services.system_selected = *selected;
             if context.input.cancel {
                 menu = FieldMenu::Main {
@@ -377,12 +377,12 @@ where
             menu.confirming = false;
         } else {
             if matches!(
-                context.input.direction,
+                context.input.direction_pressed,
                 Some(Direction::West | Direction::North)
             ) {
                 menu.selected_yes = false;
             } else if matches!(
-                context.input.direction,
+                context.input.direction_pressed,
                 Some(Direction::East | Direction::South)
             ) {
                 menu.selected_yes = true;
@@ -409,7 +409,7 @@ where
         context.advance_script();
         return;
     } else {
-        menu.update_selection(context.input.direction, items.len());
+        menu.update_selection(context.input.direction_pressed, items.len());
         if context.input.confirm {
             if let Some(item) = items.get(menu.selected) {
                 match menu.mode {
@@ -450,7 +450,7 @@ where
             if context.input.cancel {
                 close_menu = true;
             } else {
-                menu.update(context.input.direction, inventory.len());
+                menu.update(context.input.direction_pressed, inventory.len());
                 if context.input.confirm {
                     if let Some(&(item_id, _)) = inventory.get(menu.selected) {
                         if let Some(item) = context.game.usable_item(item_id) {
@@ -480,7 +480,7 @@ where
             if context.input.cancel {
                 close_menu = true;
             } else {
-                menu.update(context.input.direction, inventory.len());
+                menu.update(context.input.direction_pressed, inventory.len());
                 if context.input.confirm {
                     if let Some(&(item_id, _)) = inventory.get(menu.selected) {
                         menu.mode = InventoryMode::EquipTarget {
@@ -501,7 +501,7 @@ where
         } => {
             update_wrapping_selection(
                 &mut selected,
-                context.input.direction,
+                context.input.direction_pressed,
                 context.game.party.members().len(),
             );
             context.services.item_target_selected = selected;
@@ -525,7 +525,7 @@ where
         } => {
             update_wrapping_selection(
                 &mut selected,
-                context.input.direction,
+                context.input.direction_pressed,
                 context.game.party.members().len(),
             );
             context.services.item_target_selected = selected;
