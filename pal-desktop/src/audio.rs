@@ -1,7 +1,9 @@
 //! Desktop audio output for decoded PAL sound effects and SoundFont MIDI music.
 
 use std::io::Cursor;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use pal_assets::mkf::MkfArchive;
@@ -13,6 +15,8 @@ use rustysynth::{MidiFile, MidiFileSequencer, SoundFont, Synthesizer, Synthesize
 const MUSIC_SAMPLE_RATE: u32 = 44_100;
 const MAX_MUSIC_SECONDS: f64 = 15.0 * 60.0;
 const RELEASE_TAIL_SECONDS: f64 = 2.0;
+const MUSIC_BUFFER_FRAMES: usize = 2048;
+const MUSIC_BUFFER_COUNT: usize = 8;
 
 pub struct SoundEffects {
     archive: MkfArchive,
@@ -25,6 +29,8 @@ pub struct BackgroundMusic {
     sound_font: Arc<SoundFont>,
     output: Option<(OutputStream, OutputStreamHandle)>,
     sink: Option<Sink>,
+    pending: Option<Receiver<Option<StreamingMidiSource>>>,
+    pending_fade: Option<Duration>,
     current: Option<u16>,
     enabled: bool,
 }
@@ -36,6 +42,8 @@ impl BackgroundMusic {
             sound_font: parse_sound_font(sound_font)?,
             output: OutputStream::try_default().ok(),
             sink: None,
+            pending: None,
+            pending_fade: None,
             current: None,
             enabled: true,
         })
@@ -54,10 +62,11 @@ impl BackgroundMusic {
         if self.current == Some(music_id) && self.sink.as_ref().is_some_and(|sink| !sink.empty()) {
             return true;
         }
-        let Some(chunk) = self.archive.read_chunk(usize::from(music_id)) else {
-            return false;
-        };
-        let Some(samples) = synthesize(chunk, &self.sound_font, looped) else {
+        let Some(midi) = self
+            .archive
+            .read_chunk(usize::from(music_id))
+            .map(<[u8]>::to_vec)
+        else {
             return false;
         };
         self.stop();
@@ -70,18 +79,54 @@ impl BackgroundMusic {
         };
         sink.set_volume(0.7);
         let fade = Duration::from_secs(u64::from(fade_seconds));
-        let source = SamplesBuffer::new(2, MUSIC_SAMPLE_RATE, samples);
-        if looped {
-            sink.append(source.repeat_infinite().fade_in(fade));
-        } else {
-            sink.append(source.fade_in(fade));
-        }
+        let (sender, receiver) = mpsc::channel();
+        let sound_font = Arc::clone(&self.sound_font);
+        thread::spawn(move || {
+            let source = StreamingMidiSource::new(&midi, &sound_font, looped);
+            let _ = sender.send(source);
+        });
+        self.pending = Some(receiver);
+        self.pending_fade = Some(fade);
         self.sink = Some(sink);
         self.current = Some(music_id);
         true
     }
 
+    /// Attach a prepared MIDI source to the output sink without blocking the game loop.
+    pub fn poll(&mut self) -> bool {
+        let Some(receiver) = self.pending.take() else {
+            return false;
+        };
+        match receiver.try_recv() {
+            Ok(Some(source)) => {
+                if let Some(sink) = &self.sink {
+                    let fade = self.pending_fade.take().unwrap_or(Duration::ZERO);
+                    sink.append(source.fade_in(fade));
+                }
+                true
+            }
+            Ok(None) => {
+                self.pending_fade = None;
+                if let Some(sink) = self.sink.take() {
+                    sink.stop();
+                }
+                self.current = None;
+                false
+            }
+            Err(TryRecvError::Empty) => {
+                self.pending = Some(receiver);
+                false
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.pending_fade = None;
+                false
+            }
+        }
+    }
+
     pub fn stop(&mut self) {
+        self.pending = None;
+        self.pending_fade = None;
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -98,6 +143,8 @@ impl BackgroundMusic {
         }
         self.enabled = enabled;
         if !enabled {
+            self.pending = None;
+            self.pending_fade = None;
             if let Some(sink) = self.sink.take() {
                 sink.stop();
             }
@@ -136,28 +183,113 @@ fn parse_sound_font(data: &[u8]) -> Option<Arc<SoundFont>> {
     Some(Arc::new(SoundFont::new(&mut reader).ok()?))
 }
 
-fn synthesize(midi: &[u8], sound_font: &Arc<SoundFont>, looped: bool) -> Option<Vec<i16>> {
-    let mut reader = Cursor::new(midi);
-    let midi_file = Arc::new(MidiFile::new(&mut reader).ok()?);
-    let length = midi_file.get_length();
-    if !length.is_finite() || length <= 0.0 || length > MAX_MUSIC_SECONDS {
-        return None;
-    }
-
-    let settings = SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
-    let synthesizer = Synthesizer::new(sound_font, &settings).ok()?;
-    let mut sequencer = MidiFileSequencer::new(synthesizer);
-    sequencer.play(&midi_file, looped);
-
-    let tail = if looped { 0.0 } else { RELEASE_TAIL_SECONDS };
-    let sample_count = ((length + tail) * f64::from(MUSIC_SAMPLE_RATE)) as usize;
-    let mut left = vec![0.0f32; sample_count];
-    let mut right = vec![0.0f32; sample_count];
-    sequencer.render(&mut left, &mut right);
-
-    Some(interleave_pcm(&left, &right))
+struct StreamingMidiSource {
+    chunks: Receiver<Option<Vec<i16>>>,
+    max_frames: Option<usize>,
+    buffer: Vec<i16>,
+    position: usize,
 }
 
+impl StreamingMidiSource {
+    fn new(midi: &[u8], sound_font: &Arc<SoundFont>, looped: bool) -> Option<Self> {
+        let mut reader = Cursor::new(midi);
+        let midi_file = Arc::new(MidiFile::new(&mut reader).ok()?);
+        let length = midi_file.get_length();
+        if !length.is_finite() || length <= 0.0 || length > MAX_MUSIC_SECONDS {
+            return None;
+        }
+
+        let settings = SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
+        let synthesizer = Synthesizer::new(sound_font, &settings).ok()?;
+        let mut sequencer = MidiFileSequencer::new(synthesizer);
+        sequencer.play(&midi_file, looped);
+
+        let max_frames = (!looped)
+            .then(|| ((length + RELEASE_TAIL_SECONDS) * f64::from(MUSIC_SAMPLE_RATE)) as usize);
+        let (sender, receiver) = mpsc::sync_channel(MUSIC_BUFFER_COUNT);
+        thread::spawn(move || produce_midi_chunks(sequencer, sender, max_frames));
+        Some(Self {
+            chunks: receiver,
+            max_frames,
+            buffer: Vec::new(),
+            position: 0,
+        })
+    }
+
+    fn refill(&mut self) -> bool {
+        let Ok(Some(chunk)) = self.chunks.recv() else {
+            return false;
+        };
+        self.buffer = chunk;
+        self.position = 0;
+        true
+    }
+}
+
+fn produce_midi_chunks(
+    mut sequencer: MidiFileSequencer,
+    sender: SyncSender<Option<Vec<i16>>>,
+    max_frames: Option<usize>,
+) {
+    let mut rendered_frames = 0;
+    let mut left = vec![0.0f32; MUSIC_BUFFER_FRAMES];
+    let mut right = vec![0.0f32; MUSIC_BUFFER_FRAMES];
+    loop {
+        if let Some(max_frames) = max_frames {
+            if rendered_frames >= max_frames {
+                let _ = sender.send(None);
+                return;
+            }
+        }
+        let frames = max_frames.map_or(MUSIC_BUFFER_FRAMES, |max| {
+            (max - rendered_frames).min(MUSIC_BUFFER_FRAMES)
+        });
+        sequencer.render(&mut left[..frames], &mut right[..frames]);
+        let chunk = left[..frames]
+            .iter()
+            .zip(&right[..frames])
+            .flat_map(|(&left, &right)| [float_to_pcm(left), float_to_pcm(right)])
+            .collect();
+        if sender.send(Some(chunk)).is_err() {
+            return;
+        }
+        rendered_frames += frames;
+    }
+}
+
+impl Iterator for StreamingMidiSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.position >= self.buffer.len() && !self.refill() {
+            return None;
+        }
+        let sample = self.buffer[self.position];
+        self.position += 1;
+        Some(sample)
+    }
+}
+
+impl Source for StreamingMidiSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        Some(self.buffer.len().saturating_sub(self.position))
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        MUSIC_SAMPLE_RATE
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.max_frames
+            .map(|frames| Duration::from_secs_f64(frames as f64 / f64::from(MUSIC_SAMPLE_RATE)))
+    }
+}
+
+#[cfg(test)]
 fn interleave_pcm(left: &[f32], right: &[f32]) -> Vec<i16> {
     left.iter()
         .zip(right)

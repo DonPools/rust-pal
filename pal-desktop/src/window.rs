@@ -331,6 +331,7 @@ pub fn run_game_window<L>(
                 _ => {}
             },
             Event::AboutToWait => {
+                script_services.music.poll();
                 let now = Instant::now();
                 accumulator += now
                     .duration_since(last_update)
