@@ -159,7 +159,7 @@ define_script_opcodes! {
     ShakeScreen = 0x0035, "SHAKE", "Shake the screen for the requested duration and level.", Unsupported;
     SelectRngAnimation = 0x0036, "RNG_SELECT", "Select the current RNG animation resource.", Unsupported;
     PlayRngAnimation = 0x0037, "RNG_PLAY", "Play frames from the selected RNG animation.", Unsupported;
-    TeleportParty = 0x0038, "TELEPORT", "Run the current scene's teleport script or branch on failure.", Unsupported;
+    TeleportParty = 0x0038, "TELEPORT", "Run the current scene's teleport script or branch on failure.", Implemented;
     DrainEnemyHp = 0x0039, "DRAIN_HP", "Drain HP from an enemy into the acting player.", Unsupported;
     FleeBattle = 0x003A, "FLEE", "Attempt to flee from battle.", Unsupported;
     DialogCenter = 0x003B, "DIALOG_CENTER", "Place following dialog in the middle of the screen.", Implemented;
@@ -297,6 +297,9 @@ pub enum ScriptEvent {
         store_number: u16,
     },
     OpenSellMenu,
+    Teleport {
+        failure_entry: u16,
+    },
     FadeScene {
         speed: u16,
     },
@@ -642,6 +645,31 @@ impl ScriptRuntime {
         self.call_stack.clear();
         self.last_trigger = Some(trigger);
         self.last_instruction = None;
+        true
+    }
+
+    /// Enter a nested script while preserving the active caller.
+    ///
+    /// This is used by scene teleport scripts, which are invoked by an
+    /// instruction in another trigger script and return to that caller when
+    /// their `STOP` instruction is reached.
+    pub fn call(&mut self, entry: u16, object_id: u16) -> bool {
+        let Some(mut execution) = self.execution else {
+            return false;
+        };
+        if entry == 0 || self.table.entry(entry).is_none() {
+            return false;
+        }
+        self.call_stack.push(CallFrame {
+            object_id: execution.object_id,
+            return_entry: execution.entry,
+        });
+        execution.object_id = object_id;
+        execution.entry = entry;
+        execution.wait_frames = 0;
+        execution.wait_updates_auto_scripts = false;
+        execution.viewport_frames_remaining = 0;
+        self.execution = Some(execution);
         true
     }
 
@@ -1040,6 +1068,13 @@ impl ScriptRuntime {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
                     return Some(ScriptEvent::OpenSellMenu);
+                }
+                TeleportParty => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Teleport {
+                        failure_entry: entry.operands[0],
+                    });
                 }
                 SetObjectAutoScript if entry.operands[0] != 0 => {
                     let object_id = selected_object(entry.operands[0], execution.object_id);
@@ -1473,7 +1508,6 @@ impl ScriptRuntime {
                 | ShakeScreen
                 | SelectRngAnimation
                 | PlayRngAnimation
-                | TeleportParty
                 | DrainEnemyHp
                 | FleeBattle
                 | SimulatePlayerMagic
@@ -1651,7 +1685,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [86, 6, 73]);
+        assert_eq!(support_counts, [87, 6, 72]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -1701,6 +1735,39 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Unsupported { opcode: 0x004c, .. })
         ));
+    }
+
+    #[test]
+    fn teleport_yields_scene_transfer_request_and_preserves_failure_entry() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::TeleportParty.raw(), 47, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Teleport { failure_entry: 47 })
+        );
+    }
+
+    #[test]
+    fn nested_script_call_returns_to_the_caller_entry() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::Call.raw(), 3, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(2));
+        assert!(runtime.call(3, 0xffff));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed {
+                trigger: trigger(2),
+                next_entry: 2,
+                succeeded: true,
+            })
+        );
     }
 
     #[test]

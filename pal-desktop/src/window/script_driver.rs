@@ -97,6 +97,16 @@ pub(super) fn advance_script<L>(
             });
             set_title("Rust-PAL [Sell]");
         }
+        Some(ScriptEvent::Teleport { failure_entry }) => {
+            let teleport_entry = game.scene_teleport_script(0);
+            if teleport_entry == 0 {
+                scripts.set_success(false);
+                scripts.branch_to(failure_entry);
+            } else if !scripts.call(teleport_entry, 0xffff) {
+                scripts.set_success(false);
+                scripts.branch_to(failure_entry);
+            }
+        }
         Some(ScriptEvent::FadeScene { .. }) => {}
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
             if scene_number == game.scene_number {
