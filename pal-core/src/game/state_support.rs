@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use pal_assets::player_roles::PlayerRole;
 
 pub(super) fn valid_role_attribute(attribute: u16) -> bool {
-    matches!(attribute, 0..=4 | 6..=27 | 31..=64)
+    matches!(attribute, 0..=4 | 6..=27 | 31..=74)
 }
 
 pub(super) fn unique_script_entries(entries: Vec<(u16, u16)>) -> Option<BTreeMap<u16, u16>> {
@@ -71,6 +71,16 @@ pub(super) fn apply_role_attribute(
             absolute,
         ),
         64 => update(&mut role.walk_frames, value, absolute),
+        65 => update(&mut role.cooperative_magic, value, absolute),
+        66 => update(&mut role.unknown_5, value, absolute),
+        67 => update(&mut role.unknown_6, value, absolute),
+        68 => update(&mut role.death_sound, value, absolute),
+        69 => update(&mut role.attack_sound, value, absolute),
+        70 => update(&mut role.weapon_sound, value, absolute),
+        71 => update(&mut role.critical_sound, value, absolute),
+        72 => update(&mut role.magic_sound, value, absolute),
+        73 => update(&mut role.cover_sound, value, absolute),
+        74 => update(&mut role.dying_sound, value, absolute),
         _ => return None,
     }
     Some(())

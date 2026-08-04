@@ -1,10 +1,13 @@
+use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::bitmap::Bitmap;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_core::battle::BattleEvent;
 use pal_core::game::GameState;
 use pal_core::role::RoleSprites;
 use pal_core::script::ScriptDebugSnapshot;
 
+use super::battle_render::{render_battle, BattleRenderResources, BattleRenderState};
 use super::debug_render::{focused_debug_object, render_collision_overlay, render_object_overlay};
 use super::dialog::{render_dialog, ActiveDialog};
 use super::menu_render::{
@@ -27,6 +30,13 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) dialog_faces: &'a [Option<RleBitmap>],
     pub(super) ui_sprites: &'a [RleBitmap],
     pub(super) item_sprites: &'a [Option<RleBitmap>],
+    pub(super) enemy_battle_sprites: &'a BattleSpriteArchive,
+    pub(super) player_battle_sprites: &'a BattleSpriteArchive,
+    pub(super) battle_backgrounds: &'a [Option<Bitmap>],
+    pub(super) battle_selected_enemy: usize,
+    pub(super) battle_command_selected: usize,
+    pub(super) battle_event: Option<BattleEvent>,
+    pub(super) battle_event_ticks: u16,
     pub(super) status_background: &'a Bitmap,
     pub(super) equip_background: &'a Bitmap,
     pub(super) ui_ticks: u64,
@@ -41,6 +51,27 @@ pub(super) fn render_game(
     script: ScriptDebugSnapshot,
     ui: UiRenderContext<'_>,
 ) {
+    if let Some(battle) = game.battle() {
+        render_battle(
+            renderer,
+            battle,
+            BattleRenderResources {
+                enemy_sprites: ui.enemy_battle_sprites,
+                player_sprites: ui.player_battle_sprites,
+                backgrounds: ui.battle_backgrounds,
+                text: ui.text,
+                font: ui.font,
+            },
+            BattleRenderState {
+                selected_enemy: ui.battle_selected_enemy,
+                selected_command: ui.battle_command_selected,
+                ticks: ui.ui_ticks,
+                event: ui.battle_event,
+                event_ticks: ui.battle_event_ticks,
+            },
+        );
+        return;
+    }
     let viewport = Viewport::from(game.camera);
     let roles = std::iter::once(&game.player)
         .chain(game.party_followers())

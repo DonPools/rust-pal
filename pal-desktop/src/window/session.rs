@@ -1,4 +1,7 @@
+use std::collections::VecDeque;
+
 use pal_assets::script::ScriptTable;
+use pal_core::battle::BattleEvent;
 
 use crate::audio::{BackgroundMusic, SoundEffects};
 
@@ -19,6 +22,10 @@ pub(super) struct SessionState {
     pub(super) magic_caster_selected: usize,
     pub(super) magic_selected: usize,
     pub(super) magic_target_selected: usize,
+    pub(super) battle_selected_enemy: usize,
+    pub(super) battle_command_selected: usize,
+    pub(super) battle_events: VecDeque<BattleEvent>,
+    pub(super) battle_event_ticks: u16,
     pub(super) system_selected: usize,
     pub(super) confirmation_menu: Option<ConfirmationMenu>,
     pub(super) shop_menu: Option<ShopMenu>,
@@ -49,6 +56,10 @@ impl SessionState {
             magic_caster_selected: 0,
             magic_selected: 0,
             magic_target_selected: 0,
+            battle_selected_enemy: 0,
+            battle_command_selected: 0,
+            battle_events: VecDeque::new(),
+            battle_event_ticks: 0,
             system_selected: 0,
             confirmation_menu: None,
             shop_menu: None,

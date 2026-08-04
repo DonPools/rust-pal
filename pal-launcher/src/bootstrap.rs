@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use pal_assets::battle::{BattleData, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::objects::GlobalObjects;
 use pal_assets::player_roles::PlayerRoles;
@@ -14,8 +15,9 @@ use pal_core::role::{Direction, Role, RoleSprites};
 use pal_desktop::renderer::Renderer;
 
 use crate::assets::{
-    create_global_scene_objects, create_scene_objects, load_dialog_faces, load_global_objects,
-    load_magics, load_map, load_music, load_palette, load_player_roles, load_role_sprites,
+    create_global_scene_objects, create_scene_objects, load_battle_backgrounds, load_battle_data,
+    load_dialog_faces, load_enemy_battle_sprites, load_global_objects, load_magics, load_map,
+    load_music, load_palette, load_player_battle_sprites, load_player_roles, load_role_sprites,
     load_scene_data, load_script_table, load_sound_effects, load_sound_font, load_stores,
     load_text_resources, load_ui_sprites,
 };
@@ -36,6 +38,10 @@ pub(super) struct BootstrappedGame {
     pub(super) sound_font: Vec<u8>,
     pub(super) player_roles: PlayerRoles,
     pub(super) global_objects: GlobalObjects,
+    pub(super) battle_data: BattleData,
+    pub(super) enemy_battle_sprites: BattleSpriteArchive,
+    pub(super) player_battle_sprites: BattleSpriteArchive,
+    pub(super) battle_backgrounds: Vec<Option<Bitmap>>,
     pub(super) role_sprites: RoleSprites,
     pub(super) dialog_faces: Vec<Option<RleBitmap>>,
     pub(super) ui_sprites: Vec<RleBitmap>,
@@ -56,6 +62,13 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
     let sound_font = load_sound_font(&data_dir).expect("failed to load data/TimGM6mb.sf2");
     let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
     let magics = load_magics(&data_dir).expect("failed to load magic data");
+    let battle_data = load_battle_data(&data_dir).expect("failed to load battle data");
+    let enemy_battle_sprites =
+        load_enemy_battle_sprites(&data_dir).expect("failed to load ABC.MKF enemy sprites");
+    let player_battle_sprites =
+        load_player_battle_sprites(&data_dir).expect("failed to load F.MKF player sprites");
+    let battle_backgrounds =
+        load_battle_backgrounds(&data_dir, &palette).expect("failed to load battle backgrounds");
     let global_objects =
         load_global_objects(&data_dir).expect("failed to load global object definitions");
     let stores = load_stores(&data_dir).expect("failed to load store definitions");
@@ -93,7 +106,8 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         .with_party(party)
         .with_player_roles(player_roles.clone())
         .with_economy_data(stores, global_objects.clone())
-        .with_magic_data(magics);
+        .with_magic_data(magics)
+        .with_battle_data(battle_data.clone());
     let initial_scene_number = scene.number as u16;
     let initial_map_number = scene.scene.map_num;
     let initial_enter_script = scene.scene.script_on_enter;
@@ -118,6 +132,10 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         sound_font,
         player_roles,
         global_objects,
+        battle_data,
+        enemy_battle_sprites,
+        player_battle_sprites,
+        battle_backgrounds,
         role_sprites,
         dialog_faces,
         ui_sprites,

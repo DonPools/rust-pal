@@ -1,7 +1,10 @@
 use pal_assets::mkf::MkfArchive;
+use pal_core::battle::{BattlePhase, BattleResult};
 use pal_core::script::{ScriptAction, ScriptEvent, ScriptRuntime};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
-use pal_desktop::window::{render_tile_map, Viewport};
+use pal_desktop::window::{
+    render_battle, render_tile_map, BattleRenderResources, BattleRenderState, Viewport,
+};
 
 use crate::assets::{load_runtime_scene, validate_music, validate_sound_effects};
 use crate::bootstrap::BootstrappedGame;
@@ -22,6 +25,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         sound_font,
         player_roles,
         global_objects,
+        battle_data,
+        enemy_battle_sprites,
+        player_battle_sprites,
+        battle_backgrounds,
         role_sprites,
         dialog_faces,
         mut game,
@@ -568,6 +575,280 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "store 0 references an unavailable item name"
     );
 
+    let first_battle_actor = game
+        .scene_objects
+        .iter()
+        .find(|object| object.id == 28)
+        .expect("first battle event object 28 is unavailable");
+    assert_eq!(first_battle_actor.trigger_script, 6906);
+    let battle_trigger = pal_core::scene::TriggerRequest {
+        object_id: first_battle_actor.id,
+        script_entry: first_battle_actor.trigger_script,
+        kind: pal_core::scene::TriggerKind::Search,
+    };
+    assert!(scripts.start(battle_trigger));
+    let mut first_battle_messages = 0;
+    let mut first_battle_actions = 0;
+    let battle_request = loop {
+        match scripts
+            .advance()
+            .expect("first battle script stopped before BATTLE")
+        {
+            ScriptEvent::Message { message_id, .. } => {
+                assert!(text.message(usize::from(message_id)).is_some());
+                first_battle_messages += 1;
+            }
+            ScriptEvent::Action(action) => {
+                assert!(
+                    game.apply_script_action(action),
+                    "first battle setup action could not be applied: {action:?}"
+                );
+                first_battle_actions += 1;
+            }
+            ScriptEvent::Waiting => {
+                game.update_auto_scripts(&auto_scripts)
+                    .expect("first battle setup auto script failed");
+            }
+            ScriptEvent::Delay | ScriptEvent::FadeScene { .. } => {}
+            ScriptEvent::StartBattle(request) => break request,
+            event => panic!("first battle setup yielded an unexpected event: {event:?}"),
+        }
+    };
+    assert!(
+        first_battle_messages >= 20,
+        "first battle setup yielded only {first_battle_messages} messages"
+    );
+    assert!(
+        first_battle_actions >= 10,
+        "first battle setup yielded only {first_battle_actions} actions"
+    );
+    assert_eq!(battle_request.enemy_team, 18);
+    assert_eq!(battle_request.lost_entry, 40091);
+    assert_eq!(battle_request.flee_entry, 0);
+    assert!(battle_request.is_boss);
+    assert_eq!(game.current_battlefield, 21);
+    assert_eq!(
+        game.party
+            .members()
+            .iter()
+            .map(|member| member.role_id)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(game.apply_script_action(ScriptAction::AdjustPlayerHealth {
+        role_id: u16::MAX,
+        hp: i16::MAX,
+        mp: i16::MAX,
+        apply_to_all: true,
+    }));
+    let base_attack = game
+        .player_role(0)
+        .expect("first battle leader role is unavailable")
+        .attack_strength;
+    assert!(game.start_battle(battle_request, &auto_scripts));
+    let battle = game.battle().expect("first battle state was not created");
+    assert_eq!(battle.enemy_team, 18);
+    assert_eq!(battle.battlefield, 21);
+    assert_eq!(battle.enemies.len(), 2);
+    assert!(battle.enemies.iter().all(|enemy| enemy.object_id == 495));
+    assert!(
+        battle.players[0].attack_strength > base_attack,
+        "initial equipment effects were not applied before battle"
+    );
+    assert!(scripts.is_waiting_for_battle());
+    let battle_background = battle_backgrounds
+        .get(usize::from(battle.battlefield))
+        .and_then(Option::as_ref)
+        .expect("first battle background is unavailable");
+    renderer.blit_bitmap(battle_background, 0, 0);
+    let background_only = renderer.screen().to_vec();
+    for player in &battle.players {
+        assert!(
+            player_battle_sprites
+                .decode_frame(usize::from(player.battle_sprite_num), 0)
+                .is_some(),
+            "first battle player sprite frame is unavailable"
+        );
+    }
+    render_battle(
+        &mut renderer,
+        battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+        },
+        BattleRenderState {
+            selected_enemy: battle.first_living_enemy().unwrap_or(0),
+            selected_command: 0,
+            ticks: 0,
+            event: None,
+            event_ticks: 0,
+        },
+    );
+    let battle_idle_frame = renderer.screen().to_vec();
+    let battle_sprite_pixels = renderer
+        .screen()
+        .chunks_exact(4)
+        .zip(background_only.chunks_exact(4))
+        .filter(|(with_sprites, background)| with_sprites != background)
+        .count();
+    assert!(battle_sprite_pixels > 0, "battle screen did not render");
+
+    let mut battle_feedback_pixels = 0;
+    for _ in 0..1024 {
+        if !matches!(
+            game.battle().map(|battle| battle.phase()),
+            Some(BattlePhase::AwaitingCommand)
+        ) {
+            break;
+        }
+        let (target, magic) = {
+            let battle = game.battle().expect("first battle disappeared");
+            let target = battle
+                .first_living_enemy()
+                .expect("active first battle has no living enemy");
+            let player = &battle.players[battle.active_player().expect("no active player")];
+            let magic = player
+                .magics
+                .iter()
+                .enumerate()
+                .filter(|(_, magic)| player.mp >= magic.mp_cost)
+                .max_by_key(|(_, magic)| magic.base_damage)
+                .map(|(index, _)| index);
+            (target, magic)
+        };
+        let events = if let Some(magic) = magic {
+            game.battle_mut()
+                .and_then(|battle| battle.cast_magic(magic, target))
+        } else {
+            game.battle_mut().and_then(|battle| battle.attack(target))
+        }
+        .expect("headless first-battle action was rejected");
+        if battle_feedback_pixels == 0 {
+            let event = events
+                .iter()
+                .copied()
+                .find(|event| {
+                    matches!(
+                        event,
+                        pal_core::battle::BattleEvent::PlayerAttack { .. }
+                            | pal_core::battle::BattleEvent::PlayerMagic { .. }
+                            | pal_core::battle::BattleEvent::EnemyAttack { .. }
+                    )
+                })
+                .expect("first battle action produced no presentation event");
+            let battle = game
+                .battle()
+                .expect("first battle disappeared during action feedback");
+            render_battle(
+                &mut renderer,
+                battle,
+                BattleRenderResources {
+                    enemy_sprites: &enemy_battle_sprites,
+                    player_sprites: &player_battle_sprites,
+                    backgrounds: &battle_backgrounds,
+                    text: &text,
+                    font: &font,
+                },
+                BattleRenderState {
+                    selected_enemy: target,
+                    selected_command: usize::from(magic.is_some()),
+                    ticks: 4,
+                    event: Some(event),
+                    event_ticks: 4,
+                },
+            );
+            battle_feedback_pixels = renderer
+                .screen()
+                .chunks_exact(4)
+                .zip(battle_idle_frame.chunks_exact(4))
+                .filter(|(feedback, idle)| feedback != idle)
+                .count();
+        }
+    }
+    assert!(
+        battle_feedback_pixels > 0,
+        "battle action feedback did not change the rendered frame"
+    );
+    let finished_battle = game
+        .battle()
+        .expect("finished first battle state disappeared before settlement");
+    render_battle(
+        &mut renderer,
+        finished_battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+        },
+        BattleRenderState {
+            selected_enemy: 0,
+            selected_command: 0,
+            ticks: 0,
+            event: None,
+            event_ticks: 0,
+        },
+    );
+    let settlement_border_pixels = renderer
+        .screen()
+        .chunks_exact(4)
+        .filter(|pixel| *pixel == [255, 236, 80, 255])
+        .count();
+    assert!(
+        settlement_border_pixels > 0,
+        "battle settlement overlay did not render"
+    );
+    let cash_before_battle = game.cash;
+    let (battle_result, battle_rewards) = game
+        .settle_battle()
+        .expect("headless first battle did not finish");
+    assert_eq!(battle_result, BattleResult::Won);
+    assert_eq!(battle_rewards.experience, 52);
+    assert_eq!(battle_rewards.cash, 96);
+    assert_eq!(game.cash, cash_before_battle + 96);
+    assert!(scripts.resolve_battle(battle_result));
+    assert!(!scripts.is_waiting_for_battle());
+    match scripts
+        .advance()
+        .expect("first battle script did not continue after victory")
+    {
+        ScriptEvent::Action(action @ ScriptAction::PlayMusic { music_id: 24, .. }) => {
+            assert!(game.apply_script_action(action));
+        }
+        event => panic!("first battle victory continued with unexpected event: {event:?}"),
+    }
+    assert_eq!(game.current_music, Some(24));
+    assert!(game.battle().is_none());
+    let mut post_battle_actions = 0;
+    let post_battle_message = loop {
+        match scripts
+            .advance()
+            .expect("first battle follow-up stopped before the next story message")
+        {
+            ScriptEvent::Message { message_id, .. } => break message_id,
+            ScriptEvent::Action(action) => {
+                assert!(
+                    game.apply_script_action(action),
+                    "first battle follow-up action could not be applied: {action:?}"
+                );
+                post_battle_actions += 1;
+            }
+            ScriptEvent::Waiting => {
+                game.update_auto_scripts(&auto_scripts)
+                    .expect("first battle follow-up auto script failed");
+            }
+            ScriptEvent::Delay | ScriptEvent::FadeScene { .. } => {}
+            event => panic!("first battle follow-up yielded an unexpected event: {event:?}"),
+        }
+    };
+    assert!(post_battle_actions >= 1);
+    assert!(text.message(usize::from(post_battle_message)).is_some());
+
     assert!(visible_pixels > 0, "rendered map is blank");
     assert!(
         chromatic_pixels > 0,
@@ -613,6 +894,20 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!("sound data passed: {sound_effect_count} PCM VOC effects");
     println!("music data passed: {music_count} standard MIDI songs");
     println!("store data passed: {} items in store 0", first_store.len());
+    println!(
+        "battle data passed: {} enemies, {} teams, {} battlefields",
+        battle_data.enemies.len(),
+        battle_data.enemy_teams.len(),
+        battle_data.battlefields.len(),
+    );
+    println!(
+        "battle graphics passed: {} ABC slots, {} F slots, {} screen pixels, {} feedback pixels, {} settlement pixels",
+        enemy_battle_sprites.len(),
+        player_battle_sprites.len(),
+        battle_sprite_pixels,
+        battle_feedback_pixels,
+        settlement_border_pixels,
+    );
     println!("SoundFont data passed: {} bytes", sound_font.len());
     println!(
         "M3 data passed: {} party member, {} role definitions, {} {:?} object definitions",
@@ -624,6 +919,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
             "M4 flow passed: {intro_messages} intro messages, {intro_actions} intro actions, item 99 acquired and used, scene 3 loaded, snapshot restored"
         );
+    println!(
+        "M5 first battle passed: object 28 entry 6906, {first_battle_messages} setup messages, {first_battle_actions} setup actions, script 6965, team 18, 2 enemies, {} EXP, {} cash, {post_battle_actions} follow-up actions, message {post_battle_message}",
+        battle_rewards.experience,
+        battle_rewards.cash,
+    );
     println!(
         "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"

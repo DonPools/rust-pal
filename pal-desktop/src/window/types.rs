@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::bitmap::Bitmap;
 use pal_assets::rle::RleBitmap;
 use pal_assets::script::ScriptTable;
@@ -51,6 +52,9 @@ pub struct GameResources {
     pub dialog_faces: Vec<Option<RleBitmap>>,
     pub ui_sprites: Vec<RleBitmap>,
     pub item_sprites: Vec<Option<RleBitmap>>,
+    pub enemy_battle_sprites: BattleSpriteArchive,
+    pub player_battle_sprites: BattleSpriteArchive,
+    pub battle_backgrounds: Vec<Option<Bitmap>>,
     pub status_background: Bitmap,
     pub equip_background: Bitmap,
     pub voc_mkf: Vec<u8>,

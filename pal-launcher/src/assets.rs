@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use pal_assets::battle::{BattleData, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::magic::Magics;
 use pal_assets::midi::MidiSong;
@@ -73,6 +74,14 @@ pub(super) fn load_role_sprites(data_dir: &Path) -> Option<RoleSprites> {
     RoleSprites::load(&data)
 }
 
+pub(super) fn load_enemy_battle_sprites(data_dir: &Path) -> Option<BattleSpriteArchive> {
+    BattleSpriteArchive::load(&std::fs::read(data_dir.join("ABC.MKF")).ok()?)
+}
+
+pub(super) fn load_player_battle_sprites(data_dir: &Path) -> Option<BattleSpriteArchive> {
+    BattleSpriteArchive::load(&std::fs::read(data_dir.join("F.MKF")).ok()?)
+}
+
 pub(super) fn load_dialog_faces(data_dir: &Path) -> Option<Vec<Option<RleBitmap>>> {
     let data = std::fs::read(data_dir.join("RGM.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
@@ -121,6 +130,27 @@ pub(super) fn load_fbp_background(
     (pixels.len() == 320 * 200).then(|| Bitmap::from_indexed(pixels, 320, 200, palette))
 }
 
+pub(super) fn load_battle_backgrounds(
+    data_dir: &Path,
+    palette: &Palette,
+) -> Option<Vec<Option<Bitmap>>> {
+    let data = std::fs::read(data_dir.join("FBP.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    Some(
+        (0..archive.chunk_count())
+            .map(|index| {
+                let chunk = archive.read_chunk(index)?;
+                let pixels = if chunk.len() == 320 * 200 {
+                    Some(chunk.to_vec())
+                } else {
+                    yj1::decompress(chunk)
+                }?;
+                (pixels.len() == 320 * 200).then(|| Bitmap::from_indexed(pixels, 320, 200, palette))
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn load_runtime_scene(
     data_dir: &Path,
     scene_data: &SceneData,
@@ -141,6 +171,10 @@ pub(super) fn load_player_roles(data_dir: &Path) -> Option<PlayerRoles> {
     let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
     PlayerRoles::parse(archive.read_chunk(3)?)
+}
+
+pub(super) fn load_battle_data(data_dir: &Path) -> Option<BattleData> {
+    BattleData::parse(&std::fs::read(data_dir.join("DATA.MKF")).ok()?)
 }
 
 pub(super) fn load_magics(data_dir: &Path) -> Option<Magics> {

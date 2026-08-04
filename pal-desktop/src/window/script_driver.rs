@@ -97,12 +97,33 @@ pub(super) fn advance_script<L>(
             });
             set_title("Rust-PAL [Sell]");
         }
+        Some(ScriptEvent::StartBattle(request)) => {
+            services.field_menu = None;
+            services.inventory_menu = None;
+            services.shop_menu = None;
+            services.confirmation_menu = None;
+            if game.start_battle(request, &services.auto_scripts) {
+                services.battle_selected_enemy = game
+                    .battle()
+                    .and_then(|battle| battle.first_living_enemy())
+                    .unwrap_or(0);
+                services.battle_command_selected = 0;
+                services.battle_events.clear();
+                services.battle_event_ticks = 0;
+                if game.current_battle_music == 0 {
+                    services.music.stop();
+                } else if !services.music.play(game.current_battle_music, true, 0) {
+                    set_title("Rust-PAL [battle music unavailable]");
+                    return;
+                }
+                set_title("Rust-PAL [Battle]");
+            } else {
+                set_title("Rust-PAL [failed to start battle]");
+            }
+        }
         Some(ScriptEvent::Teleport { failure_entry }) => {
             let teleport_entry = game.scene_teleport_script(0);
-            if teleport_entry == 0 {
-                scripts.set_success(false);
-                scripts.branch_to(failure_entry);
-            } else if !scripts.call(teleport_entry, 0xffff) {
+            if teleport_entry == 0 || !scripts.call(teleport_entry, 0xffff) {
                 scripts.set_success(false);
                 scripts.branch_to(failure_entry);
             }

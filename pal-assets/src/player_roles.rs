@@ -33,6 +33,16 @@ pub struct PlayerRole {
     pub covered_by: u16,
     pub magic: [u16; PLAYER_MAGIC_COUNT],
     pub walk_frames: u16,
+    pub cooperative_magic: u16,
+    pub unknown_5: u16,
+    pub unknown_6: u16,
+    pub death_sound: u16,
+    pub attack_sound: u16,
+    pub weapon_sound: u16,
+    pub critical_sound: u16,
+    pub magic_sound: u16,
+    pub cover_sound: u16,
+    pub dying_sound: u16,
 }
 
 impl PlayerRole {
@@ -130,6 +140,16 @@ fn parse_role(data: &[u8], role: usize) -> Option<PlayerRole> {
         covered_by: read_player_array(data, 31, role)?,
         magic: read_array(data, 32, role)?,
         walk_frames: read_player_array(data, 64, role)?,
+        cooperative_magic: read_player_array(data, 65, role)?,
+        unknown_5: read_player_array(data, 66, role)?,
+        unknown_6: read_player_array(data, 67, role)?,
+        death_sound: read_player_array(data, 68, role)?,
+        attack_sound: read_player_array(data, 69, role)?,
+        weapon_sound: read_player_array(data, 70, role)?,
+        critical_sound: read_player_array(data, 71, role)?,
+        magic_sound: read_player_array(data, 72, role)?,
+        cover_sound: read_player_array(data, 73, role)?,
+        dying_sound: read_player_array(data, 74, role)?,
     })
 }
 
@@ -183,6 +203,9 @@ mod tests {
         assert_eq!(role.magic[0], 325);
         assert_eq!(role.magic[31], 635);
         assert_eq!(role.walk_frames, 645);
+        assert_eq!(role.cooperative_magic, 655);
+        assert_eq!(role.death_sound, 685);
+        assert_eq!(role.dying_sound, 745);
         assert_eq!(roles.iter().len(), PLAYER_ROLE_COUNT);
     }
 

@@ -52,6 +52,26 @@ impl GlobalObject {
     pub fn magic_flags(self) -> u16 {
         self.data[6]
     }
+
+    pub fn enemy_id(self) -> u16 {
+        self.data[0]
+    }
+
+    pub fn enemy_sorcery_resistance(self) -> u16 {
+        self.data[1]
+    }
+
+    pub fn enemy_turn_start_script(self) -> u16 {
+        self.data[2]
+    }
+
+    pub fn enemy_battle_end_script(self) -> u16 {
+        self.data[3]
+    }
+
+    pub fn enemy_ready_script(self) -> u16 {
+        self.data[4]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +146,11 @@ mod tests {
         assert_eq!(objects.get(0).unwrap().item_equip_script(), 40);
         assert_eq!(objects.get(0).unwrap().magic_success_script(), 30);
         assert_eq!(objects.get(0).unwrap().magic_use_script(), 40);
+        assert_eq!(objects.get(0).unwrap().enemy_id(), 10);
+        assert_eq!(objects.get(0).unwrap().enemy_sorcery_resistance(), 20);
+        assert_eq!(objects.get(0).unwrap().enemy_turn_start_script(), 30);
+        assert_eq!(objects.get(0).unwrap().enemy_battle_end_script(), 40);
+        assert_eq!(objects.get(0).unwrap().enemy_ready_script(), 50);
         assert_eq!(
             objects.get(0).unwrap().data,
             [10, 20, 30, 40, 50, 0, 0x1234]

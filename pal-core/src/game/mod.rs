@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 
+use pal_assets::battle::BattleData;
 use pal_assets::magic::Magics;
 use pal_assets::objects::GlobalObjects;
 use pal_assets::player_roles::{PlayerRole, PlayerRoles, PLAYER_ROLE_COUNT};
 use pal_assets::script::ScriptTable;
 use pal_assets::store::Stores;
 
+use crate::battle::{BattlePhase, BattleRequest, BattleResult, BattleRewards, BattleState};
 use crate::map::tile_to_world;
 use crate::map::Map;
 use crate::party::{Party, MAX_PARTY_MEMBERS};
@@ -46,11 +48,17 @@ pub struct GameState<M = Map> {
     pub pending_trigger: Option<TriggerRequest>,
     pub party: Party,
     pub current_music: Option<u16>,
+    pub current_battle_music: u16,
+    pub current_battlefield: u16,
     pub cash: u32,
+    role_experience: [u32; PLAYER_ROLE_COUNT],
+    growth_random_state: u32,
     player_roles: Option<PlayerRoles>,
     stores: Option<Stores>,
     global_objects: Option<GlobalObjects>,
     magics: Option<Magics>,
+    battle_data: Option<BattleData>,
+    active_battle: Option<BattleState>,
     inventory: Vec<(u16, u16)>,
     item_use_scripts: BTreeMap<u16, u16>,
     item_equip_scripts: BTreeMap<u16, u16>,
@@ -91,11 +99,17 @@ impl<M: CollisionMap> GameState<M> {
             pending_trigger: None,
             party: Party::default(),
             current_music: None,
+            current_battle_music: 0,
+            current_battlefield: 0,
             cash: 0,
+            role_experience: [0; PLAYER_ROLE_COUNT],
+            growth_random_state: 0xa341_316c,
             player_roles: None,
             stores: None,
             global_objects: None,
             magics: None,
+            battle_data: None,
+            active_battle: None,
             inventory: Vec::new(),
             item_use_scripts: BTreeMap::new(),
             item_equip_scripts: BTreeMap::new(),
@@ -167,6 +181,343 @@ impl<M: CollisionMap> GameState<M> {
     pub fn with_magic_data(mut self, magics: Magics) -> Self {
         self.magics = Some(magics);
         self
+    }
+
+    pub fn with_battle_data(mut self, battle_data: BattleData) -> Self {
+        self.battle_data = Some(battle_data);
+        self
+    }
+
+    pub fn battle(&self) -> Option<&BattleState> {
+        self.active_battle.as_ref()
+    }
+
+    pub fn battle_mut(&mut self) -> Option<&mut BattleState> {
+        self.active_battle.as_mut()
+    }
+
+    pub fn player_experience(&self, role_id: u16) -> Option<u32> {
+        self.role_experience.get(usize::from(role_id)).copied()
+    }
+
+    /// Create a battle from the current party and script-selected battle configuration.
+    pub fn start_battle(&mut self, request: BattleRequest, scripts: &ScriptTable) -> bool {
+        if self.active_battle.is_some() {
+            return false;
+        }
+        if !self.refresh_equipment_effects(scripts) {
+            return false;
+        }
+        let role_ids = self
+            .party
+            .members()
+            .iter()
+            .map(|member| member.role_id)
+            .collect::<Vec<_>>();
+        let Some(roles) = role_ids
+            .iter()
+            .map(|&role_id| Some((role_id, self.effective_player_role(role_id)?)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        let Some(data) = self.battle_data.as_ref() else {
+            return false;
+        };
+        let Some(objects) = self.global_objects.as_ref() else {
+            return false;
+        };
+        let Some(magics) = self.magics.as_ref() else {
+            return false;
+        };
+        let Some(battle) = BattleState::new(
+            request,
+            self.current_battlefield,
+            self.current_battle_music,
+            roles.iter().map(|(role_id, role)| (*role_id, role)),
+            data,
+            objects,
+            magics,
+        ) else {
+            return false;
+        };
+        self.active_battle = Some(battle);
+        true
+    }
+
+    /// Apply final HP and cash changes, then leave the finished battle state.
+    pub fn settle_battle(&mut self) -> Option<(BattleResult, BattleRewards)> {
+        let result = match self.active_battle.as_ref()?.phase() {
+            BattlePhase::Finished(result) => result,
+            BattlePhase::AwaitingCommand => return None,
+        };
+        let battle = self.active_battle.take()?;
+        if let Some(roles) = self.player_roles.as_mut() {
+            for player in &battle.players {
+                let role = roles.role_mut(usize::from(player.role_id))?;
+                role.hp = player.hp;
+                role.mp = player.mp;
+            }
+            self.party.sync_from_roles(roles);
+        }
+        let rewards = battle.settled_rewards()?;
+        if result == BattleResult::Won {
+            self.cash = self.cash.saturating_add(rewards.cash);
+            let living_roles = battle
+                .players
+                .iter()
+                .filter_map(|player| player.is_alive().then_some(player.role_id))
+                .collect::<Vec<_>>();
+            self.award_battle_experience(&living_roles, rewards.experience);
+        }
+        Some((result, rewards))
+    }
+
+    fn award_battle_experience(&mut self, role_ids: &[u16], gained: u32) {
+        for &role_id in role_ids {
+            let role_index = usize::from(role_id);
+            let Some(current) = self.role_experience.get_mut(role_index) else {
+                continue;
+            };
+            *current = current.saturating_add(gained);
+            while let Some(level) = self
+                .player_roles
+                .as_ref()
+                .and_then(|roles| roles.role(role_index))
+                .map(|role| role.level)
+            {
+                if level >= 99 {
+                    break;
+                }
+                let Some(required) = self
+                    .battle_data
+                    .as_ref()
+                    .and_then(|data| data.level_up_experience.for_level(level))
+                    .map(u32::from)
+                    .filter(|&required| required > 0)
+                else {
+                    break;
+                };
+                if self.role_experience[role_index] < required {
+                    break;
+                }
+                self.role_experience[role_index] -= required;
+                if !self.level_up_role(role_id) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Re-run equipped-item scripts so battle attributes match current equipment.
+    fn refresh_equipment_effects(&mut self, scripts: &ScriptTable) -> bool {
+        const MAX_EQUIPMENT_SCRIPT_INSTRUCTIONS: usize = 4096;
+
+        let Some(roles) = self.player_roles.as_ref() else {
+            return false;
+        };
+        let Some(objects) = self.global_objects.as_ref() else {
+            return false;
+        };
+        let equipped = roles
+            .iter()
+            .enumerate()
+            .flat_map(|(role_id, role)| {
+                role.equipment
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(move |(slot, item_id)| (role_id, slot, item_id))
+            })
+            .filter(|&(_, _, item_id)| item_id != 0)
+            .map(|(role_id, slot, item_id)| {
+                let object = objects.get(item_id)?;
+                let script_entry = self
+                    .item_equip_scripts
+                    .get(&item_id)
+                    .copied()
+                    .unwrap_or_else(|| object.item_equip_script());
+                Some((
+                    u16::try_from(role_id).ok()?,
+                    u16::try_from(slot).ok()?,
+                    item_id,
+                    script_entry,
+                ))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(equipped) = equipped else {
+            return false;
+        };
+
+        let saved_roles = self.player_roles.clone();
+        let saved_inventory = self.inventory.clone();
+        let saved_effects = self.equipment_effects.clone();
+        let saved_equip_scripts = self.item_equip_scripts.clone();
+        let saved_current_slot = self.current_equipment_slot;
+        self.equipment_effects.clear();
+        self.current_equipment_slot = None;
+        for (role_id, slot, item_id, script_entry) in equipped {
+            if script_entry == 0 {
+                continue;
+            }
+            let mut entry = script_entry;
+            let mut next_entry = script_entry;
+            let mut call_stack = Vec::new();
+            let mut completed = false;
+            for _ in 0..MAX_EQUIPMENT_SCRIPT_INSTRUCTIONS {
+                let Some(instruction) = scripts.entry(entry).copied() else {
+                    break;
+                };
+                let Some(opcode) = ScriptOpcode::from_raw(instruction.opcode) else {
+                    break;
+                };
+                use ScriptOpcode::*;
+                let applied = match opcode {
+                    Stop => {
+                        if let Some(return_entry) = call_stack.pop() {
+                            entry = return_entry;
+                            continue;
+                        }
+                        completed = true;
+                        break;
+                    }
+                    StopAndAdvance => {
+                        if let Some(return_entry) = call_stack.pop() {
+                            entry = return_entry;
+                            continue;
+                        }
+                        next_entry = entry.wrapping_add(1);
+                        completed = true;
+                        break;
+                    }
+                    StopAndReplace => {
+                        if let Some(return_entry) = call_stack.pop() {
+                            entry = return_entry;
+                            continue;
+                        }
+                        next_entry = instruction.operands[0];
+                        completed = true;
+                        break;
+                    }
+                    Jump if instruction.operands[1] == 0 => {
+                        entry = instruction.operands[0];
+                        continue;
+                    }
+                    Call if instruction.operands[0] != 0 => {
+                        call_stack.push(entry.wrapping_add(1));
+                        entry = instruction.operands[0];
+                        continue;
+                    }
+                    EquipItem if instruction.operands[0] >= 0x0b => {
+                        self.apply_script_action(ScriptAction::EquipItem {
+                            role_id,
+                            slot: instruction.operands[0] - 0x0b,
+                            item_id: instruction.operands[1],
+                        })
+                    }
+                    SetEquipmentEffect if instruction.operands[0] >= 0x0b => self
+                        .apply_script_action(ScriptAction::SetEquipmentEffect {
+                            role_id,
+                            attribute: instruction.operands[1],
+                            slot: instruction.operands[0] - 0x0b,
+                            value: instruction.operands[2] as i16,
+                        }),
+                    AdjustPlayerAttribute | SetPlayerAttribute => {
+                        let target_role = instruction.operands[2].checked_sub(1).unwrap_or(role_id);
+                        self.apply_script_action(ScriptAction::ChangePlayerAttribute {
+                            role_id: target_role,
+                            attribute: instruction.operands[0],
+                            value: instruction.operands[1] as i16,
+                            absolute: opcode == SetPlayerAttribute,
+                        })
+                    }
+                    // Some initial accessories grant a battle status. M5 does not model
+                    // statuses yet, but their remaining equipment attributes still apply.
+                    SetPlayerStatus => true,
+                    _ => false,
+                };
+                if !applied {
+                    break;
+                }
+                entry = entry.wrapping_add(1);
+            }
+            if !completed
+                || self
+                    .player_role(role_id)
+                    .is_none_or(|role| role.equipment[usize::from(slot)] != item_id)
+            {
+                self.player_roles = saved_roles;
+                self.inventory = saved_inventory;
+                self.equipment_effects = saved_effects;
+                self.item_equip_scripts = saved_equip_scripts;
+                self.current_equipment_slot = saved_current_slot;
+                if let Some(roles) = self.player_roles.as_ref() {
+                    self.party.sync_from_roles(roles);
+                }
+                return false;
+            }
+            self.item_equip_scripts.insert(item_id, next_entry);
+            self.current_equipment_slot = None;
+        }
+        true
+    }
+
+    fn level_up_role(&mut self, role_id: u16) -> bool {
+        let role_index = usize::from(role_id);
+        let hp = 10 + self.growth_random(8);
+        let mp = 8 + self.growth_random(6);
+        let attack = 4 + self.growth_random(2);
+        let magic = 4 + self.growth_random(2);
+        let defense = 2 + self.growth_random(2);
+        let dexterity = 2 + self.growth_random(2);
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let Some(role) = roles.role_mut(role_index) else {
+            return false;
+        };
+        role.level = role.level.saturating_add(1).min(99);
+        role.max_hp = role.max_hp.saturating_add(hp as u16).min(999);
+        role.max_mp = role.max_mp.saturating_add(mp as u16).min(999);
+        role.attack_strength = role.attack_strength.saturating_add(attack as u16).min(999);
+        role.magic_strength = role.magic_strength.saturating_add(magic as u16).min(999);
+        role.defense = role.defense.saturating_add(defense as u16).min(999);
+        role.dexterity = role.dexterity.saturating_add(dexterity as u16).min(999);
+        role.flee_rate = role.flee_rate.saturating_add(2).min(999);
+        role.hp = role.max_hp;
+        role.mp = role.max_mp;
+        let new_level = role.level;
+
+        if role_index < pal_assets::battle::LEVEL_UP_ROLE_COUNT {
+            let learned = self
+                .battle_data
+                .as_ref()
+                .into_iter()
+                .flat_map(|data| data.level_up_magics.iter())
+                .map(|set| set.roles[role_index])
+                .filter(|entry| entry.level == new_level && entry.magic != 0)
+                .map(|entry| entry.magic)
+                .collect::<Vec<_>>();
+            for magic in learned {
+                if role.magic.contains(&magic) {
+                    continue;
+                }
+                if let Some(slot) = role.magic.iter_mut().find(|slot| **slot == 0) {
+                    *slot = magic;
+                }
+            }
+        }
+        self.party.sync_from_roles(roles);
+        true
+    }
+
+    fn growth_random(&mut self, upper_exclusive: u32) -> u32 {
+        let mut x = self.growth_random_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.growth_random_state = x;
+        x % upper_exclusive.max(1)
     }
 
     pub fn party_followers(&self) -> &[Role] {
@@ -875,6 +1226,10 @@ impl<M: CollisionMap> GameState<M> {
             pending_trigger: self.pending_trigger,
             party: self.party.clone(),
             current_music: self.current_music,
+            current_battle_music: self.current_battle_music,
+            current_battlefield: self.current_battlefield,
+            role_experience: self.role_experience,
+            growth_random_state: self.growth_random_state,
             cash: self.cash,
             inventory: self.inventory.clone(),
             item_use_scripts: self.item_use_scripts.clone(),
@@ -913,6 +1268,10 @@ impl<M: CollisionMap> GameState<M> {
                 .map(|member| member.role_id)
                 .collect(),
             current_music: snapshot.current_music,
+            current_battle_music: snapshot.current_battle_music,
+            current_battlefield: snapshot.current_battlefield,
+            role_experience: snapshot.role_experience,
+            growth_random_state: snapshot.growth_random_state,
             cash: snapshot.cash,
             inventory: snapshot.inventory,
             item_use_scripts: snapshot.item_use_scripts.into_iter().collect(),
@@ -1086,6 +1445,10 @@ impl<M: CollisionMap> GameState<M> {
             pending_trigger: None,
             party,
             current_music: data.current_music,
+            current_battle_music: data.current_battle_music,
+            current_battlefield: data.current_battlefield,
+            role_experience: data.role_experience,
+            growth_random_state: data.growth_random_state,
             cash: data.cash,
             inventory,
             item_use_scripts,
@@ -1115,6 +1478,11 @@ impl<M: CollisionMap> GameState<M> {
         self.pending_trigger = snapshot.pending_trigger;
         self.party = snapshot.party;
         self.current_music = snapshot.current_music;
+        self.current_battle_music = snapshot.current_battle_music;
+        self.current_battlefield = snapshot.current_battlefield;
+        self.role_experience = snapshot.role_experience;
+        self.growth_random_state = snapshot.growth_random_state;
+        self.active_battle = None;
         self.cash = snapshot.cash;
         self.inventory = snapshot.inventory;
         self.item_use_scripts = snapshot.item_use_scripts;
@@ -1165,6 +1533,12 @@ impl<M: CollisionMap> GameState<M> {
                 self.current_music = (music_id != 0).then_some(music_id);
             }
             ScriptAction::PlaySound { .. } => {}
+            ScriptAction::SetBattleMusic { music_id } => {
+                self.current_battle_music = music_id;
+            }
+            ScriptAction::SetBattlefield { battlefield_id } => {
+                self.current_battlefield = battlefield_id;
+            }
             ScriptAction::MoveObject {
                 object_id,
                 direction,
@@ -2753,6 +3127,69 @@ mod tests {
         )
     }
 
+    fn battle_data_for_growth() -> BattleData {
+        let mut chunks = vec![Vec::new(); 15];
+        chunks[1] = vec![0; 70];
+        chunks[2] = vec![0; 10];
+        chunks[5] = vec![0; 12];
+        chunks[6] = vec![0; 20];
+        chunks[6][0..2].copy_from_slice(&2u16.to_le_bytes());
+        chunks[6][2..4].copy_from_slice(&9u16.to_le_bytes());
+        chunks[13] = vec![0; 100];
+        chunks[14] = vec![0; 200];
+        chunks[14][2..4].copy_from_slice(&10u16.to_le_bytes());
+
+        let table_size = (chunks.len() + 1) * 4;
+        let mut offset = table_size as u32;
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&offset.to_le_bytes());
+        for chunk in &chunks {
+            offset += chunk.len() as u32;
+            archive.extend_from_slice(&offset.to_le_bytes());
+        }
+        for chunk in chunks {
+            archive.extend_from_slice(&chunk);
+        }
+        BattleData::parse(&archive).unwrap()
+    }
+
+    #[test]
+    fn battle_experience_levels_living_roles_and_teaches_magic() {
+        let mut role_data = vec![0; 900];
+        for (array, value) in [
+            (6, 1u16),
+            (7, 100),
+            (8, 50),
+            (9, 20),
+            (10, 10),
+            (17, 30),
+            (18, 20),
+            (19, 25),
+            (20, 15),
+            (21, 12),
+        ] {
+            let offset = array * 12;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_battle_data(battle_data_for_growth());
+
+        state.award_battle_experience(&[0], 25);
+
+        let role = state.player_role(0).unwrap();
+        assert_eq!(role.level, 2);
+        assert_eq!(state.player_experience(0), Some(15));
+        assert!(role.max_hp >= 110);
+        assert_eq!(role.hp, role.max_hp);
+        assert_eq!(role.mp, role.max_mp);
+        assert_eq!(role.magic[0], 9);
+        assert_eq!(state.party.leader().unwrap().attributes.level, 2);
+    }
+
     #[test]
     fn walking_updates_position_animation_and_camera() {
         let mut state = state(&[]);
@@ -3173,6 +3610,61 @@ mod tests {
     }
 
     #[test]
+    fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
+        let mut roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
+        let role = roles.role_mut(0).unwrap();
+        role.equipment[0] = 1;
+        role.attack_strength = 10;
+        let party = Party::single(0, &roles).unwrap();
+
+        let mut object_data = vec![0; 24];
+        for (index, word) in [0u16, 0, 0, 1, 0, 0].into_iter().enumerate() {
+            object_data[12 + index * 2..14 + index * 2].copy_from_slice(&word.to_le_bytes());
+        }
+        let objects =
+            GlobalObjects::parse(&object_data, pal_assets::objects::ObjectLayout::Dos).unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let script_data = [
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::EquipItem.raw(), 0x0b, 1, 0],
+            [ScriptOpcode::SetEquipmentEffect.raw(), 0x0b, 17, 5],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+        let scripts = ScriptTable::parse(&script_data).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects);
+
+        assert!(state.refresh_equipment_effects(&scripts));
+        assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+        assert!(state.refresh_equipment_effects(&scripts));
+        assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+        assert_eq!(state.player_role(0).unwrap().equipment[0], 1);
+        assert_eq!(state.inventory_count(1), 0);
+
+        let invalid_script_data = [
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::EquipItem.raw(), 0x0b, 1, 0],
+            [ScriptOpcode::AddItem.raw(), 2, 1, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+        let invalid_scripts = ScriptTable::parse(&invalid_script_data).unwrap();
+        assert!(!state.refresh_equipment_effects(&invalid_scripts));
+        assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+        assert_eq!(state.player_role(0).unwrap().equipment[0], 1);
+        assert_eq!(state.inventory_count(1), 0);
+    }
+
+    #[test]
     fn field_magic_uses_object_scripts_and_consumes_mp_after_success() {
         let mut roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
         let role = roles.role_mut(0).unwrap();
@@ -3192,7 +3684,7 @@ mod tests {
             GlobalObjects::parse(&object_data, pal_assets::objects::ObjectLayout::Dos).unwrap();
         let stores = Stores::parse(&[0; 18]).unwrap();
         let mut magic_data = vec![0; 32];
-        magic_data[26..28].copy_from_slice(&3u16.to_le_bytes());
+        magic_data[24..26].copy_from_slice(&3u16.to_le_bytes());
         let magics = Magics::parse(&magic_data).unwrap();
         let mut state = state(&[])
             .with_party(party)
@@ -3598,6 +4090,9 @@ mod tests {
         state.finish_item_equip(9, 44);
         state.finish_magic_script(88, 55, false);
         state.finish_magic_script(88, 66, true);
+        assert!(state.apply_script_action(ScriptAction::SetBattleMusic { music_id: 7 }));
+        assert!(state.apply_script_action(ScriptAction::SetBattlefield { battlefield_id: 21 }));
+        state.role_experience[0] = 42;
 
         let encoded = state.encode_snapshot().unwrap();
         let decoded = state.decode_snapshot(&encoded).unwrap();
@@ -3607,6 +4102,9 @@ mod tests {
         assert_eq!(state.item_count(9), 4);
         assert_eq!(state.inventory().collect::<Vec<_>>(), vec![(9, 4), (7, 2)]);
         assert_eq!(state.cash, 123);
+        assert_eq!(state.current_battle_music, 7);
+        assert_eq!(state.current_battlefield, 21);
+        assert_eq!(state.player_experience(0), Some(42));
         assert_eq!(state.player_role(0).unwrap().hp, 321);
         assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 7);
         assert_eq!(state.scene_enter_script(0), 321);
@@ -3624,7 +4122,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":12", "\"version\":11");
+            .replace("\"version\":15", "\"version\":14");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 

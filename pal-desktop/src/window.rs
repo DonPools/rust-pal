@@ -1,5 +1,7 @@
 //! Native window and map framebuffer presentation.
 
+mod battle_render;
+mod battle_update;
 mod debug_render;
 mod dialog;
 mod dialog_text;
@@ -38,6 +40,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
 
+pub use battle_render::{render_battle, BattleRenderResources, BattleRenderState};
+use battle_update::update_battle;
 use debug_render::{debug_object_snapshot, focused_debug_object};
 #[cfg(test)]
 use debug_render::{
@@ -82,6 +86,9 @@ pub fn run_game_window<L>(
         dialog_faces,
         ui_sprites,
         item_sprites,
+        enemy_battle_sprites,
+        player_battle_sprites,
+        battle_backgrounds,
         status_background,
         equip_background,
         voc_mkf,
@@ -148,6 +155,13 @@ pub fn run_game_window<L>(
             dialog_faces: &dialog_faces,
             ui_sprites: &ui_sprites,
             item_sprites: &item_sprites,
+            enemy_battle_sprites: &enemy_battle_sprites,
+            player_battle_sprites: &player_battle_sprites,
+            battle_backgrounds: &battle_backgrounds,
+            battle_selected_enemy: script_services.battle_selected_enemy,
+            battle_command_selected: script_services.battle_command_selected,
+            battle_event: script_services.battle_events.front().copied(),
+            battle_event_ticks: script_services.battle_event_ticks,
             status_background: &status_background,
             equip_background: &equip_background,
             ui_ticks: 0,
@@ -265,6 +279,14 @@ pub fn run_game_window<L>(
                                     dialog_faces: &dialog_faces,
                                     ui_sprites: &ui_sprites,
                                     item_sprites: &item_sprites,
+                                    enemy_battle_sprites: &enemy_battle_sprites,
+                                    player_battle_sprites: &player_battle_sprites,
+                                    battle_backgrounds: &battle_backgrounds,
+                                    battle_selected_enemy: script_services.battle_selected_enemy,
+                                    battle_command_selected: script_services
+                                        .battle_command_selected,
+                                    battle_event: script_services.battle_events.front().copied(),
+                                    battle_event_ticks: script_services.battle_event_ticks,
                                     status_background: &status_background,
                                     equip_background: &equip_background,
                                     ui_ticks,
@@ -394,6 +416,38 @@ pub fn run_game_window<L>(
                             );
                             changed = true;
                         }
+                    } else if game.battle().is_some() {
+                        let outcome = update_battle(sampled, &mut game, &mut script_services);
+                        changed = true;
+                        if let Some(outcome) = outcome {
+                            if !scripts.resolve_battle(outcome.result) {
+                                window.set_title("Rust-PAL [battle script resume failed]");
+                            } else {
+                                if let Some(music_id) = game.current_music {
+                                    script_services.music.play(music_id, true, 0);
+                                } else {
+                                    script_services.music.stop();
+                                }
+                                window.set_title(&format!(
+                                    "Rust-PAL [Battle {:?}: +{} EXP +{} cash]",
+                                    outcome.result,
+                                    outcome.rewards.experience,
+                                    outcome.rewards.cash
+                                ));
+                                advance_script(
+                                    &mut scripts,
+                                    &mut game,
+                                    &mut dialog,
+                                    ScriptRenderResources {
+                                        text: &text,
+                                        role_sprites: &role_sprites,
+                                    },
+                                    &mut load_scene,
+                                    &mut script_services,
+                                    &mut |title| window.set_title(title),
+                                );
+                            }
+                        }
                     } else if let Some(menu_changed) = update_active_menu(&mut MenuUpdateContext {
                         input: sampled,
                         scripts: &mut scripts,
@@ -496,6 +550,13 @@ pub fn run_game_window<L>(
                             dialog_faces: &dialog_faces,
                             ui_sprites: &ui_sprites,
                             item_sprites: &item_sprites,
+                            enemy_battle_sprites: &enemy_battle_sprites,
+                            player_battle_sprites: &player_battle_sprites,
+                            battle_backgrounds: &battle_backgrounds,
+                            battle_selected_enemy: script_services.battle_selected_enemy,
+                            battle_command_selected: script_services.battle_command_selected,
+                            battle_event: script_services.battle_events.front().copied(),
+                            battle_event_ticks: script_services.battle_event_ticks,
                             status_background: &status_background,
                             equip_background: &equip_background,
                             ui_ticks,

@@ -27,7 +27,7 @@ fn main() {
         std::process::exit(2);
     });
 
-    println!("Rust-PAL M4 in progress");
+    println!("Rust-PAL M5 complete");
     println!("data: {}", data_dir.display());
 
     let boot = bootstrap(data_dir);
@@ -69,6 +69,9 @@ fn run_desktop(boot: BootstrappedGame) {
         item_sprites,
         status_background,
         equip_background,
+        enemy_battle_sprites,
+        player_battle_sprites,
+        battle_backgrounds,
         game,
         renderer,
         ..
@@ -89,6 +92,9 @@ fn run_desktop(boot: BootstrappedGame) {
             item_sprites,
             status_background,
             equip_background,
+            enemy_battle_sprites,
+            player_battle_sprites,
+            battle_backgrounds,
             voc_mkf,
             midi_mkf,
             sound_font,

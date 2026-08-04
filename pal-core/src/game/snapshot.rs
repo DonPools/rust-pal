@@ -14,6 +14,10 @@ pub struct GameSnapshot {
     pub(super) pending_trigger: Option<TriggerRequest>,
     pub(super) party: Party,
     pub(super) current_music: Option<u16>,
+    pub(super) current_battle_music: u16,
+    pub(super) current_battlefield: u16,
+    pub(super) role_experience: [u32; pal_assets::player_roles::PLAYER_ROLE_COUNT],
+    pub(super) growth_random_state: u32,
     pub(super) cash: u32,
     pub(super) inventory: Vec<(u16, u16)>,
     pub(super) item_use_scripts: BTreeMap<u16, u16>,
@@ -39,9 +43,8 @@ impl GameSnapshot {
     }
 }
 
-// Version 12 stores field-menu script state and equipment effects. Version 11
-// started preserving original inventory slot order.
-pub(super) const SNAPSHOT_VERSION: u16 = 12;
+// Version 15 preserves the complete mutable player-role table, including battle sounds.
+pub(super) const SNAPSHOT_VERSION: u16 = 15;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -51,6 +54,10 @@ pub(super) struct SnapshotData {
     pub(super) scene_objects: Vec<SavedSceneObject>,
     pub(super) party: Vec<u16>,
     pub(super) current_music: Option<u16>,
+    pub(super) current_battle_music: u16,
+    pub(super) current_battlefield: u16,
+    pub(super) role_experience: [u32; pal_assets::player_roles::PLAYER_ROLE_COUNT],
+    pub(super) growth_random_state: u32,
     pub(super) cash: u32,
     pub(super) inventory: Vec<(u16, u16)>,
     pub(super) item_use_scripts: Vec<(u16, u16)>,
@@ -93,6 +100,16 @@ pub(super) struct SavedPlayerRole {
     covered_by: u16,
     magic: [u16; 32],
     walk_frames: u16,
+    cooperative_magic: u16,
+    unknown_5: u16,
+    unknown_6: u16,
+    death_sound: u16,
+    attack_sound: u16,
+    weapon_sound: u16,
+    critical_sound: u16,
+    magic_sound: u16,
+    cover_sound: u16,
+    dying_sound: u16,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -181,6 +198,16 @@ impl From<&PlayerRole> for SavedPlayerRole {
             covered_by: role.covered_by,
             magic: role.magic,
             walk_frames: role.walk_frames,
+            cooperative_magic: role.cooperative_magic,
+            unknown_5: role.unknown_5,
+            unknown_6: role.unknown_6,
+            death_sound: role.death_sound,
+            attack_sound: role.attack_sound,
+            weapon_sound: role.weapon_sound,
+            critical_sound: role.critical_sound,
+            magic_sound: role.magic_sound,
+            cover_sound: role.cover_sound,
+            dying_sound: role.dying_sound,
         }
     }
 }
@@ -209,6 +236,16 @@ impl SavedPlayerRole {
             covered_by: self.covered_by,
             magic: self.magic,
             walk_frames: self.walk_frames,
+            cooperative_magic: self.cooperative_magic,
+            unknown_5: self.unknown_5,
+            unknown_6: self.unknown_6,
+            death_sound: self.death_sound,
+            attack_sound: self.attack_sound,
+            weapon_sound: self.weapon_sound,
+            critical_sound: self.critical_sound,
+            magic_sound: self.magic_sound,
+            cover_sound: self.cover_sound,
+            dying_sound: self.dying_sound,
         }
     }
 }

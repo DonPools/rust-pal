@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use pal_assets::script::ScriptTable;
 
+use crate::battle::{BattleRequest, BattleResult};
 use crate::role::Direction;
 use crate::scene::TriggerRequest;
 
@@ -111,7 +112,7 @@ define_script_opcodes! {
     Call = 0x0004, "CALL", "Call the script at operand 0, optionally with another owner.", Implemented;
     Redraw = 0x0005, "REDRAW", "Redraw the screen and apply the requested delay.", Implemented;
     JumpByChance = 0x0006, "JMP_CHANCE", "Jump according to the probability in operand 0.", Implemented;
-    StartBattle = 0x0007, "BATTLE", "Start a battle and branch according to its result.", Unsupported;
+    StartBattle = 0x0007, "BATTLE", "Start a battle and branch according to its result.", Implemented;
     AdvanceEntry = 0x0008, "SET_NEXT", "Persist the following instruction as the script entry and continue.", Implemented;
     WaitFrames = 0x0009, "WAIT", "Wait for operand 0 scene frames.", Implemented;
     Confirm = 0x000A, "CONFIRM", "Ask for confirmation and jump to operand 0 when the answer is no.", Implemented;
@@ -172,11 +173,11 @@ define_script_opcodes! {
     SimulatePlayerMagic = 0x0042, "MAGIC_SIM", "Simulate a player's magic attack in battle.", Unsupported;
     PlayMusic = 0x0043, "MUSIC", "Play or stop scene background music.", Implemented;
     RideObject = 0x0044, "RIDE", "Ride the current event object to a tile at normal speed.", Implemented;
-    SetBattleMusic = 0x0045, "BATTLE_MUSIC", "Set the music number for the next battle.", Stub;
+    SetBattleMusic = 0x0045, "BATTLE_MUSIC", "Set the music number for the next battle.", Implemented;
     SetPartyPosition = 0x0046, "PARTY_POS", "Set the party position on the current map.", Implemented;
     PlaySound = 0x0047, "SOUND", "Play a sound effect.", Implemented;
     SetObjectState = 0x0049, "OBJ_STATE", "Set an event object's state.", Implemented;
-    SetBattlefield = 0x004A, "BATTLEFIELD", "Set the battlefield number for the next battle.", Stub;
+    SetBattlefield = 0x004A, "BATTLEFIELD", "Set the battlefield number for the next battle.", Implemented;
     HideObjectShort = 0x004B, "OBJ_HIDE_SHORT", "Hide the current event object for a short period.", Implemented;
     ChasePlayer = 0x004C, "OBJ_CHASE", "Make the current event object chase the player.", Implemented;
     WaitForKey = 0x004D, "WAIT_KEY", "Wait until the player presses a key.", Unsupported;
@@ -297,6 +298,7 @@ pub enum ScriptEvent {
         store_number: u16,
     },
     OpenSellMenu,
+    StartBattle(BattleRequest),
     Teleport {
         failure_entry: u16,
     },
@@ -347,6 +349,12 @@ pub enum ScriptAction {
     },
     PlaySound {
         sound_id: u16,
+    },
+    SetBattleMusic {
+        music_id: u16,
+    },
+    SetBattlefield {
+        battlefield_id: u16,
     },
     MoveObject {
         object_id: u16,
@@ -610,6 +618,7 @@ pub struct ScriptRuntime {
     trigger_idle_frames: BTreeMap<u16, u16>,
     last_trigger: Option<TriggerRequest>,
     last_instruction: Option<ScriptInstructionDebug>,
+    pending_battle: Option<BattleRequest>,
 }
 
 impl ScriptRuntime {
@@ -622,11 +631,12 @@ impl ScriptRuntime {
             trigger_idle_frames: BTreeMap::new(),
             last_trigger: None,
             last_instruction: None,
+            pending_battle: None,
         }
     }
 
     pub fn start(&mut self, trigger: TriggerRequest) -> bool {
-        if self.execution.is_some() || trigger.script_entry == 0 {
+        if self.execution.is_some() || self.pending_battle.is_some() || trigger.script_entry == 0 {
             return false;
         }
         self.execution = Some(Execution {
@@ -645,6 +655,7 @@ impl ScriptRuntime {
         self.call_stack.clear();
         self.last_trigger = Some(trigger);
         self.last_instruction = None;
+        self.pending_battle = None;
         true
     }
 
@@ -675,6 +686,10 @@ impl ScriptRuntime {
 
     pub fn is_active(&self) -> bool {
         self.execution.is_some()
+    }
+
+    pub fn is_waiting_for_battle(&self) -> bool {
+        self.pending_battle.is_some()
     }
 
     pub fn debug_snapshot(&self) -> ScriptDebugSnapshot {
@@ -717,8 +732,28 @@ impl ScriptRuntime {
         true
     }
 
+    /// Resume a script suspended by `BATTLE`, applying the original result branches.
+    pub fn resolve_battle(&mut self, result: BattleResult) -> bool {
+        let Some(request) = self.pending_battle.take() else {
+            return false;
+        };
+        let Some(execution) = self.execution.as_mut() else {
+            return false;
+        };
+        execution.entry = match result {
+            BattleResult::Won => execution.entry,
+            BattleResult::Lost if request.lost_entry != 0 => request.lost_entry,
+            BattleResult::Fled if request.flee_entry != 0 => request.flee_entry,
+            BattleResult::Lost | BattleResult::Fled => execution.entry,
+        };
+        true
+    }
+
     /// Execute until a message, completion, or unsupported instruction yields control.
     pub fn advance(&mut self) -> Option<ScriptEvent> {
+        if self.pending_battle.is_some() {
+            return None;
+        }
         let mut execution = self.execution?;
         if execution.wait_frames > 0 {
             execution.wait_frames -= 1;
@@ -822,9 +857,33 @@ impl ScriptRuntime {
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Delay);
                 }
-                SetBattleMusic | SetBattlefield | FadeOut | RestoreScreen => {
-                    execution.entry = execution.entry.wrapping_add(1)
+                StartBattle => {
+                    let request = BattleRequest {
+                        enemy_team: entry.operands[0],
+                        lost_entry: entry.operands[1],
+                        flee_entry: entry.operands[2],
+                        is_boss: entry.operands[2] == 0,
+                    };
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    self.pending_battle = Some(request);
+                    return Some(ScriptEvent::StartBattle(request));
                 }
+                SetBattleMusic => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetBattleMusic {
+                        music_id: entry.operands[0],
+                    }));
+                }
+                SetBattlefield => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetBattlefield {
+                        battlefield_id: entry.operands[0],
+                    }));
+                }
+                FadeOut | RestoreScreen => execution.entry = execution.entry.wrapping_add(1),
                 RideObjectSlow | RideObject | RideObjectFast => {
                     let repeat_entry = execution.entry;
                     execution.entry = execution.entry.wrapping_add(1);
@@ -1489,8 +1548,7 @@ impl ScriptRuntime {
                     });
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
-                StartBattle
-                | SetEquipmentEffect
+                SetEquipmentEffect
                 | EquipItem
                 | DamageEnemy
                 | PoisonEnemy
@@ -1685,7 +1743,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [87, 6, 72]);
+        assert_eq!(support_counts, [90, 4, 71]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -1697,7 +1755,7 @@ mod tests {
         assert_eq!(ScriptOpcode::FadeScene.support(), OpcodeSupport::Stub);
         assert_eq!(
             ScriptOpcode::StartBattle.support(),
-            OpcodeSupport::Unsupported
+            OpcodeSupport::Implemented
         );
         assert!(ScriptOpcode::PrintMessage.is_implemented());
         assert_eq!(ScriptOpcode::FadeScene.to_string(), "FADE_SCENE");
@@ -1747,6 +1805,82 @@ mod tests {
         assert_eq!(
             runtime.advance(),
             Some(ScriptEvent::Teleport { failure_entry: 47 })
+        );
+    }
+
+    #[test]
+    fn battle_suspends_execution_and_resumes_on_the_result_branch() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::StartBattle.raw(), 18, 4, 5],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [0, 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        let request = BattleRequest {
+            enemy_team: 18,
+            lost_entry: 4,
+            flee_entry: 5,
+            is_boss: false,
+        };
+        assert_eq!(runtime.advance(), Some(ScriptEvent::StartBattle(request)));
+        assert!(runtime.is_active());
+        assert!(runtime.is_waiting_for_battle());
+        assert_eq!(runtime.advance(), None);
+        assert!(runtime.resolve_battle(BattleResult::Lost));
+        assert!(!runtime.is_waiting_for_battle());
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn battle_win_continues_and_zero_flee_operand_marks_a_boss() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::StartBattle.raw(), 18, 40, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::StartBattle(BattleRequest {
+                enemy_team: 18,
+                lost_entry: 40,
+                flee_entry: 0,
+                is_boss: true,
+            }))
+        );
+        assert!(runtime.resolve_battle(BattleResult::Won));
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn battle_configuration_opcodes_yield_world_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::SetBattleMusic.raw(), 7, 0, 0],
+            [ScriptOpcode::SetBattlefield.raw(), 21, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetBattleMusic {
+                music_id: 7,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetBattlefield {
+                battlefield_id: 21,
+            }))
         );
     }
 
