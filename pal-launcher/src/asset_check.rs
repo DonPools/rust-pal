@@ -2,7 +2,7 @@ use pal_assets::fbp::FbpArchive;
 use pal_assets::mkf::MkfArchive;
 use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
 use pal_core::battle::{BattlePhase, BattleResult};
-use pal_core::script::{ScriptAction, ScriptEvent, ScriptRuntime};
+use pal_core::script::{ScriptAction, ScriptEvent, ScriptOpcode, ScriptRuntime};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
 use pal_desktop::window::{
     render_battle, render_tile_map, BattleRenderResources, BattleRenderState, Viewport,
@@ -94,6 +94,57 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         fbp_frame_count += 1;
     }
     assert!(fbp_frame_count > 0, "FBP.MKF contains no pictures");
+    let mut fbp_script_references = 0usize;
+    let mut fbp_black_fallbacks = 0usize;
+    let mut ending_sprite_references = std::collections::BTreeSet::new();
+    for index in 0..script_table.len() {
+        let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
+        let entry = script_table
+            .entry(entry_index)
+            .expect("script entry index disappeared");
+        if let Some(
+            ScriptOpcode::ShowFbp | ScriptOpcode::ScrollFbp | ScriptOpcode::ShowFbpWithSprite,
+        ) = ScriptOpcode::from_raw(entry.opcode)
+        {
+            if fbp_archive.frame(usize::from(entry.operands[0])).is_none() {
+                if entry.operands[0] == u16::MAX && entry.opcode != ScriptOpcode::ScrollFbp.raw() {
+                    fbp_black_fallbacks += 1;
+                } else {
+                    panic!(
+                        "script {index} ({:?}, operands {:04x?}) references unavailable FBP \
+                         picture {}",
+                        ScriptOpcode::from_raw(entry.opcode),
+                        entry.operands,
+                        entry.operands[0],
+                    );
+                }
+            }
+            fbp_script_references += 1;
+            if entry.opcode == ScriptOpcode::ShowFbpWithSprite.raw()
+                && !matches!(entry.operands[1], 0 | 0xffff)
+            {
+                ending_sprite_references.insert(entry.operands[1]);
+            }
+        }
+    }
+    for &sprite in &ending_sprite_references {
+        let sprite_index = usize::from(sprite);
+        let frame_count = role_sprites
+            .character_frame_count(sprite_index)
+            .unwrap_or_else(|| panic!("script references unavailable MGO sprite {sprite}"));
+        assert!(
+            (0..frame_count).all(|frame| role_sprites.decode_frame(sprite_index, frame).is_some()),
+            "ending effect MGO sprite {sprite} contains an invalid frame"
+        );
+    }
+    assert!(
+        fbp_script_references > 0,
+        "scripts contain no FBP picture references"
+    );
+    assert!(
+        fbp_black_fallbacks > 0,
+        "scripts do not exercise the FBP black-screen fallback"
+    );
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
     let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
     assert!(
@@ -1012,8 +1063,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!("music data passed: {music_count} standard MIDI songs");
     println!(
         "cutscene data passed: {} RNG animations, {rng_frame_count} decoded frames, \
-         {fbp_frame_count} FBP pictures",
-        rng_archive.animation_count()
+         {fbp_frame_count} FBP pictures, {fbp_script_references} script references, {} ending \
+         sprites, {fbp_black_fallbacks} black fallbacks",
+        rng_archive.animation_count(),
+        ending_sprite_references.len(),
     );
     println!("store data passed: {} items in store 0", first_store.len());
     println!(

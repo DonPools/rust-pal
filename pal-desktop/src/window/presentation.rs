@@ -79,7 +79,7 @@ pub(super) fn render_game(
                     event_ticks: ui.battle_event_ticks,
                 },
             );
-            ui.visual.apply_post_effects(renderer);
+            ui.visual.apply_post_effects(renderer, role_sprites);
             return;
         }
         let viewport = Viewport::from(game.camera);
@@ -151,5 +151,5 @@ pub(super) fn render_game(
             ui.ui_ticks,
         );
     }
-    ui.visual.apply_post_effects(renderer);
+    ui.visual.apply_post_effects(renderer, role_sprites);
 }

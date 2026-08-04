@@ -375,12 +375,14 @@ pub fn run_game_window<L>(
                 while accumulator >= tick {
                     let sampled = input.sample();
                     let visual_was_blocking = script_services.visual.is_blocking();
+                    let visual_scene_update_due = script_services.visual.scene_update_due();
                     if script_services.visual.needs_update() {
                         match script_services.visual.update(
                             renderer.screen(),
                             &palettes,
                             &fbp_archive,
                             &rng_archive,
+                            &role_sprites,
                         ) {
                             Ok(visual_changed) => changed |= visual_changed,
                             Err(error) => {
@@ -438,6 +440,21 @@ pub fn run_game_window<L>(
                     }
                     if visual_was_blocking || load_last_save_requested {
                         // Blocking script visuals advance independently until completion.
+                        if visual_scene_update_due {
+                            match game.update_auto_scripts(&script_services.auto_scripts) {
+                                Ok(auto_changed) => changed |= auto_changed,
+                                Err(error) => {
+                                    window.set_title(&auto_script_error_title(error));
+                                }
+                            }
+                            for sound_id in game.take_auto_script_sounds() {
+                                if !script_services.sound_effects.play(sound_id) {
+                                    window.set_title(&format!(
+                                        "Rust-PAL [invalid auto sound {sound_id}]"
+                                    ));
+                                }
+                            }
+                        }
                     } else if script_services.waiting_for_key {
                         if sampled.confirm || sampled.cancel || sampled.direction_pressed.is_some()
                         {

@@ -98,13 +98,20 @@ impl Renderer {
         true
     }
 
-    /// Reveal the current screen from top to bottom over a previous RGBA screen.
-    pub fn reveal_from_top(&mut self, previous: &[u8], rows: usize) -> bool {
+    /// Scroll the current screen down from the top while pushing out the previous screen.
+    pub fn scroll_down_from(&mut self, previous: &[u8], rows: usize) -> bool {
         if previous.len() != self.screen.len() {
             return false;
         }
-        let keep_from = rows.min(self.height) * self.width * 4;
-        self.screen[keep_from..].copy_from_slice(&previous[keep_from..]);
+        let rows = rows.min(self.height);
+        let row_bytes = self.width * 4;
+        let incoming_bytes = rows * row_bytes;
+        let retained_bytes = (self.height - rows) * row_bytes;
+        let current = self.screen.clone();
+        self.screen[..incoming_bytes]
+            .copy_from_slice(&current[retained_bytes..retained_bytes + incoming_bytes]);
+        self.screen[incoming_bytes..incoming_bytes + retained_bytes]
+            .copy_from_slice(&previous[..retained_bytes]);
         self.dirty = true;
         true
     }
@@ -357,5 +364,30 @@ mod tests {
         assert_eq!(&renderer.screen()[9 * 4..10 * 4], &[252, 0, 0, 255]);
 
         renderer.draw_big5_text(&font, &[0xb8], 0, 0, 1);
+    }
+
+    #[test]
+    fn fbp_scroll_pushes_the_previous_screen_down() {
+        let mut renderer = Renderer::new(Palette::default(), 1, 3);
+        let previous = [
+            1, 0, 0, 255, // old top
+            2, 0, 0, 255, // old middle
+            3, 0, 0, 255, // old bottom
+        ];
+        let target = [
+            4, 0, 0, 255, // new top
+            5, 0, 0, 255, // new middle
+            6, 0, 0, 255, // new bottom
+        ];
+        assert!(renderer.replace_screen(&target));
+        assert!(renderer.scroll_down_from(&previous, 1));
+        assert_eq!(
+            renderer.screen(),
+            [6, 0, 0, 255, 1, 0, 0, 255, 2, 0, 0, 255]
+        );
+
+        assert!(renderer.replace_screen(&target));
+        assert!(renderer.scroll_down_from(&previous, 3));
+        assert_eq!(renderer.screen(), target);
     }
 }

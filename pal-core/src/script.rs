@@ -376,7 +376,9 @@ pub enum ScriptVisual {
     FadeSceneWithUpdate {
         step: i16,
     },
-    FadeToCurrentScene,
+    FadeToCurrentScene {
+        speed: u16,
+    },
     ScrollFbp {
         index: u16,
         speed: u16,
@@ -1679,7 +1681,9 @@ impl ScriptRuntime {
                 FadeToCurrentScene => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
-                    return Some(ScriptEvent::Visual(ScriptVisual::FadeToCurrentScene));
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeToCurrentScene {
+                        speed: 2,
+                    }));
                 }
                 QuitGame => {
                     self.execution = None;
@@ -2112,7 +2116,9 @@ mod tests {
         );
         assert_eq!(
             runtime.advance(),
-            Some(ScriptEvent::Visual(ScriptVisual::FadeToCurrentScene))
+            Some(ScriptEvent::Visual(ScriptVisual::FadeToCurrentScene {
+                speed: 2
+            }))
         );
         assert_eq!(
             runtime.advance(),

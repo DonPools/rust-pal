@@ -130,8 +130,10 @@ pub(super) fn advance_script<L>(
                 scripts.branch_to(failure_entry);
             }
         }
-        Some(ScriptEvent::FadeScene { .. })
-            if !services.visual.queue(ScriptVisual::FadeToCurrentScene) =>
+        Some(ScriptEvent::FadeScene { speed })
+            if !services
+                .visual
+                .queue(ScriptVisual::FadeToCurrentScene { speed }) =>
         {
             set_title("Rust-PAL [visual effect is already active]");
         }

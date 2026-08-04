@@ -1,6 +1,8 @@
-use pal_assets::fbp::{FbpArchive, FBP_HEIGHT};
+use pal_assets::fbp::{FbpArchive, FBP_HEIGHT, FBP_PIXELS};
 use pal_assets::palette::{Palette, PaletteColor, PaletteSet};
 use pal_assets::rng::{RngArchive, RNG_FRAME_PIXELS};
+use pal_core::game::UPDATE_INTERVAL_MS;
+use pal_core::role::RoleSprites;
 use pal_core::script::ScriptVisual;
 use std::collections::HashMap;
 
@@ -22,6 +24,7 @@ pub(super) struct VisualState {
     wave_phase: i16,
     shake_remaining: u16,
     shake_level: u16,
+    ending_effect_sprite: u16,
 }
 
 enum VisualEffect {
@@ -30,6 +33,7 @@ enum VisualEffect {
         end: u8,
         progress: u32,
         total: u32,
+        update_scene: bool,
     },
     Tint {
         color: (u8, u8, u8),
@@ -48,6 +52,7 @@ enum VisualEffect {
         previous: Vec<u8>,
         progress: u32,
         total: u32,
+        draw_ending_sprite: bool,
     },
     Scroll {
         previous: Vec<u8>,
@@ -83,6 +88,7 @@ impl VisualState {
             wave_phase: 0,
             shake_remaining: 0,
             shake_level: 0,
+            ending_effect_sprite: 0,
         }
     }
 
@@ -102,6 +108,18 @@ impl VisualState {
         self.is_blocking() || self.screen_wave != 0
     }
 
+    pub(super) fn scene_update_due(&self) -> bool {
+        matches!(self.pending, Some(ScriptVisual::FadeSceneWithUpdate { .. }))
+            || matches!(
+                &self.effect,
+                Some(VisualEffect::Fade {
+                    update_scene: true,
+                    progress,
+                    ..
+                }) if *progress % duration_ticks(100) == 0
+            )
+    }
+
     pub(super) fn restore_original_environment(&mut self, night: bool, screen_wave: u16) {
         self.pending = None;
         self.effect = None;
@@ -117,6 +135,7 @@ impl VisualState {
         self.wave_phase = 0;
         self.shake_remaining = 0;
         self.shake_level = 0;
+        self.ending_effect_sprite = 0;
     }
 
     pub(super) fn update(
@@ -125,10 +144,11 @@ impl VisualState {
         palettes: &[PaletteSet],
         fbp: &FbpArchive,
         rng: &RngArchive,
+        role_sprites: &RoleSprites,
     ) -> Result<bool, String> {
         let mut changed = false;
         if let Some(command) = self.pending.take() {
-            self.start(command, current_screen, palettes, fbp, rng)?;
+            self.start(command, current_screen, palettes, fbp, rng, role_sprites)?;
             changed = true;
         }
 
@@ -159,6 +179,7 @@ impl VisualState {
         palettes: &[PaletteSet],
         fbp: &FbpArchive,
         rng: &RngArchive,
+        role_sprites: &RoleSprites,
     ) -> Result<(), String> {
         match command {
             ScriptVisual::Shake { frames, level } => {
@@ -198,7 +219,7 @@ impl VisualState {
                     start: self.tint_amount,
                     end: 64,
                     progress: 0,
-                    total: 32,
+                    total: duration_ticks(32 * 75),
                 });
             }
             ScriptVisual::FadeOut { speed } => {
@@ -206,7 +227,8 @@ impl VisualState {
                     start: self.brightness,
                     end: 0,
                     progress: 0,
-                    total: u32::from(speed).saturating_mul(12).max(1),
+                    total: duration_ticks(u64::from(speed) * 10 * 60),
+                    update_scene: false,
                 });
             }
             ScriptVisual::FadeIn { speed } => {
@@ -215,7 +237,8 @@ impl VisualState {
                     start: 0,
                     end: 64,
                     progress: 0,
-                    total: u32::from(speed).saturating_mul(12).max(1),
+                    total: duration_ticks(u64::from(speed) * 10 * 60),
+                    update_scene: false,
                 });
             }
             ScriptVisual::SetNightPalette { night } => self.night_palette = night,
@@ -224,18 +247,8 @@ impl VisualState {
                 self.wave_progression = progression;
             }
             ScriptVisual::ShowFbp { index, fade } => {
-                let target = fbp
-                    .frame(usize::from(index))
-                    .ok_or_else(|| format!("FBP picture {index} is unavailable"))?;
-                self.rgba_screen = None;
-                self.indexed_screen = Some(target);
-                if fade != 0 {
-                    self.effect = Some(VisualEffect::CrossFade {
-                        previous: current_screen.to_vec(),
-                        progress: 0,
-                        total: u32::from(fade).saturating_mul(8).max(1),
-                    });
-                }
+                self.ending_effect_sprite = 0;
+                self.start_fbp(index, fade, current_screen, fbp)?;
             }
             ScriptVisual::ToggleDayNightPalette { update_scene } => {
                 let from = self.palette(palettes)?;
@@ -245,7 +258,7 @@ impl VisualState {
                     from: Box::new(from),
                     to: Box::new(to),
                     progress: 0,
-                    total: if update_scene { 32 } else { 16 },
+                    total: palette_fade_ticks(update_scene),
                 });
             }
             ScriptVisual::SetPalette { index } => {
@@ -270,7 +283,7 @@ impl VisualState {
                     start,
                     end,
                     progress: 0,
-                    total: u32::from(delay.max(1)).saturating_mul(8),
+                    total: color_fade_ticks(delay),
                 });
             }
             ScriptVisual::RestoreScreen => {
@@ -291,16 +304,20 @@ impl VisualState {
                     start,
                     end,
                     progress: 0,
-                    total: 64u32.div_ceil(magnitude).max(1),
+                    total: 64u32
+                        .div_ceil(magnitude)
+                        .saturating_mul(duration_ticks(100)),
+                    update_scene: true,
                 });
             }
-            ScriptVisual::FadeToCurrentScene => {
+            ScriptVisual::FadeToCurrentScene { speed } => {
                 self.indexed_screen = None;
                 self.rgba_screen = None;
                 self.effect = Some(VisualEffect::CrossFade {
                     previous: current_screen.to_vec(),
                     progress: 0,
-                    total: 24,
+                    total: screen_fade_ticks(speed),
+                    draw_ending_sprite: false,
                 });
             }
             ScriptVisual::ScrollFbp { index, speed } => {
@@ -312,23 +329,52 @@ impl VisualState {
                 self.effect = Some(VisualEffect::Scroll {
                     previous: current_screen.to_vec(),
                     progress: 0,
-                    total: u32::from(speed.max(1)).saturating_mul(20),
+                    total: fbp_scroll_ticks(speed),
                 });
             }
             ScriptVisual::ShowFbpWithSprite {
                 index,
-                sprite: _,
+                sprite,
                 fade,
             } => {
-                self.start(
-                    ScriptVisual::ShowFbp { index, fade },
-                    current_screen,
-                    palettes,
-                    fbp,
-                    rng,
-                )?;
+                if let Some(sprite) = sprite {
+                    if sprite != 0
+                        && role_sprites
+                            .character_frame_count(usize::from(sprite))
+                            .is_none()
+                    {
+                        return Err(format!("ending effect sprite {sprite} is unavailable"));
+                    }
+                    self.ending_effect_sprite = sprite;
+                }
+                self.start_fbp(index, fade, current_screen, fbp)?;
             }
             ScriptVisual::BackupScreen => self.backup_screen = Some(current_screen.to_vec()),
+        }
+        Ok(())
+    }
+
+    fn start_fbp(
+        &mut self,
+        index: u16,
+        fade: u16,
+        current_screen: &[u8],
+        fbp: &FbpArchive,
+    ) -> Result<(), String> {
+        let target = match fbp.frame(usize::from(index)) {
+            Some(target) => target,
+            None if index == u16::MAX => vec![0; FBP_PIXELS],
+            None => return Err(format!("FBP picture {index} is unavailable")),
+        };
+        self.rgba_screen = None;
+        self.indexed_screen = Some(target);
+        if fade != 0 {
+            self.effect = Some(VisualEffect::CrossFade {
+                previous: current_screen.to_vec(),
+                progress: 0,
+                total: fbp_fade_ticks(fade),
+                draw_ending_sprite: true,
+            });
         }
         Ok(())
     }
@@ -344,6 +390,7 @@ impl VisualState {
                 end,
                 progress,
                 total,
+                ..
             } => {
                 *progress = progress.saturating_add(1).min(*total);
                 self.brightness = interpolate(*start, *end, *progress, *total);
@@ -454,14 +501,19 @@ impl VisualState {
         false
     }
 
-    pub(super) fn apply_post_effects(&self, renderer: &mut Renderer) {
+    pub(super) fn apply_post_effects(&self, renderer: &mut Renderer, role_sprites: &RoleSprites) {
+        let mut ending_sprite_tick = None;
         match &self.effect {
             Some(VisualEffect::CrossFade {
                 previous,
                 progress,
                 total,
+                draw_ending_sprite,
             }) => {
                 renderer.blend_from(previous, progress_64(*progress, *total));
+                if *draw_ending_sprite {
+                    ending_sprite_tick = Some(*progress);
+                }
             }
             Some(VisualEffect::Scroll {
                 previous,
@@ -472,7 +524,8 @@ impl VisualState {
                     .saturating_mul(FBP_HEIGHT)
                     .checked_div(*total as usize)
                     .unwrap_or(FBP_HEIGHT);
-                renderer.reveal_from_top(previous, rows);
+                renderer.scroll_down_from(previous, rows);
+                ending_sprite_tick = Some(*progress);
             }
             _ => {}
         }
@@ -495,7 +548,51 @@ impl VisualState {
             };
             renderer.apply_shake(x, y);
         }
+        if let Some(tick) = ending_sprite_tick {
+            let sprite_index = usize::from(self.ending_effect_sprite);
+            if sprite_index != 0 {
+                let frame_count = role_sprites
+                    .character_frame_count(sprite_index)
+                    .unwrap_or(0);
+                if frame_count != 0 {
+                    let frame = (tick as usize / ending_sprite_frame_ticks()) % frame_count;
+                    if let Some(bitmap) = role_sprites.decode_frame(sprite_index, frame) {
+                        renderer.blit_rle(&bitmap, 0, 0);
+                    }
+                }
+            }
+        }
     }
+}
+
+fn duration_ticks(milliseconds: u64) -> u32 {
+    u32::try_from(milliseconds.div_ceil(UPDATE_INTERVAL_MS))
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
+
+fn screen_fade_ticks(speed: u16) -> u32 {
+    duration_ticks(72 * (u64::from(speed) + 1) * 10)
+}
+
+fn fbp_fade_ticks(fade: u16) -> u32 {
+    duration_ticks(96 * (u64::from(fade) + 1) * 10)
+}
+
+fn fbp_scroll_ticks(speed: u16) -> u32 {
+    duration_ticks(220 * (800 / u64::from(speed.max(1))))
+}
+
+fn palette_fade_ticks(update_scene: bool) -> u32 {
+    duration_ticks(32 * if update_scene { 100 } else { 25 })
+}
+
+fn color_fade_ticks(delay: u16) -> u32 {
+    duration_ticks(64 * u64::from(delay.max(1)) * 10)
+}
+
+fn ending_sprite_frame_ticks() -> usize {
+    usize::try_from(150u64.div_ceil(UPDATE_INTERVAL_MS)).unwrap_or(usize::MAX)
 }
 
 fn interpolate(start: u8, end: u8, progress: u32, total: u32) -> u8 {
@@ -613,7 +710,7 @@ mod tests {
         result
     }
 
-    fn resources() -> (Vec<PaletteSet>, FbpArchive, RngArchive) {
+    fn resources() -> (Vec<PaletteSet>, FbpArchive, RngArchive, RoleSprites) {
         let mut palette = Palette::default();
         palette.colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
         palette.colors[2] = PaletteColor { r: 0, g: 63, b: 0 };
@@ -624,16 +721,23 @@ mod tests {
         let fbp = FbpArchive::new(&mkf(&[vec![1; RNG_FRAME_PIXELS]])).unwrap();
         let animation = mkf(&[raw_yj1(&[0x06, 2, 2, 0x00])]);
         let rng = RngArchive::new(&mkf(&[animation])).unwrap();
-        (palettes, fbp, rng)
+        let mut sprite = Vec::new();
+        sprite.extend_from_slice(&2u16.to_le_bytes());
+        sprite.extend_from_slice(&0u16.to_le_bytes());
+        sprite.extend_from_slice(&[1, 0, 1, 0, 1, 2]);
+        let role_sprites = RoleSprites::load(&mkf(&[Vec::new(), raw_yj1(&sprite)])).unwrap();
+        (palettes, fbp, rng, role_sprites)
     }
 
     #[test]
     fn fbp_and_rng_commands_replace_and_increment_the_indexed_screen() {
-        let (palettes, fbp, rng) = resources();
+        let (palettes, fbp, rng, role_sprites) = resources();
         let current = vec![252; RNG_FRAME_PIXELS * 4];
         let mut visual = VisualState::new();
         assert!(visual.queue(ScriptVisual::ShowFbp { index: 0, fade: 0 }));
-        assert!(visual.update(&current, &palettes, &fbp, &rng).unwrap());
+        assert!(visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap());
         assert!(!visual.is_blocking());
 
         let mut renderer = Renderer::new(palettes[0].day.clone(), 320, 200);
@@ -647,7 +751,7 @@ mod tests {
             speed: 16,
         }));
         visual
-            .update(renderer.screen(), &palettes, &fbp, &rng)
+            .update(renderer.screen(), &palettes, &fbp, &rng, &role_sprites)
             .unwrap();
         assert!(!visual.is_blocking());
         assert!(visual.render_override(&mut renderer));
@@ -657,13 +761,15 @@ mod tests {
 
     #[test]
     fn fades_block_until_their_final_brightness() {
-        let (palettes, fbp, rng) = resources();
+        let (palettes, fbp, rng, role_sprites) = resources();
         let current = vec![0; RNG_FRAME_PIXELS * 4];
         let mut visual = VisualState::new();
         assert!(visual.queue(ScriptVisual::FadeOut { speed: 1 }));
         let mut ticks = 0;
         while visual.is_blocking() {
-            visual.update(&current, &palettes, &fbp, &rng).unwrap();
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
             ticks += 1;
         }
         assert_eq!(ticks, 12);
@@ -671,8 +777,109 @@ mod tests {
 
         assert!(visual.queue(ScriptVisual::FadeIn { speed: 1 }));
         while visual.is_blocking() {
-            visual.update(&current, &palettes, &fbp, &rng).unwrap();
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
         }
         assert_eq!(visual.brightness, 64);
+    }
+
+    #[test]
+    fn original_visual_delays_scale_with_their_speed_operands() {
+        assert_eq!(screen_fade_ticks(0), 15);
+        assert_eq!(screen_fade_ticks(4), 72);
+        assert_eq!(fbp_fade_ticks(1), 39);
+        assert_eq!(fbp_scroll_ticks(4), 880);
+        assert_eq!(palette_fade_ticks(false), 16);
+        assert_eq!(palette_fade_ticks(true), 64);
+        assert_eq!(color_fade_ticks(1), 13);
+        assert_eq!(duration_ticks(32 * 75), 48);
+        assert_eq!(ending_sprite_frame_ticks(), 3);
+    }
+
+    #[test]
+    fn scene_fade_schedules_original_ten_fps_world_updates() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![0; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+        assert!(visual.queue(ScriptVisual::FadeSceneWithUpdate { step: 1 }));
+        let mut ticks = 0;
+        let mut scene_updates = 0;
+        while visual.is_blocking() {
+            scene_updates += usize::from(visual.scene_update_due());
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+            ticks += 1;
+        }
+        assert_eq!(ticks, 128);
+        assert_eq!(scene_updates, 64);
+    }
+
+    #[test]
+    fn fbp_effect_sprite_is_persistent_and_drawn_during_transitions() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![0; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+        assert!(visual.queue(ScriptVisual::ShowFbpWithSprite {
+            index: 0,
+            sprite: Some(1),
+            fade: 1,
+        }));
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+
+        let mut renderer = Renderer::new(palettes[0].day.clone(), 320, 200);
+        assert!(visual.render_override(&mut renderer));
+        visual.apply_post_effects(&mut renderer, &role_sprites);
+        assert_eq!(&renderer.screen()[..4], &[0, 252, 0, 255]);
+
+        while visual.is_blocking() {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+        }
+        assert!(visual.queue(ScriptVisual::ShowFbpWithSprite {
+            index: 0,
+            sprite: None,
+            fade: 1,
+        }));
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+        assert!(visual.render_override(&mut renderer));
+        visual.apply_post_effects(&mut renderer, &role_sprites);
+        assert_eq!(&renderer.screen()[..4], &[0, 252, 0, 255]);
+
+        while visual.is_blocking() {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+        }
+        assert!(visual.queue(ScriptVisual::ShowFbp { index: 0, fade: 1 }));
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+        assert!(visual.render_override(&mut renderer));
+        visual.apply_post_effects(&mut renderer, &role_sprites);
+        assert_ne!(&renderer.screen()[..4], &[0, 252, 0, 255]);
+    }
+
+    #[test]
+    fn show_fbp_max_index_preserves_the_original_black_screen_fallback() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![252; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+        assert!(visual.queue(ScriptVisual::ShowFbp {
+            index: u16::MAX,
+            fade: 0,
+        }));
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+        let mut renderer = Renderer::new(palettes[0].day.clone(), 320, 200);
+        assert!(visual.render_override(&mut renderer));
+        assert_eq!(&renderer.screen()[..4], &[0, 0, 0, 255]);
     }
 }
