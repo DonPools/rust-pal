@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::bitmap::Bitmap;
+use pal_assets::fbp::FbpArchive;
+use pal_assets::palette::PaletteSet;
 use pal_assets::rle::RleBitmap;
+use pal_assets::rng::RngArchive;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::game::Camera;
@@ -60,5 +63,9 @@ pub struct GameResources {
     pub voc_mkf: Vec<u8>,
     pub midi_mkf: Vec<u8>,
     pub sound_font: Vec<u8>,
+    pub palettes: Vec<PaletteSet>,
+    pub fbp_archive: FbpArchive,
+    pub rng_archive: RngArchive,
+    pub original_save_dir: PathBuf,
     pub snapshot_path: PathBuf,
 }

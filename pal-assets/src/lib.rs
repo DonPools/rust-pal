@@ -3,6 +3,7 @@
 
 pub mod battle;
 pub mod bitmap;
+pub mod fbp;
 pub mod magic;
 pub mod midi;
 pub mod mkf;
@@ -10,6 +11,8 @@ pub mod objects;
 pub mod palette;
 pub mod player_roles;
 pub mod rle;
+pub mod rng;
+pub mod save;
 pub mod scene;
 pub mod script;
 pub mod sprite;

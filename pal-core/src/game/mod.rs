@@ -6,6 +6,7 @@ use pal_assets::battle::BattleData;
 use pal_assets::magic::Magics;
 use pal_assets::objects::GlobalObjects;
 use pal_assets::player_roles::{PlayerRole, PlayerRoles, PLAYER_ROLE_COUNT};
+use pal_assets::save::OriginalSave;
 use pal_assets::script::ScriptTable;
 use pal_assets::store::Stores;
 
@@ -69,10 +70,12 @@ pub struct GameState<M = Map> {
     inactive_objects: BTreeMap<u16, SceneObject>,
     scene_enter_scripts: BTreeMap<u16, u16>,
     scene_teleport_scripts: BTreeMap<u16, u16>,
+    scene_maps: BTreeMap<u16, u16>,
     pending_auto_sounds: Vec<u16>,
     script_frame: u32,
     viewport_locked: bool,
     party_followers: Vec<Role>,
+    extra_follower_ids: Vec<u16>,
     party_trail: [TrailPoint; MAX_PARTY_MEMBERS],
     pub camera: Camera,
 }
@@ -120,10 +123,12 @@ impl<M: CollisionMap> GameState<M> {
             inactive_objects: BTreeMap::new(),
             scene_enter_scripts: BTreeMap::new(),
             scene_teleport_scripts: BTreeMap::new(),
+            scene_maps: BTreeMap::new(),
             pending_auto_sounds: Vec::new(),
             script_frame: 0,
             viewport_locked: false,
             party_followers: Vec::new(),
+            extra_follower_ids: Vec::new(),
             party_trail: [initial_trail; MAX_PARTY_MEMBERS],
             camera: Camera::new(viewport_width, viewport_height),
         };
@@ -1218,6 +1223,15 @@ impl<M: CollisionMap> GameState<M> {
             .or_insert(default_entry)
     }
 
+    pub fn scene_map_override(&self, scene_number: u16) -> Option<u16> {
+        self.scene_maps.get(&scene_number).copied()
+    }
+
+    pub fn replace_map(&mut self, map: M) {
+        self.map = map;
+        self.follow_player();
+    }
+
     pub fn snapshot(&self) -> GameSnapshot {
         GameSnapshot {
             scene_number: self.scene_number,
@@ -1240,11 +1254,13 @@ impl<M: CollisionMap> GameState<M> {
             inactive_objects: self.inactive_objects.clone(),
             scene_enter_scripts: self.scene_enter_scripts.clone(),
             scene_teleport_scripts: self.scene_teleport_scripts.clone(),
+            scene_maps: self.scene_maps.clone(),
             script_frame: self.script_frame,
             viewport_locked: self.viewport_locked,
             camera_x: self.camera.x,
             camera_y: self.camera.y,
             party_followers: self.party_followers.clone(),
+            extra_follower_ids: self.extra_follower_ids.clone(),
             party_trail: self.party_trail,
             player_roles: self.player_roles.clone(),
         }
@@ -1290,6 +1306,7 @@ impl<M: CollisionMap> GameState<M> {
                 .collect(),
             scene_enter_scripts: snapshot.scene_enter_scripts.into_iter().collect(),
             scene_teleport_scripts: snapshot.scene_teleport_scripts.into_iter().collect(),
+            scene_maps: snapshot.scene_maps.into_iter().collect(),
             script_frame: snapshot.script_frame,
             viewport_locked: snapshot.viewport_locked,
             camera_x: snapshot.camera_x,
@@ -1299,6 +1316,7 @@ impl<M: CollisionMap> GameState<M> {
                 .iter()
                 .map(SavedRole::from)
                 .collect(),
+            extra_follower_ids: snapshot.extra_follower_ids,
             party_trail: snapshot
                 .party_trail
                 .iter()
@@ -1328,6 +1346,7 @@ impl<M: CollisionMap> GameState<M> {
             || data.scene_number == 0
             || data.scene_enter_scripts.len() > MAX_SCENES
             || data.scene_teleport_scripts.len() > MAX_SCENES
+            || data.scene_maps.len() > MAX_SCENES
             || data.inventory.len() > MAX_INVENTORY
             || data.item_use_scripts.len() > MAX_INVENTORY
             || data.item_equip_scripts.len() > MAX_INVENTORY
@@ -1343,6 +1362,7 @@ impl<M: CollisionMap> GameState<M> {
         let inactive_object_count = data.inactive_objects.len();
         let scene_enter_script_count = data.scene_enter_scripts.len();
         let scene_teleport_script_count = data.scene_teleport_scripts.len();
+        let scene_map_count = data.scene_maps.len();
         let saved_roles: [PlayerRole; PLAYER_ROLE_COUNT] = data
             .player_roles
             .into_iter()
@@ -1360,7 +1380,18 @@ impl<M: CollisionMap> GameState<M> {
             .into_iter()
             .map(SavedRole::into_role)
             .collect::<Option<Vec<_>>>()?;
-        if party_followers.len() != party.members().len().saturating_sub(1) {
+        if data.extra_follower_ids.len() > 2
+            || party.members().len() + data.extra_follower_ids.len() > MAX_PARTY_MEMBERS
+            || data.extra_follower_ids.iter().any(|&role_id| {
+                usize::from(role_id) >= PLAYER_ROLE_COUNT
+                    || party
+                        .members()
+                        .iter()
+                        .any(|member| member.role_id == role_id)
+            })
+            || party_followers.len()
+                != party.members().len().saturating_sub(1) + data.extra_follower_ids.len()
+        {
             return None;
         }
         let party_trail = data
@@ -1426,11 +1457,16 @@ impl<M: CollisionMap> GameState<M> {
             .scene_teleport_scripts
             .into_iter()
             .collect::<BTreeMap<_, _>>();
+        let scene_maps = data.scene_maps.into_iter().collect::<BTreeMap<_, _>>();
         if inactive_objects.len() != inactive_object_count
             || scene_enter_scripts.len() != scene_enter_script_count
             || scene_teleport_scripts.len() != scene_teleport_script_count
+            || scene_maps.len() != scene_map_count
             || scene_enter_scripts.contains_key(&0)
             || scene_teleport_scripts.contains_key(&0)
+            || scene_maps
+                .iter()
+                .any(|(&scene, &map)| scene == 0 || map == 0)
         {
             return None;
         }
@@ -1459,11 +1495,13 @@ impl<M: CollisionMap> GameState<M> {
             inactive_objects,
             scene_enter_scripts,
             scene_teleport_scripts,
+            scene_maps,
             script_frame: data.script_frame,
             viewport_locked: data.viewport_locked,
             camera_x: data.camera_x,
             camera_y: data.camera_y,
             party_followers,
+            extra_follower_ids: data.extra_follower_ids,
             party_trail,
             player_roles: Some(player_roles),
         })
@@ -1494,15 +1532,188 @@ impl<M: CollisionMap> GameState<M> {
         self.inactive_objects = snapshot.inactive_objects;
         self.scene_enter_scripts = snapshot.scene_enter_scripts;
         self.scene_teleport_scripts = snapshot.scene_teleport_scripts;
+        self.scene_maps = snapshot.scene_maps;
         self.script_frame = snapshot.script_frame;
         self.viewport_locked = snapshot.viewport_locked;
         self.camera.x = snapshot.camera_x;
         self.camera.y = snapshot.camera_y;
         self.party_followers = snapshot.party_followers;
+        self.extra_follower_ids = snapshot.extra_follower_ids;
         self.party_trail = snapshot.party_trail;
         self.player_roles = snapshot.player_roles;
         self.pending_auto_sounds.clear();
         self.follow_player();
+    }
+
+    /// Restore mutable game state carried by an original DOS or Win95 `.rpg` save.
+    ///
+    /// The platform layer supplies render-ready event objects because validating
+    /// their sprite frame counts requires `MGO.MKF`.
+    pub fn restore_original_save(
+        &mut self,
+        save: OriginalSave,
+        map: M,
+        all_event_objects: Vec<SceneObject>,
+    ) -> bool {
+        if all_event_objects.len() != save.event_objects.len() {
+            return false;
+        }
+        let scene_index = match usize::from(save.scene_number).checked_sub(1) {
+            Some(index) => index,
+            None => return false,
+        };
+        let (Some(scene), Some(next_scene)) = (
+            save.scenes.get(scene_index),
+            save.scenes.get(scene_index + 1),
+        ) else {
+            return false;
+        };
+        let active_start = usize::from(scene.event_object_index);
+        let active_end = usize::from(next_scene.event_object_index);
+        if active_start > active_end || active_end > all_event_objects.len() {
+            return false;
+        }
+
+        let role_ids = save.party[..save.party_member_count()]
+            .iter()
+            .map(|member| member.role_id)
+            .collect::<Vec<_>>();
+        let extra_follower_ids = save.party[save.party_member_count()
+            ..save.party_member_count() + usize::from(save.follower_count)]
+            .iter()
+            .map(|member| member.role_id)
+            .collect::<Vec<_>>();
+        if extra_follower_ids
+            .iter()
+            .any(|role_id| role_ids.contains(role_id))
+        {
+            return false;
+        }
+        let mut party = Party::default();
+        if !party.replace(&role_ids, &save.player_roles) {
+            return false;
+        }
+        let Some(direction) = Direction::from_pal(save.party_direction) else {
+            return false;
+        };
+        let Some(leader) = save.player_roles.role(usize::from(role_ids[0])) else {
+            return false;
+        };
+        let player = Role {
+            sprite_index: usize::from(leader.scene_sprite_num),
+            world_x: i32::from(save.viewport_x) + i32::from(save.party[0].x),
+            world_y: i32::from(save.viewport_y) + i32::from(save.party[0].y),
+            direction,
+            anim_frame: 0,
+            frames_per_direction: leader.frames_per_direction(),
+        };
+        let trail = match save
+            .trail
+            .iter()
+            .map(|point| {
+                Some(TrailPoint {
+                    world_x: i32::from(point.x),
+                    world_y: i32::from(point.y),
+                    direction: Direction::from_pal(point.direction)?,
+                })
+            })
+            .take(MAX_PARTY_MEMBERS)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|points| points.try_into().ok())
+        {
+            Some(trail) => trail,
+            None => return false,
+        };
+
+        let mut active_objects = Vec::with_capacity(active_end - active_start);
+        let mut inactive_objects = BTreeMap::new();
+        for (index, object) in all_event_objects.into_iter().enumerate() {
+            if (active_start..active_end).contains(&index) {
+                active_objects.push(object);
+            } else {
+                inactive_objects.insert(object.id, object);
+            }
+        }
+        let inventory = save
+            .inventory
+            .iter()
+            .filter(|entry| entry.item_id != 0 && entry.amount != 0)
+            .map(|entry| (entry.item_id, entry.amount))
+            .collect::<Vec<_>>();
+        if inventory.len() > MAX_INVENTORY {
+            return false;
+        }
+        let scene_enter_scripts = save
+            .scenes
+            .iter()
+            .enumerate()
+            .filter(|(_, scene)| scene.script_on_enter != 0)
+            .filter_map(|(index, scene)| {
+                Some((
+                    u16::try_from(index).ok()?.checked_add(1)?,
+                    scene.script_on_enter,
+                ))
+            })
+            .collect();
+        let scene_teleport_scripts = save
+            .scenes
+            .iter()
+            .enumerate()
+            .filter(|(_, scene)| scene.script_on_teleport != 0)
+            .filter_map(|(index, scene)| {
+                Some((
+                    u16::try_from(index).ok()?.checked_add(1)?,
+                    scene.script_on_teleport,
+                ))
+            })
+            .collect();
+        let scene_maps = save
+            .scenes
+            .iter()
+            .enumerate()
+            .filter(|(_, scene)| scene.map_num != 0)
+            .filter_map(|(index, scene)| {
+                Some((u16::try_from(index).ok()?.checked_add(1)?, scene.map_num))
+            })
+            .collect();
+        let role_experience =
+            std::array::from_fn(|role| u32::from(save.experience[0][role].experience));
+
+        self.scene_number = save.scene_number;
+        self.map = map;
+        self.player = player;
+        self.scene_objects = active_objects;
+        self.pending_trigger = None;
+        self.party = party;
+        self.current_music = (save.music_number != 0).then_some(save.music_number);
+        self.current_battle_music = save.battle_music_number;
+        self.current_battlefield = save.battlefield_number;
+        self.role_experience = role_experience;
+        self.growth_random_state = 0xa341_316c;
+        self.player_roles = Some(save.player_roles);
+        self.global_objects = Some(save.objects);
+        self.active_battle = None;
+        self.cash = save.cash;
+        self.inventory = inventory;
+        self.item_use_scripts.clear();
+        self.item_equip_scripts.clear();
+        self.magic_use_scripts.clear();
+        self.magic_success_scripts.clear();
+        self.equipment_effects.clear();
+        self.current_equipment_slot = None;
+        self.inactive_objects = inactive_objects;
+        self.scene_enter_scripts = scene_enter_scripts;
+        self.scene_teleport_scripts = scene_teleport_scripts;
+        self.scene_maps = scene_maps;
+        self.pending_auto_sounds.clear();
+        self.script_frame = 0;
+        self.viewport_locked = false;
+        self.party_trail = trail;
+        self.extra_follower_ids = extra_follower_ids;
+        self.camera.x = i32::from(save.viewport_x);
+        self.camera.y = i32::from(save.viewport_y);
+        self.rebuild_party_followers();
+        true
     }
 
     pub fn take_trigger(&mut self) -> Option<TriggerRequest> {
@@ -1816,6 +2027,16 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_teleport_scripts.insert(scene_number, entry);
                 }
             }
+            ScriptAction::SetSceneMap {
+                scene_number,
+                map_number,
+            } => {
+                let scene_number = scene_number.unwrap_or(self.scene_number);
+                if scene_number == 0 || map_number == 0 {
+                    return false;
+                }
+                self.scene_maps.insert(scene_number, map_number);
+            }
             ScriptAction::WalkObjectTo { .. } => return false,
             ScriptAction::WalkPlayerTo { .. } => return false,
             ScriptAction::RideObjectTo { .. } => return false,
@@ -1849,6 +2070,30 @@ impl<M: CollisionMap> GameState<M> {
                 self.player.sprite_index = usize::from(leader.attributes.scene_sprite_num);
                 self.player.frames_per_direction = leader.attributes.frames_per_direction();
                 self.player.anim_frame = 0;
+                self.extra_follower_ids.clear();
+                self.rebuild_party_followers();
+                self.collapse_party();
+            }
+            ScriptAction::SetPartyFollowers { followers } => {
+                let follower_ids = followers.into_iter().flatten().collect::<Vec<_>>();
+                let Some(player_roles) = self.player_roles.as_ref() else {
+                    return false;
+                };
+                if follower_ids.len() > 2
+                    || self.party.members().len() + follower_ids.len() > MAX_PARTY_MEMBERS
+                    || follower_ids.iter().enumerate().any(|(index, &role_id)| {
+                        player_roles.role(usize::from(role_id)).is_none()
+                            || self
+                                .party
+                                .members()
+                                .iter()
+                                .any(|member| member.role_id == role_id)
+                            || follower_ids[..index].contains(&role_id)
+                    })
+                {
+                    return false;
+                }
+                self.extra_follower_ids = follower_ids;
                 self.rebuild_party_followers();
                 self.collapse_party();
             }
@@ -2415,6 +2660,10 @@ impl<M: CollisionMap> GameState<M> {
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
+                AutoScriptNoOp => {
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
                 PrintMessage => {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
@@ -2558,8 +2807,7 @@ impl<M: CollisionMap> GameState<M> {
                 | PlayCdMusic
                 | ScrollFbp
                 | ShowFbpWithSprite
-                | BackupScreen
-                | AutoScriptNoOp => {
+                | BackupScreen => {
                     return Err(AutoScriptError::Unsupported {
                         object_id,
                         entry: script_entry,
@@ -2627,6 +2875,7 @@ impl<M: CollisionMap> GameState<M> {
                         depth + 1,
                     )?;
                 }
+                AutoScriptNoOp => {}
                 SetObjectPose => {
                     let Some(object) = self.object_mut(object_id) else {
                         return Err(AutoScriptError::MissingObject {
@@ -2864,7 +3113,6 @@ impl<M: CollisionMap> GameState<M> {
                 | ScrollFbp
                 | ShowFbpWithSprite
                 | BackupScreen
-                | AutoScriptNoOp
                 | PrintMessage => {
                     return Err(AutoScriptError::Unsupported {
                         object_id,
@@ -2899,18 +3147,29 @@ impl<M: CollisionMap> GameState<M> {
     }
 
     fn rebuild_party_followers(&mut self) {
-        self.party_followers = self
+        let mut follower_roles = self
             .party
             .members()
             .iter()
             .skip(1)
-            .map(|member| Role {
-                sprite_index: usize::from(member.attributes.scene_sprite_num),
+            .map(|member| member.attributes.clone())
+            .collect::<Vec<_>>();
+        if let Some(roles) = &self.player_roles {
+            follower_roles.extend(
+                self.extra_follower_ids
+                    .iter()
+                    .filter_map(|&role_id| roles.role(usize::from(role_id)).cloned()),
+            );
+        }
+        self.party_followers = follower_roles
+            .into_iter()
+            .map(|attributes| Role {
+                sprite_index: usize::from(attributes.scene_sprite_num),
                 world_x: self.player.world_x,
                 world_y: self.player.world_y,
                 direction: self.player.direction,
                 anim_frame: 0,
-                frames_per_direction: member.attributes.frames_per_direction(),
+                frames_per_direction: attributes.frames_per_direction(),
             })
             .collect();
         self.update_party_followers(false);
@@ -3418,6 +3677,24 @@ mod tests {
             ),
             (320, 239)
         );
+        assert!(state.apply_script_action(ScriptAction::SetPartyFollowers {
+            followers: [Some(3), None],
+        }));
+        assert_eq!(state.party_followers().len(), 2);
+        assert!(!state.apply_script_action(ScriptAction::SetPartyFollowers {
+            followers: [Some(2), None],
+        }));
+        assert!(state.apply_script_action(ScriptAction::SetSceneMap {
+            scene_number: None,
+            map_number: 17,
+        }));
+        assert_eq!(state.scene_map_override(state.scene_number), Some(17));
+        let snapshot = state
+            .decode_snapshot(&state.encode_snapshot().unwrap())
+            .unwrap();
+        assert_eq!(snapshot.scene_map_override(), Some(17));
+        state.restore_snapshot(snapshot, test_map());
+        assert_eq!(state.party_followers().len(), 2);
 
         assert!(state.update(GameInput {
             direction: Some(Direction::East),
@@ -4122,7 +4399,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":15", "\"version\":14");
+            .replace("\"version\":16", "\"version\":15");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 
@@ -4428,5 +4705,53 @@ mod tests {
         let mut camera = Camera::new(320, 200);
         camera.follow((50, 40), (100, 80));
         assert_eq!((camera.x, camera.y), (0, 0));
+    }
+
+    #[test]
+    fn original_save_restores_party_economy_scripts_and_viewport() {
+        use pal_assets::save::{OriginalSave, DOS_SAVE_FIXED_SIZE};
+
+        fn write_u16(data: &mut [u8], offset: usize, value: u16) {
+            data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        fn write_i16(data: &mut [u8], offset: usize, value: i16) {
+            data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+
+        let mut bytes = vec![0; DOS_SAVE_FIXED_SIZE];
+        write_i16(&mut bytes, 2, 100);
+        write_i16(&mut bytes, 4, 50);
+        write_u16(&mut bytes, 6, 0);
+        write_u16(&mut bytes, 8, 1);
+        write_u16(&mut bytes, 12, Direction::South as u16);
+        write_u16(&mut bytes, 14, 31);
+        write_u16(&mut bytes, 16, 5);
+        write_u16(&mut bytes, 18, 9);
+        bytes[40..44].copy_from_slice(&1234u32.to_le_bytes());
+        write_u16(&mut bytes, 44, 0);
+        write_i16(&mut bytes, 46, 160);
+        write_i16(&mut bytes, 48, 112);
+        write_u16(&mut bytes, 124, 42);
+        write_u16(&mut bytes, 1728, 99);
+        write_u16(&mut bytes, 1730, 3);
+        write_u16(&mut bytes, 3264, 12);
+        write_u16(&mut bytes, 3266, 123);
+        write_u16(&mut bytes, 3268, 456);
+
+        let save = OriginalSave::parse(&bytes).unwrap();
+        let mut state = state(&[]);
+        assert!(state.restore_original_save(save, test_map(), Vec::new()));
+        assert_eq!(state.scene_number, 1);
+        assert_eq!((state.camera.x, state.camera.y), (100, 50));
+        assert_eq!((state.player.world_x, state.player.world_y), (260, 162));
+        assert_eq!(state.party.members()[0].role_id, 0);
+        assert_eq!(state.current_music, Some(31));
+        assert_eq!(state.current_battle_music, 5);
+        assert_eq!(state.current_battlefield, 9);
+        assert_eq!(state.cash, 1234);
+        assert_eq!(state.inventory_count(99), 3);
+        assert_eq!(state.player_experience(0), Some(42));
+        assert_eq!(state.scene_enter_script(0), 123);
+        assert_eq!(state.scene_teleport_script(0), 456);
     }
 }

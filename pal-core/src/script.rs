@@ -157,9 +157,9 @@ define_script_opcodes! {
     SetTemporaryBattleSprite = 0x0031, "SPRITE_TEMP", "Temporarily change a player's battle sprite.", Unsupported;
     CollectEnemy = 0x0033, "COLLECT_ENEMY", "Collect an enemy for later conversion into items.", Unsupported;
     TransmuteCollectedEnemies = 0x0034, "COLLECT_ITEM", "Convert collected enemies into items.", Unsupported;
-    ShakeScreen = 0x0035, "SHAKE", "Shake the screen for the requested duration and level.", Unsupported;
-    SelectRngAnimation = 0x0036, "RNG_SELECT", "Select the current RNG animation resource.", Unsupported;
-    PlayRngAnimation = 0x0037, "RNG_PLAY", "Play frames from the selected RNG animation.", Unsupported;
+    ShakeScreen = 0x0035, "SHAKE", "Shake the screen for the requested duration and level.", Implemented;
+    SelectRngAnimation = 0x0036, "RNG_SELECT", "Select the current RNG animation resource.", Implemented;
+    PlayRngAnimation = 0x0037, "RNG_PLAY", "Play frames from the selected RNG animation.", Implemented;
     TeleportParty = 0x0038, "TELEPORT", "Run the current scene's teleport script or branch on failure.", Implemented;
     DrainEnemyHp = 0x0039, "DRAIN_HP", "Drain HP from an enemy into the acting player.", Unsupported;
     FleeBattle = 0x003A, "FLEE", "Attempt to flee from battle.", Unsupported;
@@ -180,14 +180,14 @@ define_script_opcodes! {
     SetBattlefield = 0x004A, "BATTLEFIELD", "Set the battlefield number for the next battle.", Implemented;
     HideObjectShort = 0x004B, "OBJ_HIDE_SHORT", "Hide the current event object for a short period.", Implemented;
     ChasePlayer = 0x004C, "OBJ_CHASE", "Make the current event object chase the player.", Implemented;
-    WaitForKey = 0x004D, "WAIT_KEY", "Wait until the player presses a key.", Unsupported;
-    LoadLastSave = 0x004E, "LOAD_LAST", "Load the most recent saved game.", Unsupported;
-    FadeToRed = 0x004F, "FADE_RED", "Fade the screen to red for game over.", Unsupported;
-    FadeOut = 0x0050, "FADE_OUT", "Fade the screen out.", Stub;
-    FadeIn = 0x0051, "FADE_IN", "Fade the screen in.", Unsupported;
+    WaitForKey = 0x004D, "WAIT_KEY", "Wait until the player presses a key.", Implemented;
+    LoadLastSave = 0x004E, "LOAD_LAST", "Load the most recent saved game.", Implemented;
+    FadeToRed = 0x004F, "FADE_RED", "Fade the screen to red for game over.", Implemented;
+    FadeOut = 0x0050, "FADE_OUT", "Fade the screen out.", Implemented;
+    FadeIn = 0x0051, "FADE_IN", "Fade the screen in.", Implemented;
     HideObject = 0x0052, "OBJ_HIDE", "Hide the current event object for a configurable period.", Implemented;
-    UseDayPalette = 0x0053, "PALETTE_DAY", "Switch to the day palette.", Unsupported;
-    UseNightPalette = 0x0054, "PALETTE_NIGHT", "Switch to the night palette.", Unsupported;
+    UseDayPalette = 0x0053, "PALETTE_DAY", "Switch to the day palette.", Implemented;
+    UseNightPalette = 0x0054, "PALETTE_NIGHT", "Switch to the night palette.", Implemented;
     AddMagic = 0x0055, "MAGIC_ADD", "Teach a magic object to a player.", Implemented;
     RemoveMagic = 0x0056, "MAGIC_REMOVE", "Remove a magic object from a player.", Implemented;
     ScaleMagicByMp = 0x0057, "MAGIC_SCALE_MP", "Set magic base damage from the consumed MP amount.", Unsupported;
@@ -216,11 +216,11 @@ define_script_opcodes! {
     OffsetParty = 0x006E, "PARTY_STEP", "Move the party by a signed pixel offset.", Implemented;
     SyncObjectState = 0x006F, "OBJ_STATE_SYNC", "Copy a matching state from another event object.", Implemented;
     WalkParty = 0x0070, "PARTY_WALK", "Walk the party to a tile at normal script speed.", Implemented;
-    SetScreenWave = 0x0071, "SCREEN_WAVE", "Configure the screen wave effect.", Unsupported;
-    FadeScene = 0x0073, "FADE_SCENE", "Fade from the backed-up screen to the current scene.", Stub;
+    SetScreenWave = 0x0071, "SCREEN_WAVE", "Configure the screen wave effect.", Implemented;
+    FadeScene = 0x0073, "FADE_SCENE", "Fade from the backed-up screen to the current scene.", Implemented;
     JumpIfPartyNotFullHp = 0x0074, "JNOT_FULL_HP", "Jump when any party member is below maximum HP.", Implemented;
     SetParty = 0x0075, "PARTY_SET", "Replace the active party membership.", Implemented;
-    ShowFbp = 0x0076, "FBP_SHOW", "Show an FBP full-screen picture.", Unsupported;
+    ShowFbp = 0x0076, "FBP_SHOW", "Show an FBP full-screen picture.", Implemented;
     StopMusic = 0x0077, "MUSIC_STOP", "Stop current music with an optional fade.", Implemented;
     NoOp = 0x0078, "NOP", "Original compatibility no-op with unknown historical purpose.", Implemented;
     JumpIfPartyContainsPlayer = 0x0079, "JHAS_PLAYER", "Jump when the specified player name is in the party.", Implemented;
@@ -230,7 +230,7 @@ define_script_opcodes! {
     OffsetObject = 0x007D, "OBJ_OFFSET", "Move an event object by a signed pixel offset.", Implemented;
     SetObjectLayer = 0x007E, "OBJ_LAYER", "Set an event object's drawing layer.", Implemented;
     MoveViewport = 0x007F, "VIEWPORT", "Move, lock, or restore the viewport.", Implemented;
-    ToggleDayNightPalette = 0x0080, "PALETTE_TOGGLE", "Toggle between the day and night palettes.", Unsupported;
+    ToggleDayNightPalette = 0x0080, "PALETTE_TOGGLE", "Toggle between the day and night palettes.", Implemented;
     JumpIfNotFacingObject = 0x0081, "JNOT_FACING", "Jump when the player is not facing the specified event object.", Implemented;
     WalkObjectFast = 0x0082, "OBJ_WALK_FAST", "Walk the current event object to a tile at high speed.", Implemented;
     JumpIfObjectOutsideZone = 0x0083, "JOUTSIDE_ZONE", "Jump when an event object is outside another object's zone.", Unsupported;
@@ -241,34 +241,34 @@ define_script_opcodes! {
     ScaleMagicByCash = 0x0088, "MAGIC_SCALE_CASH", "Consume cash and derive magic base damage from it.", Unsupported;
     SetBattleResult = 0x0089, "BATTLE_RESULT", "Set the current battle result.", Unsupported;
     EnableAutoBattle = 0x008A, "AUTO_BATTLE", "Enable automatic commands for the next battle.", Unsupported;
-    SetPalette = 0x008B, "PALETTE_SET", "Change the current palette number.", Unsupported;
-    FadeColor = 0x008C, "COLOR_FADE", "Fade the screen from or to a palette color.", Unsupported;
+    SetPalette = 0x008B, "PALETTE_SET", "Change the current palette number.", Implemented;
+    FadeColor = 0x008C, "COLOR_FADE", "Fade the screen from or to a palette color.", Implemented;
     LevelUpPlayer = 0x008D, "LEVEL_UP", "Increase a player's level.", Unsupported;
-    RestoreScreen = 0x008E, "SCREEN_RESTORE", "Restore the screen saved by a previous backup operation.", Stub;
+    RestoreScreen = 0x008E, "SCREEN_RESTORE", "Restore the screen saved by a previous backup operation.", Implemented;
     HalveCash = 0x008F, "CASH_HALF", "Halve the party's cash.", Unsupported;
     SetObjectScript = 0x0090, "OBJECT_SCRIPT", "Replace one script field in a global object definition.", Unsupported;
     JumpIfEnemyNotFirstKind = 0x0091, "JNOT_FIRST_ENEMY", "Jump when an enemy is not the first living instance of its kind.", Unsupported;
     PlayerMagicAnimation = 0x0092, "MAGIC_ANIM", "Show a player's battle magic-casting animation.", Unsupported;
-    FadeSceneWithUpdate = 0x0093, "SCENE_FADE_UPDATE", "Fade the screen while rebuilding the scene.", Unsupported;
+    FadeSceneWithUpdate = 0x0093, "SCENE_FADE_UPDATE", "Fade the screen while rebuilding the scene.", Implemented;
     JumpIfObjectStateEquals = 0x0094, "JEQ_OBJ_STATE", "Jump when an event object's state equals operand 1.", Implemented;
     JumpIfSceneEquals = 0x0095, "JEQ_SCENE", "Jump when the current scene equals operand 0.", Implemented;
     PlayEndingAnimation = 0x0096, "ENDING", "Play the DOS ending animation.", Unsupported;
     RideObjectFast = 0x0097, "RIDE_FAST", "Ride the current event object to a tile at high speed.", Implemented;
-    SetPartyFollower = 0x0098, "FOLLOWER_SET", "Set or clear the party follower role.", Unsupported;
-    SetSceneMap = 0x0099, "SCENE_MAP", "Change the map number used by a scene.", Unsupported;
+    SetPartyFollower = 0x0098, "FOLLOWER_SET", "Set or clear the party follower role.", Implemented;
+    SetSceneMap = 0x0099, "SCENE_MAP", "Change the map number used by a scene.", Implemented;
     SetObjectStates = 0x009A, "OBJ_STATES", "Set one state across a contiguous event-object range.", Implemented;
-    FadeToCurrentScene = 0x009B, "FADE_CURRENT", "Fade to the current scene using the original compatibility behavior.", Unsupported;
+    FadeToCurrentScene = 0x009B, "FADE_CURRENT", "Fade to the current scene using the original compatibility behavior.", Implemented;
     DivideEnemy = 0x009C, "ENEMY_DIVIDE", "Divide one enemy into additional copies.", Unsupported;
     SummonEnemy = 0x009E, "ENEMY_SUMMON", "Make an enemy summon another monster.", Unsupported;
     TransformEnemy = 0x009F, "ENEMY_TRANSFORM", "Transform an enemy into another object.", Unsupported;
-    QuitGame = 0x00A0, "QUIT", "Run the ending path and terminate the game.", Unsupported;
+    QuitGame = 0x00A0, "QUIT", "Run the ending path and terminate the game.", Implemented;
     CollapseParty = 0x00A1, "PARTY_COLLAPSE", "Move every party member and trail point onto the leader.", Implemented;
     RandomSelect = 0x00A2, "RANDOM_NEXT", "Select one of the following operand 0 instructions randomly.", Implemented;
     PlayCdMusic = 0x00A3, "CD_MUSIC", "Play a CD track with normal music as fallback.", Unsupported;
-    ScrollFbp = 0x00A4, "FBP_SCROLL", "Scroll an FBP picture onto the screen.", Unsupported;
-    ShowFbpWithSprite = 0x00A5, "FBP_EFFECT", "Show an FBP picture with an ending sprite effect.", Unsupported;
-    BackupScreen = 0x00A6, "SCREEN_BACKUP", "Back up the current screen for a later transition.", Unsupported;
-    AutoScriptNoOp = 0x00A7, "AUTO_NOP", "Advance an automatic script without performing an effect.", Unsupported;
+    ScrollFbp = 0x00A4, "FBP_SCROLL", "Scroll an FBP picture onto the screen.", Implemented;
+    ShowFbpWithSprite = 0x00A5, "FBP_EFFECT", "Show an FBP picture with an ending sprite effect.", Implemented;
+    BackupScreen = 0x00A6, "SCREEN_BACKUP", "Back up the current screen for a later transition.", Implemented;
+    AutoScriptNoOp = 0x00A7, "AUTO_NOP", "Advance an automatic script without performing an effect.", Implemented;
     PrintMessage = 0xFFFF, "MESSAGE", "Display the message selected by operand 0.", Implemented;
 }
 
@@ -305,6 +305,10 @@ pub enum ScriptEvent {
     FadeScene {
         speed: u16,
     },
+    Visual(ScriptVisual),
+    WaitForKey,
+    LoadLastSave,
+    QuitGame,
     Action(ScriptAction),
     Condition(ScriptCondition),
     Completed {
@@ -325,6 +329,64 @@ pub enum ScriptEvent {
         trigger: TriggerRequest,
         entry: u16,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptVisual {
+    Shake {
+        frames: u16,
+        level: u16,
+    },
+    PlayRng {
+        animation: u16,
+        start_frame: u16,
+        end_frame: Option<u16>,
+        speed: u16,
+    },
+    FadeToRed,
+    FadeOut {
+        speed: u16,
+    },
+    FadeIn {
+        speed: u16,
+    },
+    SetNightPalette {
+        night: bool,
+    },
+    SetScreenWave {
+        level: u16,
+        progression: i16,
+    },
+    ShowFbp {
+        index: u16,
+        fade: u16,
+    },
+    ToggleDayNightPalette {
+        update_scene: bool,
+    },
+    SetPalette {
+        index: u16,
+    },
+    FadeColor {
+        color: u8,
+        from_color: bool,
+        delay: u16,
+    },
+    RestoreScreen,
+    FadeSceneWithUpdate {
+        step: i16,
+    },
+    FadeToCurrentScene,
+    ScrollFbp {
+        index: u16,
+        speed: u16,
+    },
+    ShowFbpWithSprite {
+        index: u16,
+        sprite: Option<u16>,
+        fade: u16,
+    },
+    BackupScreen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,9 +584,17 @@ pub enum ScriptAction {
         enter_script: Option<u16>,
         teleport_script: Option<u16>,
     },
+    SetSceneMap {
+        /// `None` selects the current scene (`0xffff` in the original script).
+        scene_number: Option<u16>,
+        map_number: u16,
+    },
     SetParty {
         /// Zero-based role IDs. Empty script slots are omitted.
         members: [Option<u16>; 3],
+    },
+    SetPartyFollowers {
+        followers: [Option<u16>; 2],
     },
 }
 
@@ -619,6 +689,7 @@ pub struct ScriptRuntime {
     last_trigger: Option<TriggerRequest>,
     last_instruction: Option<ScriptInstructionDebug>,
     pending_battle: Option<BattleRequest>,
+    current_rng: u16,
 }
 
 impl ScriptRuntime {
@@ -632,6 +703,7 @@ impl ScriptRuntime {
             last_trigger: None,
             last_instruction: None,
             pending_battle: None,
+            current_rng: 0,
         }
     }
 
@@ -883,7 +955,77 @@ impl ScriptRuntime {
                         battlefield_id: entry.operands[0],
                     }));
                 }
-                FadeOut | RestoreScreen => execution.entry = execution.entry.wrapping_add(1),
+                ShakeScreen => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::Shake {
+                        frames: entry.operands[0],
+                        level: if entry.operands[1] == 0 {
+                            4
+                        } else {
+                            entry.operands[1]
+                        },
+                    }));
+                }
+                SelectRngAnimation => {
+                    self.current_rng = entry.operands[0];
+                    execution.entry = execution.entry.wrapping_add(1);
+                }
+                PlayRngAnimation => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::PlayRng {
+                        animation: self.current_rng,
+                        start_frame: entry.operands[0],
+                        end_frame: (entry.operands[1] != 0).then_some(entry.operands[1]),
+                        speed: if entry.operands[2] == 0 {
+                            16
+                        } else {
+                            entry.operands[2]
+                        },
+                    }));
+                }
+                WaitForKey => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::WaitForKey);
+                }
+                LoadLastSave => {
+                    self.execution = None;
+                    self.call_stack.clear();
+                    return Some(ScriptEvent::LoadLastSave);
+                }
+                FadeToRed => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeToRed));
+                }
+                FadeOut => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeOut {
+                        speed: entry.operands[0].max(1),
+                    }));
+                }
+                FadeIn => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeIn {
+                        speed: (entry.operands[0] as i16).max(1) as u16,
+                    }));
+                }
+                UseDayPalette | UseNightPalette => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::SetNightPalette {
+                        night: opcode == UseNightPalette,
+                    }));
+                }
+                RestoreScreen => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::RestoreScreen));
+                }
                 RideObjectSlow | RideObject | RideObjectFast => {
                     let repeat_entry = execution.entry;
                     execution.entry = execution.entry.wrapping_add(1);
@@ -1278,12 +1420,28 @@ impl ScriptRuntime {
                         repeat_entry,
                     }));
                 }
+                SetScreenWave => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::SetScreenWave {
+                        level: entry.operands[0],
+                        progression: entry.operands[1] as i16,
+                    }));
+                }
                 FadeScene => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
                     return Some(ScriptEvent::FadeScene {
                         speed: entry.operands[0],
                     });
+                }
+                ShowFbp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::ShowFbp {
+                        index: entry.operands[0],
+                        fade: entry.operands[1],
+                    }));
                 }
                 SetParty => {
                     execution.entry = execution.entry.wrapping_add(1);
@@ -1388,6 +1546,36 @@ impl ScriptRuntime {
                         frames: if frames == -1 { -1 } else { 1 },
                     }));
                 }
+                ToggleDayNightPalette => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::ToggleDayNightPalette {
+                        update_scene: entry.operands[0] == 0,
+                    }));
+                }
+                SetPalette => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::SetPalette {
+                        index: entry.operands[0],
+                    }));
+                }
+                FadeColor => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeColor {
+                        color: entry.operands[0] as u8,
+                        from_color: entry.operands[1] != 0,
+                        delay: entry.operands[2],
+                    }));
+                }
+                FadeSceneWithUpdate => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeSceneWithUpdate {
+                        step: entry.operands[0] as i16,
+                    }));
+                }
                 NoOp => execution.entry = execution.entry.wrapping_add(1),
                 JumpIfNotFacingObject => {
                     execution.entry = execution.entry.wrapping_add(1);
@@ -1451,6 +1639,22 @@ impl ScriptRuntime {
                         target_entry: entry.operands[1],
                     }));
                 }
+                SetPartyFollower => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetPartyFollowers {
+                        followers: [entry.operands[0], entry.operands[1]]
+                            .map(|role_id| (role_id != 0).then_some(role_id)),
+                    }));
+                }
+                SetSceneMap if entry.operands[1] != 0 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetSceneMap {
+                        scene_number: (entry.operands[0] != 0xffff).then_some(entry.operands[0]),
+                        map_number: entry.operands[1],
+                    }));
+                }
                 SetObjectStates
                     if entry.operands[0] != 0 && entry.operands[0] <= entry.operands[1] =>
                 {
@@ -1472,6 +1676,39 @@ impl ScriptRuntime {
                     let choice = self.next_random_percent().wrapping_sub(1) % choices;
                     execution.entry = execution.entry.wrapping_add(choice).wrapping_add(1);
                 }
+                FadeToCurrentScene => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::FadeToCurrentScene));
+                }
+                QuitGame => {
+                    self.execution = None;
+                    self.call_stack.clear();
+                    return Some(ScriptEvent::QuitGame);
+                }
+                ScrollFbp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::ScrollFbp {
+                        index: entry.operands[0],
+                        speed: entry.operands[2],
+                    }));
+                }
+                ShowFbpWithSprite => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::ShowFbpWithSprite {
+                        index: entry.operands[0],
+                        sprite: (entry.operands[1] != 0xffff).then_some(entry.operands[1]),
+                        fade: entry.operands[2],
+                    }));
+                }
+                BackupScreen => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::BackupScreen));
+                }
+                AutoScriptNoOp => execution.entry = execution.entry.wrapping_add(1),
                 DialogCenter => {
                     execution.dialog_position = DialogPosition::Center;
                     if entry.operands[0] != 0 {
@@ -1563,19 +1800,10 @@ impl ScriptRuntime {
                 | SetTemporaryBattleSprite
                 | CollectEnemy
                 | TransmuteCollectedEnemies
-                | ShakeScreen
-                | SelectRngAnimation
-                | PlayRngAnimation
                 | DrainEnemyHp
                 | FleeBattle
                 | SimulatePlayerMagic
                 | ChasePlayer
-                | WaitForKey
-                | LoadLastSave
-                | FadeToRed
-                | FadeIn
-                | UseDayPalette
-                | UseNightPalette
                 | ScaleMagicByMp
                 | HalvePlayerHp
                 | HalveEnemyHp
@@ -1594,34 +1822,20 @@ impl ScriptRuntime {
                 | EnemyEscape
                 | StealEnemy
                 | BlowEnemiesAway
-                | SetScreenWave
-                | ShowFbp
-                | ToggleDayNightPalette
                 | JumpIfObjectOutsideZone
                 | ScaleMagicByCash
                 | SetBattleResult
                 | EnableAutoBattle
-                | SetPalette
-                | FadeColor
                 | LevelUpPlayer
                 | HalveCash
                 | SetObjectScript
                 | JumpIfEnemyNotFirstKind
                 | PlayerMagicAnimation
-                | FadeSceneWithUpdate
                 | PlayEndingAnimation
-                | SetPartyFollower
-                | SetSceneMap
-                | FadeToCurrentScene
                 | DivideEnemy
                 | SummonEnemy
                 | TransformEnemy
-                | QuitGame
-                | PlayCdMusic
-                | ScrollFbp
-                | ShowFbpWithSprite
-                | BackupScreen
-                | AutoScriptNoOp => {
+                | PlayCdMusic => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -1630,7 +1844,7 @@ impl ScriptRuntime {
                     });
                 }
                 // Implemented instructions with malformed operands are rejected explicitly.
-                SetObjectStates | RandomSelect => {
+                SetObjectStates | SetSceneMap | RandomSelect => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -1743,7 +1957,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [90, 4, 71]);
+        assert_eq!(support_counts, [116, 1, 48]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -1752,7 +1966,10 @@ mod tests {
             ScriptOpcode::AdjustPlayerHp.support(),
             OpcodeSupport::Implemented
         );
-        assert_eq!(ScriptOpcode::FadeScene.support(), OpcodeSupport::Stub);
+        assert_eq!(
+            ScriptOpcode::FadeScene.support(),
+            OpcodeSupport::Implemented
+        );
         assert_eq!(
             ScriptOpcode::StartBattle.support(),
             OpcodeSupport::Implemented
@@ -1792,6 +2009,187 @@ mod tests {
         assert!(matches!(
             runtime.advance(),
             Some(ScriptEvent::Unsupported { opcode: 0x004c, .. })
+        ));
+    }
+
+    #[test]
+    fn visual_opcodes_yield_typed_blocking_events() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::ShakeScreen.raw(), 3, 0, 0],
+            [ScriptOpcode::SelectRngAnimation.raw(), 7, 0, 0],
+            [ScriptOpcode::PlayRngAnimation.raw(), 2, 5, 0],
+            [ScriptOpcode::FadeOut.raw(), 0, 0, 0],
+            [ScriptOpcode::FadeIn.raw(), 0xffff, 0, 0],
+            [ScriptOpcode::UseNightPalette.raw(), 0, 0, 0],
+            [ScriptOpcode::SetScreenWave.raw(), 4, 0xffff, 0],
+            [ScriptOpcode::ShowFbp.raw(), 9, 2, 0],
+            [ScriptOpcode::ToggleDayNightPalette.raw(), 0, 0, 0],
+            [ScriptOpcode::SetPalette.raw(), 3, 0, 0],
+            [ScriptOpcode::FadeColor.raw(), 0x4f, 1, 2],
+            [ScriptOpcode::RestoreScreen.raw(), 0, 0, 0],
+            [ScriptOpcode::FadeSceneWithUpdate.raw(), 0xfffe, 0, 0],
+            [ScriptOpcode::FadeToCurrentScene.raw(), 0, 0, 0],
+            [ScriptOpcode::ScrollFbp.raw(), 6, 0, 4],
+            [ScriptOpcode::ShowFbpWithSprite.raw(), 8, 0xffff, 3],
+            [ScriptOpcode::BackupScreen.raw(), 0, 0, 0],
+            [ScriptOpcode::AutoScriptNoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::WaitForKey.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::Shake {
+                frames: 3,
+                level: 4
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::PlayRng {
+                animation: 7,
+                start_frame: 2,
+                end_frame: Some(5),
+                speed: 16,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::FadeOut { speed: 1 }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::FadeIn { speed: 1 }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::SetNightPalette {
+                night: true
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::SetScreenWave {
+                level: 4,
+                progression: -1,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::ShowFbp {
+                index: 9,
+                fade: 2,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::ToggleDayNightPalette {
+                update_scene: true
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::SetPalette { index: 3 }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::FadeColor {
+                color: 0x4f,
+                from_color: true,
+                delay: 2,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::RestoreScreen))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::FadeSceneWithUpdate {
+                step: -2
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::FadeToCurrentScene))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::ScrollFbp {
+                index: 6,
+                speed: 4,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::ShowFbpWithSprite {
+                index: 8,
+                sprite: None,
+                fade: 3,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::BackupScreen))
+        );
+        assert_eq!(runtime.advance(), Some(ScriptEvent::WaitForKey));
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn load_and_quit_events_stop_the_active_script() {
+        for (opcode, expected) in [
+            (ScriptOpcode::LoadLastSave, ScriptEvent::LoadLastSave),
+            (ScriptOpcode::QuitGame, ScriptEvent::QuitGame),
+        ] {
+            let mut runtime = ScriptRuntime::new(table(&[
+                [0, 0, 0, 0],
+                [opcode.raw(), 0, 0, 0],
+                [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            ]));
+            runtime.start(trigger(1));
+            assert_eq!(runtime.advance(), Some(expected));
+            assert!(!runtime.is_active());
+        }
+    }
+
+    #[test]
+    fn follower_and_scene_map_opcodes_yield_persistent_world_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::SetPartyFollower.raw(), 3, 4, 0],
+            [ScriptOpcode::SetSceneMap.raw(), 0xffff, 17, 0],
+            [ScriptOpcode::SetSceneMap.raw(), 5, 18, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetPartyFollowers {
+                followers: [Some(3), Some(4)]
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetSceneMap {
+                scene_number: None,
+                map_number: 17,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetSceneMap {
+                scene_number: Some(5),
+                map_number: 18,
+            }))
+        );
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
         ));
     }
 

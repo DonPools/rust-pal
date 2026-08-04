@@ -28,11 +28,13 @@ pub struct GameSnapshot {
     pub(super) inactive_objects: BTreeMap<u16, SceneObject>,
     pub(super) scene_enter_scripts: BTreeMap<u16, u16>,
     pub(super) scene_teleport_scripts: BTreeMap<u16, u16>,
+    pub(super) scene_maps: BTreeMap<u16, u16>,
     pub(super) script_frame: u32,
     pub(super) viewport_locked: bool,
     pub(super) camera_x: i32,
     pub(super) camera_y: i32,
     pub(super) party_followers: Vec<Role>,
+    pub(super) extra_follower_ids: Vec<u16>,
     pub(super) party_trail: [TrailPoint; MAX_PARTY_MEMBERS],
     pub(super) player_roles: Option<PlayerRoles>,
 }
@@ -41,10 +43,14 @@ impl GameSnapshot {
     pub fn scene_number(&self) -> u16 {
         self.scene_number
     }
+
+    pub fn scene_map_override(&self) -> Option<u16> {
+        self.scene_maps.get(&self.scene_number).copied()
+    }
 }
 
-// Version 15 preserves the complete mutable player-role table, including battle sounds.
-pub(super) const SNAPSHOT_VERSION: u16 = 15;
+// Version 16 preserves mutable scene maps and script-configured extra followers.
+pub(super) const SNAPSHOT_VERSION: u16 = 16;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -68,11 +74,13 @@ pub(super) struct SnapshotData {
     pub(super) inactive_objects: Vec<SavedSceneObject>,
     pub(super) scene_enter_scripts: Vec<(u16, u16)>,
     pub(super) scene_teleport_scripts: Vec<(u16, u16)>,
+    pub(super) scene_maps: Vec<(u16, u16)>,
     pub(super) script_frame: u32,
     pub(super) viewport_locked: bool,
     pub(super) camera_x: i32,
     pub(super) camera_y: i32,
     pub(super) party_followers: Vec<SavedRole>,
+    pub(super) extra_follower_ids: Vec<u16>,
     pub(super) party_trail: Vec<SavedTrailPoint>,
     pub(super) player_roles: Vec<SavedPlayerRole>,
 }

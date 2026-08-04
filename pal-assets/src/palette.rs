@@ -24,6 +24,13 @@ pub struct Palette {
     pub colors: [PaletteColor; 256],
 }
 
+/// Day palette and the optional second 768-byte night palette in one PAT chunk.
+#[derive(Debug, Clone)]
+pub struct PaletteSet {
+    pub day: Palette,
+    pub night: Option<Palette>,
+}
+
 impl Default for Palette {
     fn default() -> Self {
         Palette {
@@ -77,6 +84,26 @@ impl Palette {
     }
 }
 
+impl PaletteSet {
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let day = Palette::from_bytes(data)?;
+        let night = if data.len() > 768 {
+            Some(Palette::from_bytes(data.get(768..)?)?)
+        } else {
+            None
+        };
+        Some(Self { day, night })
+    }
+
+    pub fn select(&self, night: bool) -> &Palette {
+        if night {
+            self.night.as_ref().unwrap_or(&self.day)
+        } else {
+            &self.day
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +135,20 @@ mod tests {
         let palette = Palette::from_bytes(&data).unwrap();
         assert_eq!(palette.get_rgba(0), [0, 0, 0, 0]);
         assert_eq!(palette.get_rgba(1), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn palette_set_selects_night_or_falls_back_to_day() {
+        let mut paired = vec![0; 1536];
+        paired[3] = 1;
+        paired[768 + 3] = 2;
+        let set = PaletteSet::from_bytes(&paired).unwrap();
+        assert_eq!(set.select(false).colors[1].r, 1);
+        assert_eq!(set.select(true).colors[1].r, 2);
+
+        let single = PaletteSet::from_bytes(&paired[..768]).unwrap();
+        assert!(single.night.is_none());
+        assert_eq!(single.select(true).colors[1].r, 1);
+        assert!(PaletteSet::from_bytes(&paired[..767]).is_none());
     }
 }

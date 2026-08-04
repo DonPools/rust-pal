@@ -1,4 +1,6 @@
+use pal_assets::fbp::FbpArchive;
 use pal_assets::mkf::MkfArchive;
+use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
 use pal_core::battle::{BattlePhase, BattleResult};
 use pal_core::script::{ScriptAction, ScriptEvent, ScriptRuntime};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
@@ -39,6 +41,59 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let sound_effect_count = validate_sound_effects(&voc_mkf)
         .expect("VOC.MKF contains an invalid or unsupported sound effect");
     let music_count = validate_music(&midi_mkf).expect("MIDI.MKF contains invalid MIDI music");
+    let rng_data = std::fs::read(data_dir.join("RNG.MKF")).expect("failed to read RNG.MKF");
+    let rng_archive = RngArchive::new(&rng_data).expect("invalid RNG.MKF archive");
+    let mut rng_frame_count = 0usize;
+    let mut rng_non_empty_frames = 0usize;
+    for animation_index in 0..rng_archive.animation_count() {
+        let animation = rng_archive
+            .animation(animation_index)
+            .unwrap_or_else(|| panic!("invalid RNG.MKF animation {animation_index}"));
+        let mut canvas = vec![0; RNG_FRAME_PIXELS];
+        for frame_index in 0..animation.frame_count() {
+            let compressed = animation
+                .compressed_frame(frame_index)
+                .expect("RNG frame index disappeared");
+            if compressed.is_empty() {
+                continue;
+            }
+            let commands = animation.decompress_frame(frame_index).unwrap_or_else(|| {
+                panic!(
+                    "invalid YJ_1 stream in RNG.MKF animation {animation_index} frame \
+                     {frame_index}: {} bytes, prefix {:02x?}",
+                    compressed.len(),
+                    &compressed[..compressed.len().min(8)]
+                )
+            });
+            apply_frame_delta_checked(&commands, &mut canvas).unwrap_or_else(|error| {
+                panic!("invalid RNG.MKF animation {animation_index} frame {frame_index}: {error:?}")
+            });
+            rng_frame_count += 1;
+            rng_non_empty_frames += usize::from(canvas.iter().any(|&pixel| pixel != 0));
+        }
+    }
+    assert!(rng_frame_count > 0, "RNG.MKF contains no animation frames");
+    assert!(
+        rng_non_empty_frames > 0,
+        "RNG.MKF animations never produce a non-empty framebuffer"
+    );
+    let fbp_data = std::fs::read(data_dir.join("FBP.MKF")).expect("failed to read FBP.MKF");
+    let fbp_archive = FbpArchive::new(&fbp_data).expect("invalid FBP.MKF archive");
+    let mut fbp_frame_count = 0usize;
+    for frame_index in 0..fbp_archive.len() {
+        if fbp_archive
+            .raw_frame(frame_index)
+            .expect("FBP frame index disappeared")
+            .is_empty()
+        {
+            continue;
+        }
+        fbp_archive
+            .frame(frame_index)
+            .unwrap_or_else(|| panic!("invalid FBP.MKF frame {frame_index}"));
+        fbp_frame_count += 1;
+    }
+    assert!(fbp_frame_count > 0, "FBP.MKF contains no pictures");
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
     let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
     assert!(
@@ -213,7 +268,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
-            | ScriptEvent::FadeScene { .. } => script_ticks += 1,
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => script_ticks += 1,
             ScriptEvent::Completed { .. } => break,
             event => panic!("movement script did not complete: {event:?}"),
         }
@@ -291,7 +348,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
-            | ScriptEvent::FadeScene { .. } => {}
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             ScriptEvent::Completed { .. } => break,
             event => panic!("scene enter script did not complete: {event:?}"),
         }
@@ -358,7 +417,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
-            | ScriptEvent::FadeScene { .. } => {}
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             ScriptEvent::Completed { .. } => break,
             event => panic!("item script did not complete: {event:?}"),
         }
@@ -432,7 +493,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
-            | ScriptEvent::FadeScene { .. } => {}
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             ScriptEvent::Completed { .. } => break,
             event => panic!("exit script did not complete: {event:?}"),
         }
@@ -468,7 +531,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
-            | ScriptEvent::FadeScene { .. } => {}
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             ScriptEvent::Completed { .. } => break,
             event => panic!("inn conversation did not complete: {event:?}"),
         }
@@ -557,7 +622,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
-            | ScriptEvent::FadeScene { .. } => {}
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             ScriptEvent::Completed { .. } => break,
             event => panic!("stairs script did not complete: {event:?}"),
         }
@@ -609,7 +676,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("first battle setup auto script failed");
             }
-            ScriptEvent::Delay | ScriptEvent::FadeScene { .. } => {}
+            ScriptEvent::Delay
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             ScriptEvent::StartBattle(request) => break request,
             event => panic!("first battle setup yielded an unexpected event: {event:?}"),
         }
@@ -842,12 +912,59 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("first battle follow-up auto script failed");
             }
-            ScriptEvent::Delay | ScriptEvent::FadeScene { .. } => {}
+            ScriptEvent::Delay
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
             event => panic!("first battle follow-up yielded an unexpected event: {event:?}"),
         }
     };
     assert!(post_battle_actions >= 1);
     assert!(text.message(usize::from(post_battle_message)).is_some());
+    let mut extended_story_messages = 1usize;
+    let mut extended_story_actions = 0usize;
+    let extended_story_next_entry = loop {
+        match scripts
+            .advance()
+            .expect("extended post-battle story stopped without an event")
+        {
+            ScriptEvent::Message { message_id, .. } => {
+                assert!(
+                    text.message(usize::from(message_id)).is_some(),
+                    "extended story references unavailable message {message_id}"
+                );
+                extended_story_messages += 1;
+            }
+            ScriptEvent::Action(
+                action @ (ScriptAction::AdjustPlayerHealth { .. }
+                | ScriptAction::RevivePlayer { .. }),
+            ) => {
+                let succeeded = game.apply_script_action(action);
+                assert!(scripts.set_success(succeeded));
+                extended_story_actions += 1;
+            }
+            ScriptEvent::Action(action) => {
+                assert!(
+                    game.apply_script_action(action),
+                    "extended story action could not be applied: {action:?}"
+                );
+                extended_story_actions += 1;
+            }
+            ScriptEvent::Waiting => {
+                game.update_auto_scripts(&auto_scripts)
+                    .expect("extended story auto script failed");
+            }
+            ScriptEvent::Delay
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
+            ScriptEvent::Completed { next_entry, .. } => break next_entry,
+            event => panic!("extended post-battle story yielded an unexpected event: {event:?}"),
+        }
+    };
+    assert!(extended_story_messages >= 10);
+    assert!(extended_story_actions >= 10);
+    assert_eq!(game.party.members().len(), 2);
 
     assert!(visible_pixels > 0, "rendered map is blank");
     assert!(
@@ -893,6 +1010,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     println!("sound data passed: {sound_effect_count} PCM VOC effects");
     println!("music data passed: {music_count} standard MIDI songs");
+    println!(
+        "cutscene data passed: {} RNG animations, {rng_frame_count} decoded frames, \
+         {fbp_frame_count} FBP pictures",
+        rng_archive.animation_count()
+    );
     println!("store data passed: {} items in store 0", first_store.len());
     println!(
         "battle data passed: {} enemies, {} teams, {} battlefields",
@@ -923,6 +1045,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "M5 first battle passed: object 28 entry 6906, {first_battle_messages} setup messages, {first_battle_actions} setup actions, script 6965, team 18, 2 enemies, {} EXP, {} cash, {post_battle_actions} follow-up actions, message {post_battle_message}",
         battle_rewards.experience,
         battle_rewards.cash,
+    );
+    println!(
+        "M6 extended story passed: {extended_story_messages} messages, \
+         {extended_story_actions} actions, {} party members, next entry {extended_story_next_entry}",
+        game.party.members().len(),
     );
     println!(
         "asset check passed: {visible_pixels} visible pixels, \

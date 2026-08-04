@@ -60,6 +60,125 @@ impl Renderer {
         self.dirty = true;
     }
 
+    /// Replace the framebuffer with an already converted RGBA screen.
+    pub fn replace_screen(&mut self, rgba: &[u8]) -> bool {
+        if rgba.len() != self.screen.len() {
+            return false;
+        }
+        self.screen.copy_from_slice(rgba);
+        self.dirty = true;
+        true
+    }
+
+    /// Draw an opaque indexed-color screen using the active palette.
+    pub fn replace_with_indexed(&mut self, indices: &[u8]) -> bool {
+        if indices.len() != self.width * self.height {
+            return false;
+        }
+        for (&index, output) in indices.iter().zip(self.screen.chunks_exact_mut(4)) {
+            let (r, g, b) = self.palette.get_rgb(index);
+            output.copy_from_slice(&[r, g, b, 255]);
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Blend from a previous RGBA screen, where `progress` is in `0..=64`.
+    pub fn blend_from(&mut self, previous: &[u8], progress: u8) -> bool {
+        if previous.len() != self.screen.len() || progress > 64 {
+            return false;
+        }
+        let current_weight = u16::from(progress);
+        let previous_weight = 64 - current_weight;
+        for (current, &old) in self.screen.iter_mut().zip(previous) {
+            *current = ((u16::from(*current) * current_weight + u16::from(old) * previous_weight)
+                / 64) as u8;
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Reveal the current screen from top to bottom over a previous RGBA screen.
+    pub fn reveal_from_top(&mut self, previous: &[u8], rows: usize) -> bool {
+        if previous.len() != self.screen.len() {
+            return false;
+        }
+        let keep_from = rows.min(self.height) * self.width * 4;
+        self.screen[keep_from..].copy_from_slice(&previous[keep_from..]);
+        self.dirty = true;
+        true
+    }
+
+    pub fn apply_brightness(&mut self, brightness: u8) {
+        let brightness = u16::from(brightness.min(64));
+        for pixel in self.screen.chunks_exact_mut(4) {
+            for channel in &mut pixel[..3] {
+                *channel = (u16::from(*channel) * brightness / 64) as u8;
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub fn apply_color_tint(&mut self, color: (u8, u8, u8), amount: u8) {
+        let amount = u16::from(amount.min(64));
+        let source = 64 - amount;
+        for pixel in self.screen.chunks_exact_mut(4) {
+            pixel[0] = ((u16::from(pixel[0]) * source + u16::from(color.0) * amount) / 64) as u8;
+            pixel[1] = ((u16::from(pixel[1]) * source + u16::from(color.1) * amount) / 64) as u8;
+            pixel[2] = ((u16::from(pixel[2]) * source + u16::from(color.2) * amount) / 64) as u8;
+        }
+        self.dirty = true;
+    }
+
+    /// Apply PAL-style horizontal row displacement to the completed frame.
+    pub fn apply_wave(&mut self, level: u16, progression: i16) {
+        if level == 0 || self.width == 0 {
+            return;
+        }
+        let source = self.screen.clone();
+        for y in 0..self.height {
+            let phase = (i32::try_from(y).unwrap_or(i32::MAX) + i32::from(progression)) & 31;
+            let triangle = if phase < 16 { phase } else { 31 - phase } - 8;
+            let offset = triangle * i32::from(level) / 8;
+            for x in 0..self.width {
+                let source_x = (i32::try_from(x).unwrap_or(i32::MAX) - offset)
+                    .rem_euclid(self.width as i32) as usize;
+                let destination = (y * self.width + x) * 4;
+                let source_index = (y * self.width + source_x) * 4;
+                self.screen[destination..destination + 4]
+                    .copy_from_slice(&source[source_index..source_index + 4]);
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub fn apply_shake(&mut self, offset_x: i32, offset_y: i32) {
+        if offset_x == 0 && offset_y == 0 {
+            return;
+        }
+        let source = self.screen.clone();
+        self.clear_black();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let target_x = i32::try_from(x).unwrap_or(i32::MAX) + offset_x;
+                let target_y = i32::try_from(y).unwrap_or(i32::MAX) + offset_y;
+                let (Ok(target_x), Ok(target_y)) =
+                    (usize::try_from(target_x), usize::try_from(target_y))
+                else {
+                    continue;
+                };
+                if target_x >= self.width || target_y >= self.height {
+                    continue;
+                }
+                let source_index = (y * self.width + x) * 4;
+                let destination = (target_y * self.width + target_x) * 4;
+                self.screen[destination..destination + 4]
+                    .copy_from_slice(&source[source_index..source_index + 4]);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// 用纯色清除屏幕
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         for pixel in self.screen.chunks_exact_mut(4) {

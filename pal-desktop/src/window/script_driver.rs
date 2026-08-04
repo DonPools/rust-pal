@@ -2,7 +2,9 @@ use pal_assets::text::TextLibrary;
 use pal_core::game::{AutoScriptError, GameState};
 use pal_core::role::RoleSprites;
 use pal_core::scene::TriggerKind;
-use pal_core::script::{DialogPosition, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime};
+use pal_core::script::{
+    DialogPosition, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual,
+};
 
 use super::dialog::ActiveDialog;
 use super::dialog_text::dialog_body_lines;
@@ -27,7 +29,7 @@ pub(super) fn advance_script<L>(
     services: &mut SessionState,
     set_title: &mut impl FnMut(&str),
 ) where
-    L: FnMut(u16, &RoleSprites) -> Option<LoadedScene>,
+    L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
     match scripts.advance() {
         Some(ScriptEvent::Message {
@@ -128,12 +130,28 @@ pub(super) fn advance_script<L>(
                 scripts.branch_to(failure_entry);
             }
         }
+        Some(ScriptEvent::FadeScene { .. })
+            if !services.visual.queue(ScriptVisual::FadeToCurrentScene) =>
+        {
+            set_title("Rust-PAL [visual effect is already active]");
+        }
         Some(ScriptEvent::FadeScene { .. }) => {}
+        Some(ScriptEvent::Visual(command)) if !services.visual.queue(command) => {
+            set_title("Rust-PAL [visual effect is already active]");
+        }
+        Some(ScriptEvent::Visual(_)) => {}
+        Some(ScriptEvent::WaitForKey) => services.waiting_for_key = true,
+        Some(ScriptEvent::LoadLastSave) => services.load_last_save_requested = true,
+        Some(ScriptEvent::QuitGame) => services.quit_requested = true,
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
             if scene_number == game.scene_number {
                 return;
             }
-            let Some(scene) = load_scene(scene_number, resources.role_sprites) else {
+            let Some(scene) = load_scene(
+                scene_number,
+                game.scene_map_override(scene_number),
+                resources.role_sprites,
+            ) else {
                 set_title("Rust-PAL [failed to load scene]");
                 return;
             };
@@ -141,6 +159,29 @@ pub(super) fn advance_script<L>(
             let enter_script = game.scene_enter_script(scene.enter_script);
             services.pending_enter_script = (enter_script != 0).then_some(enter_script);
             set_title(&format!("Rust-PAL [scene {}]", scene.number));
+        }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::SetSceneMap {
+                scene_number,
+                map_number: _,
+            },
+        )) => {
+            let target_scene = scene_number.unwrap_or(game.scene_number);
+            if !game.apply_script_action(action) {
+                set_title("Rust-PAL [invalid scene map]");
+                return;
+            }
+            if target_scene == game.scene_number {
+                let Some(scene) = load_scene(
+                    target_scene,
+                    game.scene_map_override(target_scene),
+                    resources.role_sprites,
+                ) else {
+                    set_title("Rust-PAL [failed to reload scene map]");
+                    return;
+                };
+                game.replace_map(scene.map);
+            }
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaySound { sound_id }))
             if !services.sound_effects.play(sound_id) =>

@@ -10,6 +10,7 @@ mod input;
 mod menu_render;
 mod menu_state;
 mod menu_update;
+mod original_save;
 mod presentation;
 mod scene_render;
 mod script_driver;
@@ -17,6 +18,7 @@ mod session;
 mod snapshot;
 mod text_render;
 mod types;
+mod visual;
 
 use std::time::{Duration, Instant};
 
@@ -60,6 +62,7 @@ use menu_state::FieldMenu;
 #[cfg(test)]
 use menu_state::{update_wrapping_selection, InventoryMenu, ShopMenu, ShopMode};
 use menu_update::{update_active_menu, MenuUpdateContext};
+use original_save::{latest_original_save_slot, restore_original_save, RestoreOriginalSaveError};
 use presentation::{render_game, UiRenderContext};
 pub use scene_render::render_tile_map;
 #[cfg(test)]
@@ -75,7 +78,7 @@ pub fn run_game_window<L>(
     resources: GameResources,
     mut load_scene: L,
 ) where
-    L: FnMut(u16, &RoleSprites) -> Option<LoadedScene> + 'static,
+    L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene> + 'static,
 {
     let GameResources {
         role_sprites,
@@ -94,6 +97,10 @@ pub fn run_game_window<L>(
         voc_mkf,
         midi_mkf,
         sound_font,
+        palettes,
+        fbp_archive,
+        rng_archive,
+        original_save_dir,
         snapshot_path,
     } = resources;
     let viewport = Viewport::from(game.camera);
@@ -165,6 +172,8 @@ pub fn run_game_window<L>(
             status_background: &status_background,
             equip_background: &equip_background,
             ui_ticks: 0,
+            palettes: &palettes,
+            visual: &script_services.visual,
         },
     );
 
@@ -290,6 +299,8 @@ pub fn run_game_window<L>(
                                     status_background: &status_background,
                                     equip_background: &equip_background,
                                     ui_ticks,
+                                    palettes: &palettes,
+                                    visual: &script_services.visual,
                                 },
                             );
                         } else {
@@ -363,7 +374,89 @@ pub fn run_game_window<L>(
                 let mut changed = false;
                 while accumulator >= tick {
                     let sampled = input.sample();
-                    if dialog.is_some() {
+                    let visual_was_blocking = script_services.visual.is_blocking();
+                    if script_services.visual.needs_update() {
+                        match script_services.visual.update(
+                            renderer.screen(),
+                            &palettes,
+                            &fbp_archive,
+                            &rng_archive,
+                        ) {
+                            Ok(visual_changed) => changed |= visual_changed,
+                            Err(error) => {
+                                window.set_title(&format!("Rust-PAL [visual error: {error}]"));
+                            }
+                        }
+                    }
+                    if script_services.quit_requested {
+                        target.exit();
+                    }
+                    let load_last_save_requested =
+                        std::mem::take(&mut script_services.load_last_save_requested);
+                    if load_last_save_requested {
+                        let slot = script_services
+                            .current_save_slot
+                            .or_else(|| latest_original_save_slot(&original_save_dir));
+                        match slot.map(|slot| {
+                            restore_original_save(
+                                &original_save_dir,
+                                slot,
+                                &mut game,
+                                &role_sprites,
+                                &mut load_scene,
+                            )
+                        }) {
+                            Some(Ok(environment)) => {
+                                script_services.current_save_slot = Some(environment.slot);
+                                script_services.visual.restore_original_environment(
+                                    environment.night_palette,
+                                    environment.screen_wave,
+                                );
+                                dialog = None;
+                                script_services.pending_dialog = None;
+                                script_services.field_menu = None;
+                                script_services.inventory_menu = None;
+                                script_services.shop_menu = None;
+                                script_services.confirmation_menu = None;
+                                if let Some(music_id) = game.current_music {
+                                    script_services.music.play(music_id, true, 0);
+                                } else {
+                                    script_services.music.stop();
+                                }
+                                window.set_title("Rust-PAL [Original save loaded]");
+                            }
+                            Some(Err(RestoreOriginalSaveError::SceneUnavailable)) => {
+                                window.set_title("Rust-PAL [Original save scene unavailable]")
+                            }
+                            Some(Err(
+                                RestoreOriginalSaveError::Unavailable
+                                | RestoreOriginalSaveError::Invalid,
+                            )) => window.set_title("Rust-PAL [Invalid original save]"),
+                            None => window.set_title("Rust-PAL [No original save]"),
+                        }
+                        changed = true;
+                    }
+                    if visual_was_blocking || load_last_save_requested {
+                        // Blocking script visuals advance independently until completion.
+                    } else if script_services.waiting_for_key {
+                        if sampled.confirm || sampled.cancel || sampled.direction_pressed.is_some()
+                        {
+                            script_services.waiting_for_key = false;
+                            advance_script(
+                                &mut scripts,
+                                &mut game,
+                                &mut dialog,
+                                ScriptRenderResources {
+                                    text: &text,
+                                    role_sprites: &role_sprites,
+                                },
+                                &mut load_scene,
+                                &mut script_services,
+                                &mut |title| window.set_title(title),
+                            );
+                            changed = true;
+                        }
+                    } else if dialog.is_some() {
                         let awaiting_input = dialog
                             .as_ref()
                             .is_some_and(|active_dialog| active_dialog.awaiting_input);
@@ -458,6 +551,7 @@ pub fn run_game_window<L>(
                         load_scene: &mut load_scene,
                         services: &mut script_services,
                         snapshot_path: &snapshot_path,
+                        original_save_dir: &original_save_dir,
                         set_title: &mut |title: &str| window.set_title(title),
                         exit: &mut || target.exit(),
                     }) {
@@ -560,6 +654,8 @@ pub fn run_game_window<L>(
                             status_background: &status_background,
                             equip_background: &equip_background,
                             ui_ticks,
+                            palettes: &palettes,
+                            visual: &script_services.visual,
                         },
                     );
                 }

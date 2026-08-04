@@ -2,9 +2,12 @@ use std::path::PathBuf;
 
 use pal_assets::battle::{BattleData, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
+use pal_assets::fbp::FbpArchive;
 use pal_assets::objects::GlobalObjects;
+use pal_assets::palette::PaletteSet;
 use pal_assets::player_roles::PlayerRoles;
 use pal_assets::rle::RleBitmap;
+use pal_assets::rng::RngArchive;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
@@ -16,10 +19,10 @@ use pal_desktop::renderer::Renderer;
 
 use crate::assets::{
     create_global_scene_objects, create_scene_objects, load_battle_backgrounds, load_battle_data,
-    load_dialog_faces, load_enemy_battle_sprites, load_global_objects, load_magics, load_map,
-    load_music, load_palette, load_player_battle_sprites, load_player_roles, load_role_sprites,
-    load_scene_data, load_script_table, load_sound_effects, load_sound_font, load_stores,
-    load_text_resources, load_ui_sprites,
+    load_dialog_faces, load_enemy_battle_sprites, load_fbp_archive, load_global_objects,
+    load_magics, load_map, load_music, load_palettes, load_player_battle_sprites,
+    load_player_roles, load_rng_archive, load_role_sprites, load_scene_data, load_script_table,
+    load_sound_effects, load_sound_font, load_stores, load_text_resources, load_ui_sprites,
 };
 use crate::{DEFAULT_PALETTE, DEFAULT_SCENE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -36,6 +39,9 @@ pub(super) struct BootstrappedGame {
     pub(super) voc_mkf: Vec<u8>,
     pub(super) midi_mkf: Vec<u8>,
     pub(super) sound_font: Vec<u8>,
+    pub(super) palettes: Vec<PaletteSet>,
+    pub(super) fbp_archive: FbpArchive,
+    pub(super) rng_archive: RngArchive,
     pub(super) player_roles: PlayerRoles,
     pub(super) global_objects: GlobalObjects,
     pub(super) battle_data: BattleData,
@@ -53,7 +59,14 @@ pub(super) struct BootstrappedGame {
 }
 
 pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
-    let palette = load_palette(&data_dir, DEFAULT_PALETTE).expect("failed to load palette");
+    let palettes = load_palettes(&data_dir).expect("failed to load palettes");
+    let palette = palettes
+        .get(DEFAULT_PALETTE)
+        .expect("default palette is missing")
+        .day
+        .clone();
+    let fbp_archive = load_fbp_archive(&data_dir).expect("failed to load FBP.MKF");
+    let rng_archive = load_rng_archive(&data_dir).expect("failed to load RNG.MKF");
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
@@ -130,6 +143,9 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         voc_mkf,
         midi_mkf,
         sound_font,
+        palettes,
+        fbp_archive,
+        rng_archive,
         player_roles,
         global_objects,
         battle_data,

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use pal_desktop::window::{run_game_window, GameResources, Viewport};
 
 use asset_check::check_assets;
-use assets::load_runtime_scene;
+use assets::load_runtime_scene_with_map;
 use bootstrap::{bootstrap, BootstrappedGame};
 use command::Command;
 
@@ -63,6 +63,9 @@ fn run_desktop(boot: BootstrappedGame) {
         voc_mkf,
         midi_mkf,
         sound_font,
+        palettes,
+        fbp_archive,
+        rng_archive,
         role_sprites,
         dialog_faces,
         ui_sprites,
@@ -98,9 +101,15 @@ fn run_desktop(boot: BootstrappedGame) {
             voc_mkf,
             midi_mkf,
             sound_font,
+            palettes,
+            fbp_archive,
+            rng_archive,
+            original_save_dir: data_dir.clone(),
             snapshot_path: workspace_snapshot_path(),
         },
-        move |number, sprites| load_runtime_scene(&scene_data_dir, &scene_data, number, sprites),
+        move |number, map_override, sprites| {
+            load_runtime_scene_with_map(&scene_data_dir, &scene_data, number, map_override, sprites)
+        },
     );
 }
 

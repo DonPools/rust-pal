@@ -10,6 +10,7 @@ use super::menu_state::{
     ConfirmationMenu, EquipSession, FieldMenu, InventoryMenu, ItemUseSession, MagicSession,
     ShopMenu,
 };
+use super::visual::VisualState;
 
 pub(super) struct SessionState {
     pub(super) pending_enter_script: Option<u16>,
@@ -36,6 +37,11 @@ pub(super) struct SessionState {
     pub(super) auto_scripts: ScriptTable,
     pub(super) sound_effects: SoundEffects,
     pub(super) music: BackgroundMusic,
+    pub(super) visual: VisualState,
+    pub(super) waiting_for_key: bool,
+    pub(super) load_last_save_requested: bool,
+    pub(super) quit_requested: bool,
+    pub(super) current_save_slot: Option<u8>,
 }
 
 impl SessionState {
@@ -71,6 +77,11 @@ impl SessionState {
             sound_effects: SoundEffects::new(voc_mkf).expect("failed to load VOC sound effects"),
             music: BackgroundMusic::new(midi_mkf, sound_font)
                 .expect("failed to load MIDI music and SoundFont"),
+            visual: VisualState::new(),
+            waiting_for_key: false,
+            load_last_save_requested: false,
+            quit_requested: false,
+            current_save_slot: None,
         }
     }
 }

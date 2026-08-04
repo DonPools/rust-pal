@@ -2,13 +2,15 @@ use std::path::Path;
 
 use pal_assets::battle::{BattleData, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
+use pal_assets::fbp::FbpArchive;
 use pal_assets::magic::Magics;
 use pal_assets::midi::MidiSong;
 use pal_assets::mkf::MkfArchive;
 use pal_assets::objects::{GlobalObjects, ObjectLayout};
-use pal_assets::palette::Palette;
+use pal_assets::palette::{Palette, PaletteSet};
 use pal_assets::player_roles::PlayerRoles;
 use pal_assets::rle::RleBitmap;
+use pal_assets::rng::RngArchive;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::sprite::{sprite_from_yj1_chunk, Sprite};
@@ -21,10 +23,20 @@ use pal_core::role::RoleSprites;
 use pal_core::scene::SceneObject;
 use pal_desktop::window::LoadedScene;
 
-pub(super) fn load_palette(data_dir: &Path, palette_num: usize) -> Option<Palette> {
+pub(super) fn load_palettes(data_dir: &Path) -> Option<Vec<PaletteSet>> {
     let data = std::fs::read(data_dir.join("PAT.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
-    Palette::from_bytes(archive.read_chunk(palette_num)?)
+    (0..archive.chunk_count())
+        .map(|index| PaletteSet::from_bytes(archive.read_chunk(index)?))
+        .collect()
+}
+
+pub(super) fn load_fbp_archive(data_dir: &Path) -> Option<FbpArchive> {
+    FbpArchive::new(&std::fs::read(data_dir.join("FBP.MKF")).ok()?)
+}
+
+pub(super) fn load_rng_archive(data_dir: &Path) -> Option<RngArchive> {
+    RngArchive::new(&std::fs::read(data_dir.join("RNG.MKF")).ok()?)
 }
 
 pub(super) fn load_map(data_dir: &Path, map_num: usize) -> Option<Map> {
@@ -157,10 +169,23 @@ pub(super) fn load_runtime_scene(
     number: u16,
     sprites: &RoleSprites,
 ) -> Option<LoadedScene> {
+    load_runtime_scene_with_map(data_dir, scene_data, number, None, sprites)
+}
+
+pub(super) fn load_runtime_scene_with_map(
+    data_dir: &Path,
+    scene_data: &SceneData,
+    number: u16,
+    map_override: Option<u16>,
+    sprites: &RoleSprites,
+) -> Option<LoadedScene> {
     let scene = scene_data.scene(usize::from(number))?;
     Some(LoadedScene {
         number,
-        map: load_map(data_dir, usize::from(scene.scene.map_num))?,
+        map: load_map(
+            data_dir,
+            usize::from(map_override.unwrap_or(scene.scene.map_num)),
+        )?,
         objects: create_scene_objects(&scene, sprites)?,
         enter_script: scene.scene.script_on_enter,
         teleport_script: scene.scene.script_on_teleport,

@@ -1,5 +1,6 @@
 use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::bitmap::Bitmap;
+use pal_assets::palette::PaletteSet;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::BattleEvent;
@@ -15,6 +16,7 @@ use super::menu_render::{
 };
 use super::menu_state::{ConfirmationMenu, FieldMenu, InventoryMenu, ShopMenu};
 use super::scene_render::render_tile_map;
+use super::visual::VisualState;
 use super::Viewport;
 use crate::renderer::Renderer;
 
@@ -40,6 +42,8 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) status_background: &'a Bitmap,
     pub(super) equip_background: &'a Bitmap,
     pub(super) ui_ticks: u64,
+    pub(super) palettes: &'a [PaletteSet],
+    pub(super) visual: &'a VisualState,
 }
 
 pub(super) fn render_game(
@@ -51,46 +55,53 @@ pub(super) fn render_game(
     script: ScriptDebugSnapshot,
     ui: UiRenderContext<'_>,
 ) {
-    if let Some(battle) = game.battle() {
-        render_battle(
+    if let Ok(palette) = ui.visual.palette(ui.palettes) {
+        renderer.set_palette(&palette);
+    }
+    let override_rendered = ui.visual.render_override(renderer);
+    if !override_rendered {
+        if let Some(battle) = game.battle() {
+            render_battle(
+                renderer,
+                battle,
+                BattleRenderResources {
+                    enemy_sprites: ui.enemy_battle_sprites,
+                    player_sprites: ui.player_battle_sprites,
+                    backgrounds: ui.battle_backgrounds,
+                    text: ui.text,
+                    font: ui.font,
+                },
+                BattleRenderState {
+                    selected_enemy: ui.battle_selected_enemy,
+                    selected_command: ui.battle_command_selected,
+                    ticks: ui.ui_ticks,
+                    event: ui.battle_event,
+                    event_ticks: ui.battle_event_ticks,
+                },
+            );
+            ui.visual.apply_post_effects(renderer);
+            return;
+        }
+        let viewport = Viewport::from(game.camera);
+        let roles = std::iter::once(&game.player)
+            .chain(game.party_followers())
+            .cloned()
+            .collect::<Vec<_>>();
+        render_tile_map(
             renderer,
-            battle,
-            BattleRenderResources {
-                enemy_sprites: ui.enemy_battle_sprites,
-                player_sprites: ui.player_battle_sprites,
-                backgrounds: ui.battle_backgrounds,
-                text: ui.text,
-                font: ui.font,
-            },
-            BattleRenderState {
-                selected_enemy: ui.battle_selected_enemy,
-                selected_command: ui.battle_command_selected,
-                ticks: ui.ui_ticks,
-                event: ui.battle_event,
-                event_ticks: ui.battle_event_ticks,
-            },
+            &game.map,
+            Some(role_sprites),
+            &roles,
+            &game.scene_objects,
+            viewport,
         );
-        return;
-    }
-    let viewport = Viewport::from(game.camera);
-    let roles = std::iter::once(&game.player)
-        .chain(game.party_followers())
-        .cloned()
-        .collect::<Vec<_>>();
-    render_tile_map(
-        renderer,
-        &game.map,
-        Some(role_sprites),
-        &roles,
-        &game.scene_objects,
-        viewport,
-    );
-    if show_collision {
-        render_collision_overlay(renderer, &game.map, &game.player, viewport);
-    }
-    if show_objects {
-        let focused_object_id = focused_debug_object(game, script).map(|object| object.id);
-        render_object_overlay(renderer, &game.scene_objects, viewport, focused_object_id);
+        if show_collision {
+            render_collision_overlay(renderer, &game.map, &game.player, viewport);
+        }
+        if show_objects {
+            let focused_object_id = focused_debug_object(game, script).map(|object| object.id);
+            render_object_overlay(renderer, &game.scene_objects, viewport, focused_object_id);
+        }
     }
     if let Some(dialog) = ui.dialog {
         render_dialog(renderer, ui.text, ui.font, ui.dialog_faces, dialog);
@@ -140,4 +151,5 @@ pub(super) fn render_game(
             ui.ui_ticks,
         );
     }
+    ui.visual.apply_post_effects(renderer);
 }
