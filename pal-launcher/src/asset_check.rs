@@ -116,6 +116,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut player_sprite_scripts = 0usize;
     let mut outside_zone_scripts = 0usize;
     let mut cd_music_scripts = 0usize;
+    let mut collect_enemy_scripts = 0usize;
+    let mut transmute_scripts = 0usize;
+    let mut hide_battle_scripts = 0usize;
+    let mut steal_enemy_scripts = 0usize;
+    let mut auto_battle_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -204,6 +209,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             );
             cd_music_scripts += 1;
         }
+        collect_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::CollectEnemy.raw());
+        transmute_scripts +=
+            usize::from(entry.opcode == ScriptOpcode::TransmuteCollectedEnemies.raw());
+        hide_battle_scripts += usize::from(entry.opcode == ScriptOpcode::HideBattleActor.raw());
+        steal_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::StealEnemy.raw());
+        auto_battle_scripts += usize::from(entry.opcode == ScriptOpcode::EnableAutoBattle.raw());
         if entry.opcode == ScriptOpcode::TransformEnemy.raw()
             || (entry.opcode == ScriptOpcode::SummonEnemy.raw()
                 && !matches!(entry.operands[0], 0 | u16::MAX))
@@ -320,6 +331,17 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         (outside_zone_scripts, cd_music_scripts),
         (2, 6),
         "real scripts no longer match object-zone and CD fallback coverage"
+    );
+    assert_eq!(
+        (
+            collect_enemy_scripts,
+            transmute_scripts,
+            hide_battle_scripts,
+            steal_enemy_scripts,
+            auto_battle_scripts,
+        ),
+        (1, 1, 1, 1, 1),
+        "real scripts no longer match collection, hiding, stealing and auto-battle coverage"
     );
     let (usable_item_definitions, throwable_item_definitions) = (0..global_objects.len())
         .filter_map(|index| global_objects.get(u16::try_from(index).ok()?))
@@ -1384,6 +1406,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
          {outside_zone_scripts} object-zone branches, {cd_music_scripts} CD-to-MIDI fallbacks"
     );
     println!(
+        "M6 battle command data passed: {collect_enemy_scripts} collection, \
+         {transmute_scripts} transmutation, {hide_battle_scripts} hiding, \
+         {steal_enemy_scripts} stealing, {auto_battle_scripts} auto-battle"
+    );
+    println!(
         "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"
     );
@@ -1455,6 +1482,11 @@ fn run_headless_battle_script(
                 | ScriptAction::SummonEnemy { failure_entry, .. }),
             ) => {
                 if !game.apply_script_action(action) && failure_entry != 0 {
+                    assert!(scripts.branch_to(failure_entry));
+                }
+            }
+            ScriptEvent::Action(action @ ScriptAction::CollectEnemy { failure_entry, .. }) => {
+                if !game.apply_script_action(action) {
                     assert!(scripts.branch_to(failure_entry));
                 }
             }

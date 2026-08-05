@@ -155,8 +155,8 @@ define_script_opcodes! {
     RemovePlayerStatus = 0x002F, "STATUS_CLEAR", "Remove a temporary status from a player.", Implemented;
     AdjustTemporaryPlayerStat = 0x0030, "STAT_TEMP", "Temporarily replace a player's extra stat effect from a percentage of the base value.", Implemented;
     SetTemporaryBattleSprite = 0x0031, "SPRITE_TEMP", "Temporarily change a player's battle sprite.", Implemented;
-    CollectEnemy = 0x0033, "COLLECT_ENEMY", "Collect an enemy for later conversion into items.", Unsupported;
-    TransmuteCollectedEnemies = 0x0034, "COLLECT_ITEM", "Convert collected enemies into items.", Unsupported;
+    CollectEnemy = 0x0033, "COLLECT_ENEMY", "Collect an enemy for later conversion into items.", Implemented;
+    TransmuteCollectedEnemies = 0x0034, "COLLECT_ITEM", "Convert collected enemies into items.", Implemented;
     ShakeScreen = 0x0035, "SHAKE", "Shake the screen for the requested duration and level.", Implemented;
     SelectRngAnimation = 0x0036, "RNG_SELECT", "Select the current RNG animation resource.", Implemented;
     PlayRngAnimation = 0x0037, "RNG_PLAY", "Play frames from the selected RNG animation.", Implemented;
@@ -195,7 +195,7 @@ define_script_opcodes! {
     ChangeScene = 0x0059, "SCENE", "Change to the specified scene.", Implemented;
     HalvePlayerHp = 0x005A, "HP_HALF", "Halve a player's HP.", Implemented;
     HalveEnemyHp = 0x005B, "ENEMY_HP_HALF", "Halve an enemy's HP.", Implemented;
-    HideBattleActor = 0x005C, "BATTLE_HIDE", "Hide a battle actor for a period.", Unsupported;
+    HideBattleActor = 0x005C, "BATTLE_HIDE", "Hide a battle actor for a period.", Implemented;
     JumpIfPlayerLacksPoison = 0x005D, "JNO_POISON", "Jump when a player lacks a specific poison.", Implemented;
     JumpIfEnemyLacksPoison = 0x005E, "JNO_ENEMY_POISON", "Jump when an enemy lacks a specific poison.", Implemented;
     KillPlayer = 0x005F, "KILL_PLAYER", "Immediately knock out a player.", Implemented;
@@ -209,7 +209,7 @@ define_script_opcodes! {
     EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Set the magic and casting rate used by an enemy.", Implemented;
     JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Implemented;
     EnemyEscape = 0x0069, "ENEMY_FLEE", "Make the enemy party escape and terminate the battle.", Implemented;
-    StealEnemy = 0x006A, "STEAL", "Steal from an enemy.", Unsupported;
+    StealEnemy = 0x006A, "STEAL", "Steal from an enemy.", Implemented;
     BlowEnemiesAway = 0x006B, "BLOW_ENEMIES", "Apply a battlefield displacement to enemies.", Unsupported;
     OffsetObjectAndAnimate = 0x006C, "OBJ_STEP", "Offset an event object and advance its animation.", Implemented;
     SetSceneScripts = 0x006D, "SCENE_SCRIPTS", "Set a scene's enter and teleport script entries.", Implemented;
@@ -240,7 +240,7 @@ define_script_opcodes! {
     AnimateObject = 0x0087, "OBJ_ANIMATE", "Advance an event object's animation.", Implemented;
     ScaleMagicByCash = 0x0088, "MAGIC_SCALE_CASH", "Consume cash and derive magic base damage from it.", Implemented;
     SetBattleResult = 0x0089, "BATTLE_RESULT", "Set the current battle result.", Implemented;
-    EnableAutoBattle = 0x008A, "AUTO_BATTLE", "Enable automatic commands for the next battle.", Unsupported;
+    EnableAutoBattle = 0x008A, "AUTO_BATTLE", "Enable automatic commands for the next battle.", Implemented;
     SetPalette = 0x008B, "PALETTE_SET", "Change the current palette number.", Implemented;
     FadeColor = 0x008C, "COLOR_FADE", "Fade the screen from or to a palette color.", Implemented;
     LevelUpPlayer = 0x008D, "LEVEL_UP", "Increase a player's level.", Implemented;
@@ -584,6 +584,19 @@ pub enum ScriptAction {
         role_id: u16,
         sprite: u16,
     },
+    CollectEnemy {
+        enemy_index: u16,
+        failure_entry: u16,
+    },
+    TransmuteCollectedEnemies,
+    HideBattleActor {
+        rounds: u16,
+    },
+    StealEnemy {
+        enemy_index: u16,
+        rate: u16,
+    },
+    EnableAutoBattle,
     DrainEnemyHp {
         enemy_index: u16,
         amount: u16,
@@ -1516,6 +1529,19 @@ impl ScriptRuntime {
                         },
                     ));
                 }
+                CollectEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::CollectEnemy {
+                        enemy_index: execution.object_id,
+                        failure_entry: entry.operands[0],
+                    }));
+                }
+                TransmuteCollectedEnemies => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::TransmuteCollectedEnemies));
+                }
                 SimulatePlayerMagic => {
                     let selected = (entry.operands[2] as i16).wrapping_sub(1);
                     let enemy_index = if selected < 0 {
@@ -1611,6 +1637,13 @@ impl ScriptRuntime {
                         maximum_damage: entry.operands[0],
                     }));
                 }
+                HideBattleActor => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::HideBattleActor {
+                        rounds: entry.operands[0],
+                    }));
+                }
                 KillPlayer => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -1639,12 +1672,25 @@ impl ScriptRuntime {
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Action(ScriptAction::EnemyEscape));
                 }
+                StealEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::StealEnemy {
+                        enemy_index: execution.object_id,
+                        rate: entry.operands[0],
+                    }));
+                }
                 SetBattleResult => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Action(ScriptAction::SetBattleResult {
                         result: entry.operands[0],
                     }));
+                }
+                EnableAutoBattle => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::EnableAutoBattle));
                 }
                 DivideEnemy => {
                     execution.entry = execution.entry.wrapping_add(1);
@@ -2280,18 +2326,8 @@ impl ScriptRuntime {
                     });
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
-                SetEquipmentEffect
-                | EquipItem
-                | CollectEnemy
-                | TransmuteCollectedEnemies
-                | ChasePlayer
-                | HideBattleActor
-                | StealEnemy
-                | BlowEnemiesAway
-                | EnableAutoBattle
-                | SetObjectScript
-                | PlayerMagicAnimation
-                | PlayEndingAnimation => {
+                SetEquipmentEffect | EquipItem | ChasePlayer | BlowEnemiesAway
+                | SetObjectScript | PlayerMagicAnimation | PlayEndingAnimation => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2413,7 +2449,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [156, 0, 9]);
+        assert_eq!(support_counts, [161, 0, 4]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2931,6 +2967,11 @@ mod tests {
             [ScriptOpcode::RemovePlayerStatus.raw(), 6, 0, 0],
             [ScriptOpcode::AdjustTemporaryPlayerStat.raw(), 17, 50, 2],
             [ScriptOpcode::SetTemporaryBattleSprite.raw(), 5, 0, 0],
+            [ScriptOpcode::CollectEnemy.raw(), 88, 0, 0],
+            [ScriptOpcode::TransmuteCollectedEnemies.raw(), 0, 0, 0],
+            [ScriptOpcode::HideBattleActor.raw(), 3, 0, 0],
+            [ScriptOpcode::StealEnemy.raw(), 5, 0, 0],
+            [ScriptOpcode::EnableAutoBattle.raw(), 0, 0, 0],
             [ScriptOpcode::DrainEnemyHp.raw(), 12, 0, 0],
             [ScriptOpcode::FleeBattle.raw(), 94, 0, 0],
             [ScriptOpcode::HalvePlayerHp.raw(), 0, 0, 0],
@@ -3011,6 +3052,17 @@ mod tests {
                 role_id: 7,
                 sprite: 5,
             },
+            ScriptAction::CollectEnemy {
+                enemy_index: 7,
+                failure_entry: 88,
+            },
+            ScriptAction::TransmuteCollectedEnemies,
+            ScriptAction::HideBattleActor { rounds: 3 },
+            ScriptAction::StealEnemy {
+                enemy_index: 7,
+                rate: 5,
+            },
+            ScriptAction::EnableAutoBattle,
             ScriptAction::DrainEnemyHp {
                 enemy_index: 7,
                 amount: 12,
@@ -3756,7 +3808,7 @@ mod tests {
     fn reports_unsupported_and_invalid_entries() {
         let mut runtime = ScriptRuntime::new(table(&[
             [0, 0, 0, 0],
-            [ScriptOpcode::StealEnemy.raw(), 0, 0, 0],
+            [ScriptOpcode::BlowEnemiesAway.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
         assert_eq!(
@@ -3764,7 +3816,7 @@ mod tests {
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: ScriptOpcode::StealEnemy.raw(),
+                opcode: ScriptOpcode::BlowEnemiesAway.raw(),
             })
         );
 

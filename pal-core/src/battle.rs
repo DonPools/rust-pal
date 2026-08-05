@@ -524,6 +524,13 @@ pub struct BattleRewards {
     pub cash: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BattleSteal {
+    Nothing,
+    Cash(u16),
+    Item(u16),
+}
+
 /// A minimal turn-based battle used by the first complete combat milestone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BattleState {
@@ -997,7 +1004,7 @@ impl BattleState {
                         self.flow = BattleFlow::PerformActions;
                         continue;
                     };
-                    if !actor.can_act() {
+                    if !actor.can_act() || self.hiding_time != 0 {
                         self.flow = BattleFlow::PerformActions;
                         continue;
                     }
@@ -1228,6 +1235,7 @@ impl BattleState {
                     for enemy in &mut self.enemies {
                         enemy.statuses.decrement_round();
                     }
+                    self.hiding_time = self.hiding_time.saturating_sub(1);
                     if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
                         self.flow = BattleFlow::Outcome(BattleResult::Won);
                         continue;
@@ -1236,7 +1244,9 @@ impl BattleState {
                         self.flow = BattleFlow::Outcome(BattleResult::Lost);
                         continue;
                     }
-                    self.queue_turn_start_scripts();
+                    if self.hiding_time == 0 {
+                        self.queue_turn_start_scripts();
+                    }
                     self.flow = BattleFlow::TurnStartScripts;
                     if self.has_script_work() {
                         return events;
@@ -1467,6 +1477,53 @@ impl BattleState {
             enemy.statuses = BattleStatuses::default();
             enemy.poisons = [BattlePoison::default(); MAX_BATTLE_POISONS];
         }
+    }
+
+    pub fn collect_enemy(&self, enemy_index: usize) -> Option<u16> {
+        (self.phase == BattlePhase::AwaitingCommand)
+            .then(|| self.enemies.get(enemy_index))
+            .flatten()
+            .filter(|enemy| enemy.is_alive())
+            .map(|enemy| enemy.collect_value)
+            .filter(|&value| value != 0)
+    }
+
+    pub fn steal_enemy(&mut self, enemy_index: usize, rate: u16) -> Option<BattleSteal> {
+        if self.phase != BattlePhase::AwaitingCommand {
+            return None;
+        }
+        let enemy = self.enemies.get(enemy_index)?;
+        if !enemy.is_alive() {
+            return None;
+        }
+        let item = enemy.steal_item;
+        let count = enemy.steal_item_count;
+        if count == 0 || (rate != 0 && self.random(11) > u32::from(rate)) {
+            return Some(BattleSteal::Nothing);
+        }
+        if item == 0 {
+            let amount = count / u16::try_from(self.random(2) + 2).ok()?;
+            self.enemies.get_mut(enemy_index)?.steal_item_count = count.saturating_sub(amount);
+            return Some(if amount == 0 {
+                BattleSteal::Nothing
+            } else {
+                BattleSteal::Cash(amount)
+            });
+        }
+        self.enemies.get_mut(enemy_index)?.steal_item_count = count - 1;
+        Some(BattleSteal::Item(item))
+    }
+
+    pub fn hide_players(&mut self, rounds: u16) -> bool {
+        if self.phase != BattlePhase::AwaitingCommand {
+            return false;
+        }
+        self.hiding_time = rounds;
+        true
+    }
+
+    pub fn hiding_time(&self) -> u16 {
+        self.hiding_time
     }
 
     pub fn rewards(&self) -> BattleRewards {
@@ -3259,6 +3316,33 @@ mod tests {
             Some(false)
         );
         assert_eq!(battle.enemies[0].object_id, 3);
+    }
+
+    #[test]
+    fn collect_steal_and_hiding_follow_battle_instance_state() {
+        let (data, objects, magics, mut role) = fixture(1_000, 100, 500);
+        role.attack_strength = 10;
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        assert_eq!(battle.collect_enemy(0), Some(5));
+        assert_eq!(battle.steal_enemy(0, 0), Some(BattleSteal::Item(8)));
+        assert_eq!(battle.enemies[0].steal_item_count, 1);
+
+        battle.enemies[0].steal_item = 0;
+        battle.enemies[0].steal_item_count = 6;
+        assert!(matches!(
+            battle.steal_enemy(0, 0),
+            Some(BattleSteal::Cash(2 | 3))
+        ));
+
+        assert!(battle.hide_players(1));
+        assert!(battle.attack(0).unwrap().is_empty());
+        let events = resolve_until_input_or_finish(&mut battle);
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, BattleEvent::EnemyAttack { .. })));
+        assert_eq!(battle.hiding_time(), 0);
     }
 
     #[test]

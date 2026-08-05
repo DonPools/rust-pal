@@ -13,7 +13,7 @@ use pal_assets::store::Stores;
 use crate::battle::{
     add_poison, cure_poison, cure_poison_by_level, BattleEnemy, BattleEvent, BattlePhase,
     BattlePoison, BattleRequest, BattleResult, BattleRewards, BattleScriptSource, BattleState,
-    BattleStatus, BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
+    BattleStatus, BattleStatuses, BattleSteal, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
 };
 use crate::map::tile_to_world;
 use crate::map::Map;
@@ -65,6 +65,7 @@ pub struct GameState<M = Map> {
     magics: Option<Magics>,
     battle_data: Option<BattleData>,
     active_battle: Option<BattleState>,
+    auto_battle: bool,
     player_statuses: [BattleStatuses; PLAYER_ROLE_COUNT],
     player_poisons: [[BattlePoison; MAX_BATTLE_POISONS]; PLAYER_ROLE_COUNT],
     collect_value: u16,
@@ -124,6 +125,7 @@ impl<M: CollisionMap> GameState<M> {
             magics: None,
             battle_data: None,
             active_battle: None,
+            auto_battle: false,
             player_statuses: [BattleStatuses::from_durations([0; BATTLE_STATUS_COUNT]);
                 PLAYER_ROLE_COUNT],
             player_poisons: [[BattlePoison {
@@ -220,6 +222,10 @@ impl<M: CollisionMap> GameState<M> {
 
     pub fn battle_mut(&mut self) -> Option<&mut BattleState> {
         self.active_battle.as_mut()
+    }
+
+    pub fn auto_battle(&self) -> bool {
+        self.auto_battle
     }
 
     pub fn is_enemy_turn(&self) -> bool {
@@ -447,6 +453,31 @@ impl<M: CollisionMap> GameState<M> {
 
     pub fn collect_value(&self) -> u16 {
         self.collect_value
+    }
+
+    fn transmute_collected_enemies(&mut self) -> bool {
+        if self.collect_value == 0 {
+            return true;
+        }
+        let Some(items) = self
+            .stores
+            .as_ref()
+            .and_then(|stores| stores.get(0))
+            .map(|store| store.items().collect::<Vec<_>>())
+            .filter(|items| items.len() >= usize::from(self.collect_value.min(9)))
+        else {
+            return false;
+        };
+        let spent = u16::try_from(self.growth_random(u32::from(self.collect_value)) + 1)
+            .unwrap_or(1)
+            .min(9);
+        let item_id = items[usize::from(spent - 1)];
+        let amount = self.inventory_count(item_id).saturating_add(1).min(99);
+        if !self.set_inventory_amount(item_id, amount) {
+            return false;
+        }
+        self.collect_value -= spent;
+        true
     }
 
     pub fn magic_sound(&self, magic_object: u16) -> Option<u16> {
@@ -818,6 +849,7 @@ impl<M: CollisionMap> GameState<M> {
                 .collect::<Vec<_>>();
             self.award_battle_experience(&living_roles, rewards.experience);
         }
+        self.auto_battle = false;
         Some((result, rewards))
     }
 
@@ -2277,6 +2309,7 @@ impl<M: CollisionMap> GameState<M> {
         self.player_poisons = snapshot.player_poisons;
         self.collect_value = snapshot.collect_value;
         self.active_battle = None;
+        self.auto_battle = false;
         self.cash = snapshot.cash;
         self.inventory = snapshot.inventory;
         self.item_use_scripts = snapshot.item_use_scripts;
@@ -2480,6 +2513,7 @@ impl<M: CollisionMap> GameState<M> {
         self.player_roles = Some(save.player_roles);
         self.global_objects = Some(save.objects);
         self.active_battle = None;
+        self.auto_battle = false;
         self.cash = save.cash;
         self.inventory = inventory;
         self.item_use_scripts.clear();
@@ -2902,6 +2936,55 @@ impl<M: CollisionMap> GameState<M> {
                     .as_mut()
                     .is_some_and(|battle| battle.set_temporary_player_sprite(role_id, sprite));
             }
+            ScriptAction::CollectEnemy { enemy_index, .. } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
+                let Some(value) = self
+                    .active_battle
+                    .as_ref()
+                    .and_then(|battle| battle.collect_enemy(enemy_index))
+                else {
+                    return false;
+                };
+                self.collect_value = self.collect_value.wrapping_add(value);
+                return true;
+            }
+            ScriptAction::TransmuteCollectedEnemies => {
+                return self.transmute_collected_enemies();
+            }
+            ScriptAction::HideBattleActor { rounds } => {
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.hide_players(rounds));
+            }
+            ScriptAction::StealEnemy { enemy_index, rate } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
+                let Some(stolen) = self
+                    .active_battle
+                    .as_mut()
+                    .and_then(|battle| battle.steal_enemy(enemy_index, rate))
+                else {
+                    return false;
+                };
+                match stolen {
+                    BattleSteal::Nothing => {}
+                    BattleSteal::Cash(amount) => {
+                        self.cash = self.cash.saturating_add(u32::from(amount));
+                    }
+                    BattleSteal::Item(item_id) => {
+                        let amount = self.inventory_count(item_id).saturating_add(1).min(99);
+                        if !self.set_inventory_amount(item_id, amount) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+            ScriptAction::EnableAutoBattle => self.auto_battle = true,
             ScriptAction::DrainEnemyHp {
                 enemy_index,
                 amount,
@@ -5188,6 +5271,45 @@ mod tests {
         assert_eq!(state.battle().unwrap().enemies[2].hp, 993);
         assert_eq!(state.transform_enemy(1, 1), Some(true));
         assert_eq!(state.battle().unwrap().enemies[2].hp, 993);
+    }
+
+    #[test]
+    fn collect_transmute_steal_hide_and_auto_battle_update_game_state() {
+        let mut state = battle_item_state(1);
+        state.stores = Some(
+            Stores::parse(&(10u16..=18).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap(),
+        );
+        state.battle_mut().unwrap().enemies[0].collect_value = 9;
+        state.battle_mut().unwrap().enemies[0].steal_item = 12;
+        state.battle_mut().unwrap().enemies[0].steal_item_count = 1;
+
+        assert!(state.apply_script_action(ScriptAction::CollectEnemy {
+            enemy_index: 0,
+            failure_entry: 80,
+        }));
+        assert_eq!(state.collect_value(), 9);
+        assert!(state.apply_script_action(ScriptAction::TransmuteCollectedEnemies));
+        assert!(state.collect_value() < 9);
+        assert_eq!(state.inventory().filter(|(item, _)| *item >= 10).count(), 1);
+
+        let stolen_before = state.inventory_count(12);
+        assert!(state.apply_script_action(ScriptAction::StealEnemy {
+            enemy_index: 0,
+            rate: 0,
+        }));
+        assert_eq!(state.inventory_count(12), stolen_before + 1);
+        assert!(state.apply_script_action(ScriptAction::HideBattleActor { rounds: 2 }));
+        assert_eq!(state.battle().unwrap().hiding_time(), 2);
+
+        assert!(state.apply_script_action(ScriptAction::EnableAutoBattle));
+        assert!(state.auto_battle());
+        assert!(state.battle_mut().unwrap().set_script_result(0));
+        assert_eq!(
+            state.advance_battle_resolution(),
+            vec![BattleEvent::Finished(BattleResult::Terminated)]
+        );
+        assert!(state.settle_battle().is_some());
+        assert!(!state.auto_battle());
     }
 
     #[test]

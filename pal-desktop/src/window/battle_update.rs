@@ -59,6 +59,39 @@ pub(super) fn update_battle(
         return Some(FinishedBattle { result, rewards });
     }
 
+    if game.auto_battle() {
+        let target = game.battle()?.first_living_enemy()?;
+        let magic = game.battle().and_then(|battle| {
+            let player = battle.players.get(battle.active_player()?)?;
+            player
+                .magics
+                .iter()
+                .enumerate()
+                .filter(|(_, magic)| player.mp >= magic.mp_cost)
+                .max_by_key(|(_, magic)| magic.base_damage)
+                .map(|(index, _)| index)
+        });
+        let events = if let Some(magic) = magic {
+            game.battle_mut()
+                .and_then(|battle| battle.cast_magic(magic, target))
+                .unwrap_or_default()
+        } else {
+            game.battle_mut()
+                .and_then(|battle| battle.attack(target))
+                .unwrap_or_default()
+        };
+        if !events.is_empty() {
+            services.battle_events.extend(events);
+            let event = *services
+                .battle_events
+                .front()
+                .expect("a newly queued automatic battle event is available");
+            services.battle_event_ticks = battle_event_duration(event);
+            play_battle_event_sounds(game, services, event);
+        }
+        return None;
+    }
+
     if update_battle_item_menu(input, game, services) {
         return None;
     }

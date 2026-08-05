@@ -247,6 +247,11 @@ pub(super) fn advance_script<L>(
             scripts.branch_to(failure_entry);
         }
         Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::CollectEnemy { failure_entry, .. },
+        )) if !game.apply_script_action(action) => {
+            scripts.branch_to(failure_entry);
+        }
+        Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SummonEnemy { failure_entry, .. },
         )) => {
             if game.apply_script_action(action) {
@@ -268,7 +273,8 @@ pub(super) fn advance_script<L>(
         Some(ScriptEvent::Action(
             pal_core::script::ScriptAction::SetEnemyStatus { .. }
             | pal_core::script::ScriptAction::FleeBattle { .. }
-            | pal_core::script::ScriptAction::DivideEnemy { .. },
+            | pal_core::script::ScriptAction::DivideEnemy { .. }
+            | pal_core::script::ScriptAction::CollectEnemy { .. },
         )) => {}
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::PlaceObjectInFront { blocked_entry, .. },
