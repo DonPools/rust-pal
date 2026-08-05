@@ -5,6 +5,8 @@ use pal_core::game::{GameInput, GameState};
 use pal_core::role::{Direction, RoleSprites};
 use pal_core::script::ScriptRuntime;
 
+use crate::audio::{AUDIO_VOLUME_MAX, AUDIO_VOLUME_STEP};
+
 use super::dialog::ActiveDialog;
 use super::menu_state::{
     update_wrapping_selection, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
@@ -325,7 +327,27 @@ where
             }
         }
         FieldMenu::System { selected } => {
-            update_wrapping_selection(selected, context.input.direction_pressed, 5);
+            match context.input.direction_pressed {
+                Some(direction @ (Direction::North | Direction::South)) => {
+                    update_wrapping_selection(selected, Some(direction), 5);
+                }
+                Some(direction @ (Direction::West | Direction::East)) => match *selected {
+                    2 => {
+                        let volume =
+                            adjusted_audio_volume(context.services.music.volume(), direction);
+                        context.services.music.set_volume(volume);
+                    }
+                    3 => {
+                        let volume = adjusted_audio_volume(
+                            context.services.sound_effects.volume(),
+                            direction,
+                        );
+                        context.services.sound_effects.set_volume(volume);
+                    }
+                    _ => {}
+                },
+                None => {}
+            }
             context.services.system_selected = *selected;
             if context.input.cancel {
                 menu = FieldMenu::Main {
@@ -397,6 +419,16 @@ where
     }
     if keep_menu {
         context.services.field_menu = Some(menu);
+    }
+}
+
+fn adjusted_audio_volume(volume: u8, direction: Direction) -> u8 {
+    match direction {
+        Direction::West => volume.saturating_sub(AUDIO_VOLUME_STEP),
+        Direction::East => volume
+            .saturating_add(AUDIO_VOLUME_STEP)
+            .min(AUDIO_VOLUME_MAX),
+        Direction::North | Direction::South => volume,
     }
 }
 
@@ -618,5 +650,21 @@ where
         context.services.inventory_menu = Some(menu);
     } else {
         (context.set_title)("Rust-PAL");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_audio_volume_steps_and_clamps() {
+        assert_eq!(adjusted_audio_volume(0, Direction::West), 0);
+        assert_eq!(adjusted_audio_volume(50, Direction::West), 40);
+        assert_eq!(adjusted_audio_volume(50, Direction::East), 60);
+        assert_eq!(
+            adjusted_audio_volume(AUDIO_VOLUME_MAX, Direction::East),
+            AUDIO_VOLUME_MAX
+        );
     }
 }

@@ -246,13 +246,28 @@ mod tests {
     #[test]
     fn parses_tempo_running_status_and_channel_events() {
         let song = MidiSong::parse(&midi(&[
-            0, 0xff, 0x51, 3, 0x07, 0xa1, 0x20, 0, 0xc0, 8, 0, 0x90, 60, 100, 0x60, 64, 80, 0x60,
-            0x80, 60, 0, 0, 0xff, 0x2f, 0,
+            0, 0xff, 0x51, 3, 0x07, 0xa1, 0x20, 0, 0xc0, 8, 0, 0xb2, 7, 90, 0, 0x99, 35, 127, 0,
+            0x90, 60, 100, 0x60, 64, 80, 0x60, 0x80, 60, 0, 0, 0xff, 0x2f, 0,
         ]))
         .unwrap();
         assert_eq!(song.duration_micros, 1_000_000);
-        assert_eq!(song.events.len(), 4);
-        assert_eq!(song.events[2].time_micros, 500_000);
+        assert_eq!(song.events.len(), 6);
+        assert_eq!(
+            song.events[1].kind,
+            MidiEventKind::ChannelVolume {
+                channel: 2,
+                volume: 90
+            }
+        );
+        assert_eq!(
+            song.events[2].kind,
+            MidiEventKind::NoteOn {
+                channel: 9,
+                key: 35,
+                velocity: 127
+            }
+        );
+        assert_eq!(song.events[4].time_micros, 500_000);
     }
 
     #[test]

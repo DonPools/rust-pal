@@ -1,6 +1,7 @@
 //! Desktop audio output for decoded PAL sound effects and SoundFont MIDI music.
 
 use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -17,10 +18,15 @@ const MAX_MUSIC_SECONDS: f64 = 15.0 * 60.0;
 const RELEASE_TAIL_SECONDS: f64 = 2.0;
 const MUSIC_BUFFER_FRAMES: usize = 2048;
 const MUSIC_BUFFER_COUNT: usize = 8;
+pub const AUDIO_VOLUME_MAX: u8 = 100;
+pub const AUDIO_VOLUME_STEP: u8 = 10;
+const DEFAULT_MUSIC_VOLUME: u8 = 70;
+const DEFAULT_SOUND_VOLUME: u8 = 100;
 
 pub struct SoundEffects {
     archive: MkfArchive,
     output: Option<(OutputStream, OutputStreamHandle)>,
+    volume: Arc<AtomicU8>,
     enabled: bool,
 }
 
@@ -31,7 +37,9 @@ pub struct BackgroundMusic {
     sink: Option<Sink>,
     pending: Option<Receiver<Option<StreamingMidiSource>>>,
     pending_fade: Option<Duration>,
+    loop_control: Option<Arc<AtomicBool>>,
     current: Option<u16>,
+    volume: u8,
     enabled: bool,
 }
 
@@ -44,7 +52,9 @@ impl BackgroundMusic {
             sink: None,
             pending: None,
             pending_fade: None,
+            loop_control: None,
             current: None,
+            volume: DEFAULT_MUSIC_VOLUME,
             enabled: true,
         })
     }
@@ -59,7 +69,12 @@ impl BackgroundMusic {
             self.current = Some(music_id);
             return true;
         }
-        if self.current == Some(music_id) && self.sink.as_ref().is_some_and(|sink| !sink.empty()) {
+        if self.current == Some(music_id)
+            && (self.pending.is_some() || self.sink.as_ref().is_some_and(|sink| !sink.empty()))
+        {
+            if let Some(control) = &self.loop_control {
+                control.store(looped, Ordering::Release);
+            }
             return true;
         }
         let Some(midi) = self
@@ -77,16 +92,19 @@ impl BackgroundMusic {
         let Ok(sink) = Sink::try_new(handle) else {
             return false;
         };
-        sink.set_volume(0.7);
+        sink.set_volume(volume_gain(self.volume));
         let fade = Duration::from_secs(u64::from(fade_seconds));
         let (sender, receiver) = mpsc::channel();
         let sound_font = Arc::clone(&self.sound_font);
+        let loop_control = Arc::new(AtomicBool::new(looped));
+        let producer_loop_control = Arc::clone(&loop_control);
         thread::spawn(move || {
-            let source = StreamingMidiSource::new(&midi, &sound_font, looped);
+            let source = StreamingMidiSource::new(&midi, &sound_font, producer_loop_control);
             let _ = sender.send(source);
         });
         self.pending = Some(receiver);
         self.pending_fade = Some(fade);
+        self.loop_control = Some(loop_control);
         self.sink = Some(sink);
         self.current = Some(music_id);
         true
@@ -107,6 +125,7 @@ impl BackgroundMusic {
             }
             Ok(None) => {
                 self.pending_fade = None;
+                self.loop_control = None;
                 if let Some(sink) = self.sink.take() {
                     sink.stop();
                 }
@@ -119,6 +138,7 @@ impl BackgroundMusic {
             }
             Err(TryRecvError::Disconnected) => {
                 self.pending_fade = None;
+                self.loop_control = None;
                 false
             }
         }
@@ -127,6 +147,7 @@ impl BackgroundMusic {
     pub fn stop(&mut self) {
         self.pending = None;
         self.pending_fade = None;
+        self.loop_control = None;
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -137,6 +158,17 @@ impl BackgroundMusic {
         self.enabled
     }
 
+    pub fn volume(&self) -> u8 {
+        self.volume
+    }
+
+    pub fn set_volume(&mut self, volume: u8) {
+        self.volume = volume.min(AUDIO_VOLUME_MAX);
+        if let Some(sink) = &self.sink {
+            sink.set_volume(volume_gain(self.volume));
+        }
+    }
+
     pub fn set_enabled(&mut self, enabled: bool) {
         if self.enabled == enabled {
             return;
@@ -145,6 +177,7 @@ impl BackgroundMusic {
         if !enabled {
             self.pending = None;
             self.pending_fade = None;
+            self.loop_control = None;
             if let Some(sink) = self.sink.take() {
                 sink.stop();
             }
@@ -185,13 +218,16 @@ fn parse_sound_font(data: &[u8]) -> Option<Arc<SoundFont>> {
 
 struct StreamingMidiSource {
     chunks: Receiver<Option<Vec<i16>>>,
-    max_frames: Option<usize>,
     buffer: Vec<i16>,
     position: usize,
 }
 
 impl StreamingMidiSource {
-    fn new(midi: &[u8], sound_font: &Arc<SoundFont>, looped: bool) -> Option<Self> {
+    fn new(
+        midi: &[u8],
+        sound_font: &Arc<SoundFont>,
+        loop_control: Arc<AtomicBool>,
+    ) -> Option<Self> {
         let mut reader = Cursor::new(midi);
         let midi_file = Arc::new(MidiFile::new(&mut reader).ok()?);
         let length = midi_file.get_length();
@@ -202,15 +238,25 @@ impl StreamingMidiSource {
         let settings = SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
         let synthesizer = Synthesizer::new(sound_font, &settings).ok()?;
         let mut sequencer = MidiFileSequencer::new(synthesizer);
-        sequencer.play(&midi_file, looped);
+        // Pass boundaries are controlled by `loop_control` so a repeated
+        // PLAY_MUSIC command can change looping without restarting the song.
+        sequencer.play(&midi_file, false);
 
-        let max_frames = (!looped)
-            .then(|| ((length + RELEASE_TAIL_SECONDS) * f64::from(MUSIC_SAMPLE_RATE)) as usize);
+        let sequence_frames = (length * f64::from(MUSIC_SAMPLE_RATE)).ceil().max(1.0) as usize;
+        let release_frames = (RELEASE_TAIL_SECONDS * f64::from(MUSIC_SAMPLE_RATE)).ceil() as usize;
         let (sender, receiver) = mpsc::sync_channel(MUSIC_BUFFER_COUNT);
-        thread::spawn(move || produce_midi_chunks(sequencer, sender, max_frames));
+        thread::spawn(move || {
+            produce_midi_chunks(
+                sequencer,
+                midi_file,
+                sender,
+                sequence_frames,
+                release_frames,
+                loop_control,
+            )
+        });
         Some(Self {
             chunks: receiver,
-            max_frames,
             buffer: Vec::new(),
             position: 0,
         })
@@ -228,22 +274,29 @@ impl StreamingMidiSource {
 
 fn produce_midi_chunks(
     mut sequencer: MidiFileSequencer,
+    midi_file: Arc<MidiFile>,
     sender: SyncSender<Option<Vec<i16>>>,
-    max_frames: Option<usize>,
+    sequence_frames: usize,
+    release_frames: usize,
+    loop_control: Arc<AtomicBool>,
 ) {
-    let mut rendered_frames = 0;
+    let mut pass_frames = 0usize;
     let mut left = vec![0.0f32; MUSIC_BUFFER_FRAMES];
     let mut right = vec![0.0f32; MUSIC_BUFFER_FRAMES];
     loop {
-        if let Some(max_frames) = max_frames {
-            if rendered_frames >= max_frames {
+        let looped = loop_control.load(Ordering::Acquire);
+        let frames = match midi_pass_action(pass_frames, sequence_frames, release_frames, looped) {
+            MidiPassAction::Restart => {
+                sequencer.play(&midi_file, false);
+                pass_frames = 0;
+                continue;
+            }
+            MidiPassAction::Finish => {
                 let _ = sender.send(None);
                 return;
             }
-        }
-        let frames = max_frames.map_or(MUSIC_BUFFER_FRAMES, |max| {
-            (max - rendered_frames).min(MUSIC_BUFFER_FRAMES)
-        });
+            MidiPassAction::Render(frames) => frames,
+        };
         sequencer.render(&mut left[..frames], &mut right[..frames]);
         let chunk = left[..frames]
             .iter()
@@ -253,8 +306,35 @@ fn produce_midi_chunks(
         if sender.send(Some(chunk)).is_err() {
             return;
         }
-        rendered_frames += frames;
+        pass_frames += frames;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MidiPassAction {
+    Render(usize),
+    Restart,
+    Finish,
+}
+
+fn midi_pass_action(
+    pass_frames: usize,
+    sequence_frames: usize,
+    release_frames: usize,
+    looped: bool,
+) -> MidiPassAction {
+    if pass_frames >= sequence_frames && looped {
+        return MidiPassAction::Restart;
+    }
+    let boundary = sequence_frames.saturating_add(if looped { 0 } else { release_frames });
+    if pass_frames >= boundary {
+        return MidiPassAction::Finish;
+    }
+    MidiPassAction::Render(
+        boundary
+            .saturating_sub(pass_frames)
+            .min(MUSIC_BUFFER_FRAMES),
+    )
 }
 
 impl Iterator for StreamingMidiSource {
@@ -284,8 +364,7 @@ impl Source for StreamingMidiSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        self.max_frames
-            .map(|frames| Duration::from_secs_f64(frames as f64 / f64::from(MUSIC_SAMPLE_RATE)))
+        None
     }
 }
 
@@ -301,11 +380,61 @@ fn float_to_pcm(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
 }
 
+fn volume_gain(volume: u8) -> f32 {
+    f32::from(volume.min(AUDIO_VOLUME_MAX)) / f32::from(AUDIO_VOLUME_MAX)
+}
+
+struct DynamicVolume<S> {
+    source: S,
+    volume: Arc<AtomicU8>,
+}
+
+impl<S> DynamicVolume<S> {
+    fn new(source: S, volume: Arc<AtomicU8>) -> Self {
+        Self { source, volume }
+    }
+}
+
+impl<S> Iterator for DynamicVolume<S>
+where
+    S: Source<Item = i16>,
+{
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sample = i32::from(self.source.next()?);
+        let volume = i32::from(self.volume.load(Ordering::Acquire).min(AUDIO_VOLUME_MAX));
+        Some((sample * volume / i32::from(AUDIO_VOLUME_MAX)) as i16)
+    }
+}
+
+impl<S> Source for DynamicVolume<S>
+where
+    S: Source<Item = i16>,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        self.source.current_frame_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.source.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.source.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.source.total_duration()
+    }
+}
+
 impl SoundEffects {
     pub fn new(voc_mkf: &[u8]) -> Option<Self> {
         Some(Self {
             archive: MkfArchive::new(voc_mkf)?,
             output: OutputStream::try_default().ok(),
+            volume: Arc::new(AtomicU8::new(DEFAULT_SOUND_VOLUME)),
             enabled: true,
         })
     }
@@ -338,13 +467,25 @@ impl SoundEffects {
             .into_iter()
             .map(|sample| (i16::from(sample) - 128) << 8)
             .collect::<Vec<_>>();
-        sink.append(SamplesBuffer::new(1, clip.sample_rate, samples));
+        sink.append(DynamicVolume::new(
+            SamplesBuffer::new(1, clip.sample_rate, samples),
+            Arc::clone(&self.volume),
+        ));
         sink.detach();
         true
     }
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn volume(&self) -> u8 {
+        self.volume.load(Ordering::Acquire)
+    }
+
+    pub fn set_volume(&self, volume: u8) {
+        self.volume
+            .store(volume.min(AUDIO_VOLUME_MAX), Ordering::Release);
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -368,6 +509,49 @@ mod tests {
         assert_eq!(
             interleave_pcm(&[0.0, 1.5], &[-1.5, 0.5]),
             vec![0, -32767, 32767, 16383]
+        );
+    }
+
+    #[test]
+    fn dynamic_volume_changes_an_active_source() {
+        let volume = Arc::new(AtomicU8::new(50));
+        let samples = SamplesBuffer::new(1, 8_000, vec![1_000i16, -1_000, i16::MAX]);
+        let mut source = DynamicVolume::new(samples, Arc::clone(&volume));
+        assert_eq!(source.next(), Some(500));
+        volume.store(0, Ordering::Release);
+        assert_eq!(source.next(), Some(0));
+        volume.store(AUDIO_VOLUME_MAX, Ordering::Release);
+        assert_eq!(source.next(), Some(i16::MAX));
+    }
+
+    #[test]
+    fn volume_gain_clamps_to_the_public_range() {
+        assert_eq!(volume_gain(0), 0.0);
+        assert_eq!(volume_gain(50), 0.5);
+        assert_eq!(volume_gain(u8::MAX), 1.0);
+    }
+
+    #[test]
+    fn midi_loop_flag_is_rechecked_at_pass_and_release_boundaries() {
+        assert_eq!(
+            midi_pass_action(0, 10_000, 2_000, true),
+            MidiPassAction::Render(MUSIC_BUFFER_FRAMES)
+        );
+        assert_eq!(
+            midi_pass_action(10_000, 10_000, 2_000, true),
+            MidiPassAction::Restart
+        );
+        assert_eq!(
+            midi_pass_action(10_000, 10_000, 2_000, false),
+            MidiPassAction::Render(2_000)
+        );
+        assert_eq!(
+            midi_pass_action(11_000, 10_000, 2_000, true),
+            MidiPassAction::Restart
+        );
+        assert_eq!(
+            midi_pass_action(12_000, 10_000, 2_000, false),
+            MidiPassAction::Finish
         );
     }
 }

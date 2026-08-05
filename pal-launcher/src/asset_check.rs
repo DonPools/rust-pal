@@ -1,6 +1,9 @@
 use pal_assets::fbp::FbpArchive;
+use pal_assets::midi::{MidiEventKind, MidiSong};
 use pal_assets::mkf::MkfArchive;
 use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
+use pal_assets::save::OriginalSave;
+use pal_assets::voc::VocClip;
 use pal_core::battle::{BattlePhase, BattleResult, BattleStatus};
 use pal_core::script::{ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
@@ -8,7 +11,9 @@ use pal_desktop::window::{
     render_battle, render_tile_map, BattleRenderResources, BattleRenderState, Viewport,
 };
 
-use crate::assets::{load_runtime_scene, validate_music, validate_sound_effects};
+use crate::assets::{
+    load_runtime_scene, load_runtime_scene_with_map, validate_music, validate_sound_effects,
+};
 use crate::bootstrap::BootstrappedGame;
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -42,6 +47,67 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let sound_effect_count = validate_sound_effects(&voc_mkf)
         .expect("VOC.MKF contains an invalid or unsupported sound effect");
     let music_count = validate_music(&midi_mkf).expect("MIDI.MKF contains invalid MIDI music");
+    let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
+    let mut midi_channels = std::collections::BTreeSet::new();
+    let mut midi_channel_volume_events = 0usize;
+    let mut multi_channel_songs = 0usize;
+    let mut midi_durations = std::collections::BTreeSet::new();
+    for index in 0..midi_archive.chunk_count() {
+        let chunk = midi_archive
+            .read_chunk(index)
+            .expect("MIDI chunk index disappeared");
+        if chunk.is_empty() {
+            continue;
+        }
+        let song = MidiSong::parse(chunk)
+            .unwrap_or_else(|| panic!("MIDI song {index} failed its compatibility audit"));
+        let mut song_channels = std::collections::BTreeSet::new();
+        for event in &song.events {
+            let channel = match event.kind {
+                MidiEventKind::NoteOn { channel, .. }
+                | MidiEventKind::NoteOff { channel, .. }
+                | MidiEventKind::ProgramChange { channel, .. }
+                | MidiEventKind::ChannelVolume { channel, .. } => channel,
+            };
+            song_channels.insert(channel);
+            midi_channels.insert(channel);
+            midi_channel_volume_events +=
+                usize::from(matches!(event.kind, MidiEventKind::ChannelVolume { .. }));
+        }
+        multi_channel_songs += usize::from(song_channels.len() > 1);
+        midi_durations.insert(song.duration_micros);
+    }
+    assert!(
+        midi_channels.len() > 1 && multi_channel_songs > 0,
+        "MIDI.MKF does not exercise multi-channel playback"
+    );
+    assert!(
+        midi_channel_volume_events > 0,
+        "MIDI.MKF contains no channel-volume controller events"
+    );
+    assert!(
+        midi_durations.len() > 1,
+        "MIDI.MKF does not exercise different song durations"
+    );
+    let voc_archive = MkfArchive::new(&voc_mkf).expect("invalid VOC.MKF archive");
+    let mut voc_sample_rates = std::collections::BTreeSet::new();
+    let mut voc_sample_lengths = std::collections::BTreeSet::new();
+    for index in 0..voc_archive.chunk_count() {
+        let chunk = voc_archive
+            .read_chunk(index)
+            .expect("VOC chunk index disappeared");
+        if chunk.is_empty() {
+            continue;
+        }
+        let clip = VocClip::parse(chunk)
+            .unwrap_or_else(|| panic!("VOC effect {index} failed its compatibility audit"));
+        voc_sample_rates.insert(clip.sample_rate);
+        voc_sample_lengths.insert(clip.samples.len());
+    }
+    assert!(
+        voc_sample_rates.len() > 1 && voc_sample_lengths.len() > 1,
+        "VOC.MKF does not exercise rate and length variants"
+    );
     let rng_data = std::fs::read(data_dir.join("RNG.MKF")).expect("failed to read RNG.MKF");
     let rng_archive = RngArchive::new(&rng_data).expect("invalid RNG.MKF archive");
     let mut rng_frame_count = 0usize;
@@ -117,6 +183,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut player_sprite_scripts = 0usize;
     let mut outside_zone_scripts = 0usize;
     let mut cd_music_scripts = 0usize;
+    let mut looped_music_scripts = 0usize;
+    let mut single_play_music_scripts = 0usize;
+    let mut faded_music_scripts = 0usize;
     let mut collect_enemy_scripts = 0usize;
     let mut transmute_scripts = 0usize;
     let mut hide_battle_scripts = 0usize;
@@ -225,6 +294,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 entry.operands[1]
             );
             cd_music_scripts += 1;
+        }
+        if entry.opcode == ScriptOpcode::PlayMusic.raw() && entry.operands[0] != 0 {
+            looped_music_scripts += usize::from(entry.operands[1] != 1);
+            single_play_music_scripts += usize::from(entry.operands[1] == 1);
+            faded_music_scripts += usize::from(entry.operands[1] == 3 && entry.operands[0] != 9);
         }
         collect_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::CollectEnemy.raw());
         transmute_scripts +=
@@ -374,6 +448,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         (2, 6),
         "real scripts no longer match object-zone and CD fallback coverage"
     );
+    assert!(
+        looped_music_scripts > 0 && single_play_music_scripts > 0 && faded_music_scripts > 0,
+        "real scripts do not exercise looped, single-play and faded music"
+    );
     assert_eq!(
         (
             collect_enemy_scripts,
@@ -410,7 +488,6 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "object data contains no usable or throwable item definitions"
     );
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
-    let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
     assert!(
         validate_midi_output(
             midi_archive.read_chunk(31).expect("missing opening music"),
@@ -1458,6 +1535,76 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(extended_story_messages >= 10);
     assert!(extended_story_actions >= 10);
     assert_eq!(game.party.members().len(), 2);
+    assert_eq!(game.item_count(99), 0);
+    let long_flow_messages =
+        intro_messages + inn_messages + first_battle_messages + extended_story_messages;
+    let long_flow_actions =
+        intro_actions + first_battle_actions + post_battle_actions + extended_story_actions;
+    assert!(long_flow_messages >= 100 && long_flow_actions >= 100);
+    let long_flow_party_members = game.party.members().len();
+
+    let real_save_audit =
+        load_real_save_audit(&data_dir, scene_data.event_object_count()).map(|audit| {
+            let scene_number = audit.selected.scene_number;
+            let scene_index = usize::from(scene_number) - 1;
+            let map_number = audit.selected.scenes[scene_index].map_num;
+            let cash = audit.selected.cash;
+            let music = audit.selected.music_number;
+            let party_members = audit.selected.party_member_count();
+            let leader_role = audit.selected.party[0].role_id;
+            let leader = audit
+                .selected
+                .player_roles
+                .role(usize::from(leader_role))
+                .expect("real save leader role is unavailable");
+            assert!(
+                role_sprites.has_directional_animation(
+                    usize::from(leader.scene_sprite_num),
+                    leader.frames_per_direction(),
+                ),
+                "real save leader sprite is unavailable"
+            );
+            let all_event_objects = audit
+                .selected
+                .event_objects
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    let id = u16::try_from(index).ok()?.checked_add(1)?;
+                    let frame_count = if event.sprite_num == 0 {
+                        0
+                    } else {
+                        role_sprites.character_frame_count(usize::from(event.sprite_num))?
+                    };
+                    pal_core::scene::SceneObject::from_asset(id, event, frame_count)
+                })
+                .collect::<Option<Vec<_>>>()
+                .expect("real save contains an invalid event object");
+            let loaded = load_runtime_scene_with_map(
+                &data_dir,
+                &scene_data,
+                scene_number,
+                Some(map_number),
+                &role_sprites,
+            )
+            .expect("real save scene or map is unavailable");
+            assert!(
+                game.restore_original_save(audit.selected, loaded.map, all_event_objects),
+                "real save could not be restored into the running game"
+            );
+            assert_eq!(game.scene_number, scene_number);
+            assert_eq!(game.cash, cash);
+            assert_eq!(game.current_music, (music != 0).then_some(music));
+            assert_eq!(game.party.members().len(), party_members);
+            (
+                audit.count,
+                audit.scene_count,
+                audit.layout_count,
+                audit.selected_name,
+                scene_number,
+                party_members,
+            )
+        });
 
     assert!(visible_pixels > 0, "rendered map is blank");
     assert!(
@@ -1506,8 +1653,18 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
          and {temporary_sprite_scripts} temporary-sprite scripts",
         script_count,
     );
-    println!("sound data passed: {sound_effect_count} PCM VOC effects");
-    println!("music data passed: {music_count} standard MIDI songs");
+    println!(
+        "sound data passed: {sound_effect_count} PCM VOC effects, {} sample rates, {} lengths",
+        voc_sample_rates.len(),
+        voc_sample_lengths.len(),
+    );
+    println!(
+        "music data passed: {music_count} standard MIDI songs, {} channels, \
+         {multi_channel_songs} multi-channel songs, {midi_channel_volume_events} volume events, \
+         {looped_music_scripts} looped, {single_play_music_scripts} single-play and \
+         {faded_music_scripts} faded script requests",
+        midi_channels.len(),
+    );
     println!(
         "cutscene data passed: {} RNG animations, {rng_frame_count} decoded frames, \
          {fbp_frame_count} FBP pictures, {fbp_script_references} script references, {} ending \
@@ -1542,7 +1699,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!("SoundFont data passed: {} bytes", sound_font.len());
     println!(
         "M3 data passed: {} party member, {} role definitions, {} {:?} object definitions",
-        game.party.members().len(),
+        long_flow_party_members,
         player_roles.iter().len(),
         global_objects.len(),
         global_objects.layout(),
@@ -1558,8 +1715,18 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
         "M6 extended story passed: {extended_story_messages} messages, \
          {extended_story_actions} actions, {} party members, next entry {extended_story_next_entry}",
-        game.party.members().len(),
+        long_flow_party_members,
     );
+    println!(
+        "M6 serial flow passed: {long_flow_messages} messages, {long_flow_actions} actions, \
+         scenes 1 -> 3 -> 1, snapshot restore, battle settlement and post-battle continuation"
+    );
+    if let Some((count, scenes, layouts, name, scene, party)) = real_save_audit {
+        println!(
+            "original save data passed: {count} real saves, {scenes} scenes, {layouts} layouts; \
+             restored {name} into scene {scene} with {party} party members"
+        );
+    }
     println!(
         "M6 dynamic enemy data passed: {divide_enemy_scripts} divisions, \
          {summon_enemy_scripts} summons, {transform_enemy_scripts} transformations"
@@ -1585,6 +1752,77 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"
     );
+}
+
+struct RealSaveAudit {
+    count: usize,
+    scene_count: usize,
+    layout_count: usize,
+    selected_name: String,
+    selected: OriginalSave,
+}
+
+fn load_real_save_audit(
+    data_dir: &std::path::Path,
+    event_object_count: usize,
+) -> Option<RealSaveAudit> {
+    let mut paths = std::fs::read_dir(data_dir.join("SAVES"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rpg"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut scenes = std::collections::BTreeSet::new();
+    let mut has_dos = false;
+    let mut has_win95 = false;
+    let mut selected = None;
+    for path in &paths {
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|error| panic!("failed to read real save {}: {error}", path.display()));
+        let save = OriginalSave::parse(&bytes)
+            .unwrap_or_else(|| panic!("invalid real save {}", path.display()));
+        assert_eq!(
+            save.event_objects.len(),
+            event_object_count,
+            "real save {} has a different event-object table",
+            path.display()
+        );
+        scenes.insert(save.scene_number);
+        match save.layout {
+            pal_assets::objects::ObjectLayout::Dos => has_dos = true,
+            pal_assets::objects::ObjectLayout::Win95 => has_win95 = true,
+        }
+        let replace =
+            selected
+                .as_ref()
+                .is_none_or(|(_, current): &(std::path::PathBuf, OriginalSave)| {
+                    save.saved_times >= current.saved_times
+                });
+        if replace {
+            selected = Some((path.clone(), save));
+        }
+    }
+    let (path, selected) = selected.expect("real save list unexpectedly became empty");
+    Some(RealSaveAudit {
+        count: paths.len(),
+        scene_count: scenes.len(),
+        layout_count: usize::from(has_dos) + usize::from(has_win95),
+        selected_name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown save")
+            .to_owned(),
+        selected,
+    })
 }
 
 fn text_control_counts(text: &pal_assets::text::TextLibrary) -> (usize, usize, usize) {

@@ -132,6 +132,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_new_pcm_markers_and_text_blocks() {
+        let clip = VocClip::parse(&voc(&[
+            4, 2, 0, 0, 9, 0, // marker
+            5, 3, 0, 0, b'P', b'A', b'L', // text
+            9, 14, 0, 0, 0x10, 0x27, 0, 0, 8, 1, 0, 0, 0, 0, 0, 0, 12, 34, // PCM
+            0,
+        ]))
+        .unwrap();
+        assert_eq!(clip.sample_rate, 10_000);
+        assert_eq!(clip.samples, [12, 34]);
+    }
+
+    #[test]
     fn rejects_truncation_bad_headers_and_unsupported_codecs() {
         assert!(VocClip::parse(&[]).is_none());
         let mut bad_checksum = voc(&[0]);

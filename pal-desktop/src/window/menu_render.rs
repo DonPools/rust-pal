@@ -328,6 +328,10 @@ pub(super) fn render_field_menu(
     status_background: &Bitmap,
     menu: FieldMenu,
     ui_ticks: u64,
+    music_enabled: bool,
+    music_volume: u8,
+    sound_enabled: bool,
+    sound_volume: u8,
 ) {
     match menu {
         FieldMenu::Main { selected } => {
@@ -409,17 +413,37 @@ pub(super) fn render_field_menu(
             const LABELS: [usize; 5] = [11, 12, 13, 14, 15];
             draw_ui_box(renderer, sprites, 40, 60, 4, 3, 0);
             for (index, word_id) in LABELS.into_iter().enumerate() {
+                let color = if index == selected {
+                    selected_color(ui_ticks)
+                } else {
+                    0x4f
+                };
                 if let Some(label) = text.word(word_id) {
                     renderer.draw_big5_text_shadowed(
                         font,
                         label,
                         53,
                         72 + index as i32 * 18,
-                        if index == selected {
-                            selected_color(ui_ticks)
-                        } else {
-                            0x4f
-                        },
+                        color,
+                    );
+                }
+                let audio = match index {
+                    2 => Some((music_enabled, music_volume)),
+                    3 => Some((sound_enabled, sound_volume)),
+                    _ => None,
+                };
+                if let Some((enabled, volume)) = audio {
+                    let value = if enabled {
+                        format!("{:>3}%", volume)
+                    } else {
+                        " OFF".to_owned()
+                    };
+                    renderer.draw_big5_text_shadowed(
+                        font,
+                        value.as_bytes(),
+                        101,
+                        72 + index as i32 * 18,
+                        color,
                     );
                 }
             }
