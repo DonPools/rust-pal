@@ -153,8 +153,8 @@ define_script_opcodes! {
     SetPlayerStatus = 0x002D, "STATUS_PLAYER", "Apply a temporary status to a player.", Implemented;
     SetEnemyStatus = 0x002E, "STATUS_ENEMY", "Apply a temporary status to an enemy.", Implemented;
     RemovePlayerStatus = 0x002F, "STATUS_CLEAR", "Remove a temporary status from a player.", Implemented;
-    AdjustTemporaryPlayerStat = 0x0030, "STAT_TEMP", "Temporarily increase a player stat by a percentage.", Unsupported;
-    SetTemporaryBattleSprite = 0x0031, "SPRITE_TEMP", "Temporarily change a player's battle sprite.", Unsupported;
+    AdjustTemporaryPlayerStat = 0x0030, "STAT_TEMP", "Temporarily replace a player's extra stat effect from a percentage of the base value.", Implemented;
+    SetTemporaryBattleSprite = 0x0031, "SPRITE_TEMP", "Temporarily change a player's battle sprite.", Implemented;
     CollectEnemy = 0x0033, "COLLECT_ENEMY", "Collect an enemy for later conversion into items.", Unsupported;
     TransmuteCollectedEnemies = 0x0034, "COLLECT_ITEM", "Convert collected enemies into items.", Unsupported;
     ShakeScreen = 0x0035, "SHAKE", "Shake the screen for the requested duration and level.", Implemented;
@@ -566,6 +566,15 @@ pub enum ScriptAction {
     RemovePlayerStatus {
         role_id: u16,
         status: u16,
+    },
+    AdjustTemporaryPlayerStat {
+        role_id: u16,
+        attribute: u16,
+        percent: i16,
+    },
+    SetTemporaryBattleSprite {
+        role_id: u16,
+        sprite: u16,
     },
     DrainEnemyHp {
         enemy_index: u16,
@@ -1451,6 +1460,30 @@ impl ScriptRuntime {
                         status: entry.operands[0],
                     }));
                 }
+                AdjustTemporaryPlayerStat => {
+                    let role_id = entry.operands[2]
+                        .checked_sub(1)
+                        .unwrap_or(execution.object_id);
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(
+                        ScriptAction::AdjustTemporaryPlayerStat {
+                            role_id,
+                            attribute: entry.operands[0],
+                            percent: entry.operands[1] as i16,
+                        },
+                    ));
+                }
+                SetTemporaryBattleSprite => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(
+                        ScriptAction::SetTemporaryBattleSprite {
+                            role_id: execution.object_id,
+                            sprite: entry.operands[0],
+                        },
+                    ));
+                }
                 SimulatePlayerMagic => {
                     let selected = (entry.operands[2] as i16).wrapping_sub(1);
                     let enemy_index = if selected < 0 {
@@ -2149,8 +2182,6 @@ impl ScriptRuntime {
                 // Known original instructions that the trigger runtime does not implement yet.
                 SetEquipmentEffect
                 | EquipItem
-                | AdjustTemporaryPlayerStat
-                | SetTemporaryBattleSprite
                 | CollectEnemy
                 | TransmuteCollectedEnemies
                 | ChasePlayer
@@ -2291,7 +2322,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [144, 1, 20]);
+        assert_eq!(support_counts, [146, 1, 18]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2807,6 +2838,8 @@ mod tests {
             [ScriptOpcode::SetPlayerStatus.raw(), 6, 4, 0],
             [ScriptOpcode::SetEnemyStatus.raw(), 2, 5, 99],
             [ScriptOpcode::RemovePlayerStatus.raw(), 6, 0, 0],
+            [ScriptOpcode::AdjustTemporaryPlayerStat.raw(), 17, 50, 2],
+            [ScriptOpcode::SetTemporaryBattleSprite.raw(), 5, 0, 0],
             [ScriptOpcode::DrainEnemyHp.raw(), 12, 0, 0],
             [ScriptOpcode::FleeBattle.raw(), 94, 0, 0],
             [ScriptOpcode::HalvePlayerHp.raw(), 0, 0, 0],
@@ -2874,6 +2907,15 @@ mod tests {
             ScriptAction::RemovePlayerStatus {
                 role_id: 7,
                 status: 6,
+            },
+            ScriptAction::AdjustTemporaryPlayerStat {
+                role_id: 1,
+                attribute: 17,
+                percent: 50,
+            },
+            ScriptAction::SetTemporaryBattleSprite {
+                role_id: 7,
+                sprite: 5,
             },
             ScriptAction::DrainEnemyHp {
                 enemy_index: 7,

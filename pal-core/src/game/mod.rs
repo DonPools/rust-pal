@@ -250,6 +250,7 @@ impl<M: CollisionMap> GameState<M> {
                 | BattleEvent::EnemyConfusedAttack { .. }
                 | BattleEvent::PlayerConfusedAttack { .. }
                 | BattleEvent::SimulatedMagic { .. }
+                | BattleEvent::PlayerFlee { .. }
                 | BattleEvent::RoundCompleted
                 | BattleEvent::Finished(_) => {}
             }
@@ -525,8 +526,19 @@ impl<M: CollisionMap> GameState<M> {
         };
         for target in targets {
             let Some(resistance) = self
-                .effective_player_role(target)
-                .map(|role| role.poison_resistance.min(100))
+                .active_battle
+                .as_ref()
+                .and_then(|battle| {
+                    battle
+                        .players
+                        .iter()
+                        .find(|player| player.role_id == target)
+                        .map(|player| player.poison_resistance.min(100))
+                })
+                .or_else(|| {
+                    self.effective_player_role(target)
+                        .map(|role| role.poison_resistance.min(100))
+                })
             else {
                 return false;
             };
@@ -2667,6 +2679,34 @@ impl<M: CollisionMap> GameState<M> {
             ScriptAction::RemovePlayerStatus { role_id, status } => {
                 return self.remove_player_status(role_id, status);
             }
+            ScriptAction::AdjustTemporaryPlayerStat {
+                role_id,
+                attribute,
+                percent,
+            } => {
+                let Some(role) = self.player_role(role_id) else {
+                    return false;
+                };
+                let base = match attribute {
+                    17 => role.attack_strength,
+                    18 => role.magic_strength,
+                    19 => role.defense,
+                    20 => role.dexterity,
+                    21 => role.flee_rate,
+                    22 => role.poison_resistance,
+                    _ => return false,
+                };
+                let value = (i32::from(base) * i32::from(percent) / 100) as u16;
+                return self.active_battle.as_mut().is_some_and(|battle| {
+                    battle.set_temporary_player_stat(role_id, attribute, value)
+                });
+            }
+            ScriptAction::SetTemporaryBattleSprite { role_id, sprite } => {
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.set_temporary_player_sprite(role_id, sprite));
+            }
             ScriptAction::DrainEnemyHp {
                 enemy_index,
                 amount,
@@ -4394,7 +4434,14 @@ mod tests {
     fn battle_item_state(party_size: usize) -> GameState<TestMap> {
         let mut role_data = vec![0; 900];
         for role in 0..party_size {
-            for (array, value) in [(7, 500u16), (9, 500), (17, 80), (19, 20), (20, 100)] {
+            for (array, value) in [
+                (7, 500u16),
+                (9, 500),
+                (17, 80),
+                (19, 20),
+                (20, 100),
+                (22, 20),
+            ] {
                 let offset = (array * PLAYER_ROLE_COUNT + role) * 2;
                 role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
             }
@@ -4690,6 +4737,67 @@ mod tests {
         ));
         assert_eq!(thrown.inventory_count(4), 0);
         assert_eq!(thrown.item_throw_scripts.get(&4), Some(&53));
+    }
+
+    #[test]
+    fn temporary_battle_effects_use_base_percentages_and_do_not_persist() {
+        let mut state = battle_item_state(1);
+        assert_eq!(state.battle().unwrap().players[0].attack_strength, 80);
+
+        assert!(
+            state.apply_script_action(ScriptAction::AdjustTemporaryPlayerStat {
+                role_id: 0,
+                attribute: 17,
+                percent: 50,
+            })
+        );
+        assert_eq!(state.battle().unwrap().players[0].attack_strength, 120);
+        assert!(
+            state.apply_script_action(ScriptAction::AdjustTemporaryPlayerStat {
+                role_id: 0,
+                attribute: 17,
+                percent: -50,
+            })
+        );
+        assert_eq!(state.battle().unwrap().players[0].attack_strength, 40);
+
+        assert!(
+            state.apply_script_action(ScriptAction::SetTemporaryBattleSprite {
+                role_id: 0,
+                sprite: 5,
+            })
+        );
+        assert_eq!(state.battle().unwrap().players[0].battle_sprite_num, 5);
+        assert!(
+            state.apply_script_action(ScriptAction::SetTemporaryBattleSprite {
+                role_id: 0,
+                sprite: 0,
+            })
+        );
+        assert_eq!(state.battle().unwrap().players[0].battle_sprite_num, 0);
+
+        assert!(
+            state.apply_script_action(ScriptAction::AdjustTemporaryPlayerStat {
+                role_id: 0,
+                attribute: 22,
+                percent: 400,
+            })
+        );
+        assert_eq!(state.battle().unwrap().players[0].poison_resistance, 100);
+        assert!(state.apply_script_action(ScriptAction::PoisonPlayer {
+            role_id: 0,
+            poison_id: 4,
+            apply_to_all: false,
+        }));
+        assert!(!state.player_has_poison(0, 4));
+
+        assert!(state.battle_mut().unwrap().set_script_result(0));
+        assert_eq!(
+            state.advance_battle_resolution(),
+            vec![BattleEvent::Finished(BattleResult::Terminated)]
+        );
+        assert!(state.settle_battle().is_some());
+        assert_eq!(state.player_role(0).unwrap().attack_strength, 80);
     }
 
     #[test]

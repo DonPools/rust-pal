@@ -319,6 +319,7 @@ enum PlayerAction {
         target: Option<usize>,
         script_entry: u16,
     },
+    Flee,
     AttackMate,
 }
 
@@ -348,6 +349,7 @@ pub struct BattlePlayer {
     pub magic_strength: u16,
     pub defense: u16,
     pub dexterity: u16,
+    pub flee_rate: u16,
     pub poison_resistance: u16,
     pub elemental_resistance: [u16; pal_assets::player_roles::MAGIC_ELEMENT_COUNT],
     pub attacks_all: bool,
@@ -508,6 +510,10 @@ pub enum BattleEvent {
         item_object: u16,
         target: Option<usize>,
     },
+    PlayerFlee {
+        player: usize,
+        succeeded: bool,
+    },
     RoundCompleted,
     Finished(BattleResult),
 }
@@ -533,6 +539,8 @@ pub struct BattleState {
     player_actions: Vec<Option<PlayerAction>>,
     action_queue: Vec<QueuedBattleAction>,
     action_index: usize,
+    temporary_player_stats: Vec<[u16; 6]>,
+    base_player_battle_sprites: Vec<u16>,
     round: u32,
     random_state: u32,
     battlefield_magic_effect: [i16; pal_assets::battle::MAGIC_ELEMENT_COUNT],
@@ -602,6 +610,11 @@ impl BattleState {
 
         let acted = vec![false; players.len()];
         let player_actions = vec![None; players.len()];
+        let temporary_player_stats = vec![[0; 6]; players.len()];
+        let base_player_battle_sprites = players
+            .iter()
+            .map(|player| player.battle_sprite_num)
+            .collect();
         let active_player = next_player(&players, &acted, 0);
         let phase = if active_player.is_some() {
             BattlePhase::AwaitingCommand
@@ -636,6 +649,8 @@ impl BattleState {
             player_actions,
             action_queue: Vec::new(),
             action_index: 0,
+            temporary_player_stats,
+            base_player_battle_sprites,
             round: 1,
             random_state: 0x6d2b_79f5,
             battlefield_magic_effect: battlefield_definition.magic_effect,
@@ -960,7 +975,9 @@ impl BattleState {
                                         return events;
                                     }
                                 }
-                                PlayerAction::Attack { .. } | PlayerAction::AttackMate => {}
+                                PlayerAction::Attack { .. }
+                                | PlayerAction::Flee
+                                | PlayerAction::AttackMate => {}
                             }
                             events.extend(self.perform_player_action(player, action));
                             if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
@@ -1382,6 +1399,48 @@ impl BattleState {
         true
     }
 
+    /// Replace one temporary extra-equipment effect for a battle player.
+    pub fn set_temporary_player_stat(&mut self, role_id: u16, attribute: u16, value: u16) -> bool {
+        let Some(slot) = attribute
+            .checked_sub(17)
+            .map(usize::from)
+            .filter(|&slot| slot < 6)
+        else {
+            return false;
+        };
+        let Some(player) = self
+            .players
+            .iter()
+            .position(|player| player.role_id == role_id)
+        else {
+            return false;
+        };
+        let Some(target) = battle_player_stat_mut(&mut self.players[player], attribute) else {
+            return false;
+        };
+        let previous = self.temporary_player_stats[player][slot];
+        *target = target.wrapping_sub(previous).wrapping_add(value);
+        self.temporary_player_stats[player][slot] = value;
+        true
+    }
+
+    /// Set the extra equipment battle sprite; zero restores the pre-battle value.
+    pub fn set_temporary_player_sprite(&mut self, role_id: u16, sprite: u16) -> bool {
+        let Some(player) = self
+            .players
+            .iter()
+            .position(|player| player.role_id == role_id)
+        else {
+            return false;
+        };
+        self.players[player].battle_sprite_num = if sprite == 0 {
+            self.base_player_battle_sprites[player]
+        } else {
+            sprite
+        };
+        true
+    }
+
     pub fn set_script_result(&mut self, raw_result: u16) -> bool {
         let result = match raw_result {
             0 => BattleResult::Terminated,
@@ -1616,6 +1675,16 @@ impl BattleState {
                 script_entry,
             },
         );
+        Some(Vec::new())
+    }
+
+    /// Commit a normal Classic-mode flee attempt for the active player.
+    pub fn attempt_flee(&mut self) -> Option<Vec<BattleEvent>> {
+        if self.is_boss || !self.can_commit_player_action() {
+            return None;
+        }
+        let player = self.active_player?;
+        self.commit_player_action(player, PlayerAction::Flee);
         Some(Vec::new())
     }
 
@@ -1928,7 +1997,10 @@ impl BattleState {
                         .unwrap_or(u16::MAX),
                 )
             }
-            PlayerAction::Attack { .. } | PlayerAction::Magic { .. } | PlayerAction::AttackMate => {
+            PlayerAction::Attack { .. }
+            | PlayerAction::Magic { .. }
+            | PlayerAction::Flee
+            | PlayerAction::AttackMate => {
                 return false;
             }
         };
@@ -2007,6 +2079,7 @@ impl BattleState {
                 self.perform_player_magic(player, target, spell)
             }
             PlayerAction::UseItem { .. } | PlayerAction::ThrowItem { .. } => Vec::new(),
+            PlayerAction::Flee => vec![self.perform_player_flee(player)],
             PlayerAction::AttackMate => self
                 .perform_confused_player_action(player)
                 .into_iter()
@@ -2051,6 +2124,29 @@ impl BattleState {
             }
         }
         events
+    }
+
+    fn perform_player_flee(&mut self, player: usize) -> BattleEvent {
+        let defense =
+            self.enemies
+                .iter()
+                .filter(|enemy| enemy.is_alive())
+                .fold(0u16, |total, enemy| {
+                    total
+                        .wrapping_add(enemy.dexterity)
+                        .wrapping_add(enemy.level.saturating_add(6).wrapping_mul(4))
+                });
+        let defense = u32::from(if defense as i16 >= 0 { defense } else { 0 });
+        let succeeded = !self.is_boss
+            && u32::from(self.players[player].flee_rate) >= self.random(defense.saturating_add(1));
+        if succeeded {
+            self.phase = BattlePhase::Finished(BattleResult::Fled);
+            self.flow = BattleFlow::Finished;
+            self.active_player = None;
+            self.pending_scripts.clear();
+            self.active_script = None;
+        }
+        BattleEvent::PlayerFlee { player, succeeded }
     }
 
     fn perform_player_magic(
@@ -2607,6 +2703,7 @@ fn battle_player(
         magic_strength: role.magic_strength,
         defense: role.defense,
         dexterity: role.dexterity,
+        flee_rate: role.flee_rate,
         poison_resistance: role.poison_resistance,
         elemental_resistance: role.elemental_resistance,
         attacks_all: role.attack_all,
@@ -2618,6 +2715,18 @@ fn battle_player(
         statuses: BattleStatuses::default(),
         poisons: [BattlePoison::default(); MAX_BATTLE_POISONS],
     })
+}
+
+fn battle_player_stat_mut(player: &mut BattlePlayer, attribute: u16) -> Option<&mut u16> {
+    match attribute {
+        17 => Some(&mut player.attack_strength),
+        18 => Some(&mut player.magic_strength),
+        19 => Some(&mut player.defense),
+        20 => Some(&mut player.dexterity),
+        21 => Some(&mut player.flee_rate),
+        22 => Some(&mut player.poison_resistance),
+        _ => None,
+    }
 }
 
 fn next_player(players: &[BattlePlayer], acted: &[bool], start: usize) -> Option<usize> {
@@ -2887,6 +2996,49 @@ mod tests {
             Some(BattleEvent::Finished(BattleResult::Fled))
         );
         assert_eq!(normal.settled_rewards(), Some(BattleRewards::default()));
+    }
+
+    #[test]
+    fn classic_flee_attempt_uses_the_action_queue_and_player_flee_rate() {
+        let (data, objects, magics, mut role) = fixture(500, 0, 500);
+        role.dexterity = 100;
+        role.flee_rate = u16::MAX;
+        let mut successful =
+            BattleState::new(request(false), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut successful);
+        assert!(successful.attempt_flee().unwrap().is_empty());
+        assert!(matches!(
+            resolve_until_input_or_finish(&mut successful).as_slice(),
+            [BattleEvent::PlayerFlee {
+                player: 0,
+                succeeded: true,
+            }]
+        ));
+        assert_eq!(
+            successful.phase(),
+            BattlePhase::Finished(BattleResult::Fled)
+        );
+
+        role.flee_rate = 0;
+        let mut failed =
+            BattleState::new(request(false), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut failed);
+        failed.random_state = 1;
+        assert!(failed.attempt_flee().unwrap().is_empty());
+        let events = resolve_until_input_or_finish(&mut failed);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BattleEvent::PlayerFlee {
+                player: 0,
+                succeeded: false,
+            }
+        )));
+        assert_eq!(failed.phase(), BattlePhase::AwaitingCommand);
+
+        let mut boss =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut boss);
+        assert!(boss.attempt_flee().is_none());
     }
 
     #[test]
@@ -3546,6 +3698,29 @@ mod tests {
         assert_eq!(statuses.duration(BattleStatus::Haste), 1000);
         statuses.decrement_round();
         assert_eq!(statuses.duration(BattleStatus::Haste), 999);
+    }
+
+    #[test]
+    fn temporary_player_stats_replace_the_extra_effect_and_sprite_restores() {
+        let (data, objects, magics, role) = fixture(500, 0, 500);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        assert_eq!(battle.players[0].attack_strength, 80);
+        assert_eq!(battle.players[0].battle_sprite_num, 0);
+
+        assert!(battle.set_temporary_player_stat(0, 17, 40));
+        assert_eq!(battle.players[0].attack_strength, 120);
+        assert!(battle.set_temporary_player_stat(0, 17, 20));
+        assert_eq!(battle.players[0].attack_strength, 100);
+        assert!(battle.set_temporary_player_stat(0, 21, 15));
+        assert_eq!(battle.players[0].flee_rate, 35);
+        assert!(!battle.set_temporary_player_stat(0, 16, 10));
+        assert!(!battle.set_temporary_player_stat(9, 17, 10));
+
+        assert!(battle.set_temporary_player_sprite(0, 5));
+        assert_eq!(battle.players[0].battle_sprite_num, 5);
+        assert!(battle.set_temporary_player_sprite(0, 0));
+        assert_eq!(battle.players[0].battle_sprite_num, 0);
     }
 
     #[test]

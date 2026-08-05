@@ -256,6 +256,7 @@ fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: Bat
         }
         BattleEvent::PlayerUseItem { .. }
         | BattleEvent::PlayerThrowItem { .. }
+        | BattleEvent::PlayerFlee { .. }
         | BattleEvent::RoundCompleted
         | BattleEvent::Finished(_) => return,
     };

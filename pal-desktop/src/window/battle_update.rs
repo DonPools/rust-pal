@@ -132,9 +132,8 @@ pub(super) fn update_battle(
         }
     } else if input.cancel {
         game.battle_mut()
-            .and_then(|battle| battle.flee())
-            .into_iter()
-            .collect()
+            .and_then(|battle| battle.attempt_flee())
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -339,7 +338,8 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         | BattleEvent::PlayerConfusedAttack { .. }
         | BattleEvent::SimulatedMagic { .. }
         | BattleEvent::PlayerUseItem { .. }
-        | BattleEvent::PlayerThrowItem { .. } => ACTION_EVENT_TICKS,
+        | BattleEvent::PlayerThrowItem { .. }
+        | BattleEvent::PlayerFlee { .. } => ACTION_EVENT_TICKS,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -481,6 +481,7 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 Some(vec![Some(player.magic_sound), None, None])
             })
         }
+        BattleEvent::PlayerFlee { .. } => Some(vec![Some(45), None, None]),
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => None,
     }
     .unwrap_or_default();
