@@ -620,6 +620,40 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         fbp_archive.frame(60).is_some(),
         "opening menu FBP picture 60 is unavailable"
     );
+    for picture in [38usize, 39] {
+        assert!(
+            fbp_archive.frame(picture).is_some(),
+            "opening splash FBP picture {picture} is unavailable"
+        );
+    }
+    let trademark = rng_archive
+        .animation(6)
+        .expect("opening trademark RNG animation 6 is unavailable");
+    assert!(
+        trademark
+            .compressed_frame(0)
+            .is_some_and(|frame| !frame.is_empty()),
+        "opening trademark RNG animation 6 has no first frame"
+    );
+    assert!(
+        role_sprites.decode_frame(71, 0).is_some(),
+        "opening splash MGO title sprite 71 is unavailable"
+    );
+    assert!(
+        role_sprites
+            .character_frame_count(73)
+            .is_some_and(|count| count >= 8),
+        "opening splash MGO crane sprite 73 has fewer than 8 frames"
+    );
+    for music in [4usize, 5] {
+        let chunk = midi_archive
+            .read_chunk(music)
+            .unwrap_or_else(|| panic!("opening MIDI song {music} is unavailable"));
+        assert!(
+            MidiSong::parse(chunk).is_some(),
+            "opening MIDI song {music} is invalid"
+        );
+    }
     let sample_word = (0..text.word_count())
         .filter_map(|index| text.word(index))
         .find(|word| !word.is_empty())
@@ -1677,7 +1711,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "event object {} rendered: {event_object_pixels} pixels",
         visible_object_id
     );
-    println!("opening menu data passed: FBP 60, 2 main labels and 5 save-slot labels");
+    println!(
+        "opening data passed: RNG 6, FBP 38/39/60, MGO 71/73, MIDI 4/5, 2 main labels and \
+         5 save-slot labels"
+    );
     println!(
         "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels, \
          {speed_controls} speed, {terminal_controls} terminal and {icon_controls} icon controls",

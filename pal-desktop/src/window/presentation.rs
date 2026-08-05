@@ -16,6 +16,7 @@ use super::menu_render::{
     render_shop_menu,
 };
 use super::menu_state::{ConfirmationMenu, FieldMenu, InventoryMenu, OpeningMenu, ShopMenu};
+use super::opening_intro::OpeningIntro;
 use super::scene_render::render_tile_map;
 use super::visual::VisualState;
 use super::Viewport;
@@ -23,6 +24,7 @@ use crate::renderer::Renderer;
 
 #[derive(Clone, Copy)]
 pub(super) struct UiRenderContext<'a> {
+    pub(super) opening_intro: Option<&'a OpeningIntro>,
     pub(super) opening_menu: Option<&'a OpeningMenu>,
     pub(super) opening_background: &'a Bitmap,
     pub(super) dialog: Option<&'a ActiveDialog>,
@@ -63,6 +65,12 @@ pub(super) fn render_game(
     script: ScriptDebugSnapshot,
     ui: UiRenderContext<'_>,
 ) {
+    if let Some(opening_intro) = ui.opening_intro {
+        opening_intro
+            .render(renderer, ui.palettes)
+            .expect("failed to render original opening animation");
+        return;
+    }
     if let Ok(mut palette) = ui.visual.palette(ui.palettes) {
         if ui.dialog.is_some_and(|dialog| {
             dialog.awaiting_input

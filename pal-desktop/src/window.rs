@@ -10,6 +10,7 @@ mod input;
 mod menu_render;
 mod menu_state;
 mod menu_update;
+mod opening_intro;
 mod original_save;
 mod presentation;
 mod scene_render;
@@ -63,6 +64,7 @@ use input::HeldInput;
 use menu_state::{update_wrapping_selection, InventoryMenu, ShopMenu, ShopMode};
 use menu_state::{FieldMenu, OpeningMenu, OpeningMenuAction};
 use menu_update::{update_active_menu, MenuUpdateContext};
+use opening_intro::{OpeningIntro, OpeningIntroAction, TITLE_MUSIC};
 use original_save::{
     latest_original_save_slot, original_save_slots, restore_original_save, RestoreOriginalSaveError,
 };
@@ -75,7 +77,8 @@ use session::SessionState;
 use snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
 pub use types::{GameResources, LoadedScene, Viewport};
 
-const OPENING_MENU_MUSIC: u16 = 31;
+const OPENING_MENU_MUSIC: u16 = 4;
+const OPENING_INTRO_UPDATE_MS: u64 = 10;
 
 pub fn run_game_window<L>(
     mut renderer: Renderer,
@@ -144,22 +147,12 @@ pub fn run_game_window<L>(
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
     let mut script_services = SessionState::new(auto_scripts, &voc_mkf, &midi_mkf, &sound_font);
-    let mut opening_menu = Some(OpeningMenu::new(original_save_slots(&original_save_dir)));
+    let mut opening_intro = Some(
+        OpeningIntro::from_resources(&fbp_archive, &rng_archive, &role_sprites)
+            .expect("failed to load original opening animation resources"),
+    );
+    let mut opening_menu = None;
     let mut pending_opening_action = None;
-    script_services.music.play(OPENING_MENU_MUSIC, true, 1);
-    script_services
-        .visual
-        .queue(ScriptVisual::FadeIn { speed: 1 });
-    script_services
-        .visual
-        .start_pending(
-            renderer.screen(),
-            &palettes,
-            &fbp_archive,
-            &rng_archive,
-            &role_sprites,
-        )
-        .expect("failed to start opening menu fade-in");
     render_game(
         &mut renderer,
         &game,
@@ -168,6 +161,7 @@ pub fn run_game_window<L>(
         show_objects,
         scripts.debug_snapshot(),
         UiRenderContext {
+            opening_intro: opening_intro.as_ref(),
             opening_menu: opening_menu.as_ref(),
             opening_background: &opening_background,
             dialog: dialog.as_ref(),
@@ -309,6 +303,7 @@ pub fn run_game_window<L>(
                                 show_objects,
                                 scripts.debug_snapshot(),
                                 UiRenderContext {
+                                    opening_intro: opening_intro.as_ref(),
                                     opening_menu: opening_menu.as_ref(),
                                     opening_background: &opening_background,
                                     dialog: dialog.as_ref(),
@@ -410,8 +405,68 @@ pub fn run_game_window<L>(
                 last_update = now;
 
                 let mut changed = false;
-                while accumulator >= tick {
+                let update_tick = if opening_intro.is_some() {
+                    Duration::from_millis(OPENING_INTRO_UPDATE_MS)
+                } else {
+                    tick
+                };
+                while accumulator >= update_tick {
                     let sampled = input.sample();
+                    if opening_intro.is_some() {
+                        let (intro_changed, action) = opening_intro
+                            .as_mut()
+                            .expect("opening intro was checked above")
+                            .update(update_tick.as_millis() as u32, sampled, &rng_archive)
+                            .unwrap_or_else(|error| {
+                                panic!("failed to play original opening animation: {error}")
+                            });
+                        changed |= intro_changed;
+                        let intro_finished = action == OpeningIntroAction::Finished;
+                        match action {
+                            OpeningIntroAction::None => {}
+                            OpeningIntroAction::PlayTitleMusic => {
+                                if !script_services.music.play(TITLE_MUSIC, true, 2) {
+                                    window.set_title("Rust-PAL [title music unavailable]");
+                                }
+                            }
+                            OpeningIntroAction::StopTitleMusic => {
+                                script_services.music.stop();
+                            }
+                            OpeningIntroAction::Finished => {
+                                opening_intro = None;
+                                opening_menu =
+                                    Some(OpeningMenu::new(original_save_slots(&original_save_dir)));
+                                script_services
+                                    .visual
+                                    .restore_original_environment(false, 0);
+                                if !script_services.music.play(OPENING_MENU_MUSIC, true, 1) {
+                                    window.set_title("Rust-PAL [opening music unavailable]");
+                                }
+                                script_services
+                                    .visual
+                                    .queue(ScriptVisual::FadeIn { speed: 1 });
+                                script_services
+                                    .visual
+                                    .start_pending(
+                                        renderer.screen(),
+                                        &palettes,
+                                        &fbp_archive,
+                                        &rng_archive,
+                                        &role_sprites,
+                                    )
+                                    .unwrap_or_else(|error| {
+                                        panic!("failed to start opening menu fade-in: {error}")
+                                    });
+                                changed = true;
+                            }
+                        }
+                        if intro_finished {
+                            accumulator = Duration::ZERO;
+                        } else {
+                            accumulator -= update_tick;
+                        }
+                        continue;
+                    }
                     let visual_was_blocking = script_services.visual.is_blocking();
                     let visual_scene_update_due = script_services.visual.scene_update_due();
                     if script_services.visual.needs_update() {
@@ -867,6 +922,7 @@ pub fn run_game_window<L>(
                         show_objects,
                         scripts.debug_snapshot(),
                         UiRenderContext {
+                            opening_intro: opening_intro.as_ref(),
                             opening_menu: opening_menu.as_ref(),
                             opening_background: &opening_background,
                             dialog: dialog.as_ref(),
@@ -902,7 +958,7 @@ pub fn run_game_window<L>(
                 if renderer.is_dirty() {
                     window.request_redraw();
                 }
-                target.set_control_flow(ControlFlow::WaitUntil(now + (tick - accumulator)));
+                target.set_control_flow(ControlFlow::WaitUntil(now + (update_tick - accumulator)));
             }
             _ => {}
         })
