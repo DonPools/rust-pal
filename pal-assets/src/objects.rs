@@ -33,6 +33,10 @@ impl GlobalObject {
         self.data[3]
     }
 
+    pub fn item_throw_script(self) -> u16 {
+        self.data[4]
+    }
+
     pub fn item_flags(self) -> u16 {
         self.data[6]
     }
@@ -160,6 +164,7 @@ mod tests {
         assert_eq!(objects.len(), 1);
         assert_eq!(objects.get(0).unwrap().item_use_script(), 30);
         assert_eq!(objects.get(0).unwrap().item_equip_script(), 40);
+        assert_eq!(objects.get(0).unwrap().item_throw_script(), 50);
         assert_eq!(objects.get(0).unwrap().magic_success_script(), 30);
         assert_eq!(objects.get(0).unwrap().magic_use_script(), 40);
         assert_eq!(objects.get(0).unwrap().enemy_id(), 10);

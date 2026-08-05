@@ -28,6 +28,7 @@ pub struct GameSnapshot {
     pub(super) inventory: Vec<(u16, u16)>,
     pub(super) item_use_scripts: BTreeMap<u16, u16>,
     pub(super) item_equip_scripts: BTreeMap<u16, u16>,
+    pub(super) item_throw_scripts: BTreeMap<u16, u16>,
     pub(super) magic_use_scripts: BTreeMap<u16, u16>,
     pub(super) magic_success_scripts: BTreeMap<u16, u16>,
     pub(super) equipment_effects: BTreeMap<(u16, u16, u16), i16>,
@@ -55,8 +56,8 @@ impl GameSnapshot {
     }
 }
 
-// Version 17 preserves player battle statuses, poisons, and collected-enemy value.
-pub(super) const SNAPSHOT_VERSION: u16 = 17;
+// Version 18 preserves mutable battle item throw-script entries.
+pub(super) const SNAPSHOT_VERSION: u16 = 18;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -79,6 +80,7 @@ pub(super) struct SnapshotData {
     pub(super) inventory: Vec<(u16, u16)>,
     pub(super) item_use_scripts: Vec<(u16, u16)>,
     pub(super) item_equip_scripts: Vec<(u16, u16)>,
+    pub(super) item_throw_scripts: Vec<(u16, u16)>,
     pub(super) magic_use_scripts: Vec<(u16, u16)>,
     pub(super) magic_success_scripts: Vec<(u16, u16)>,
     pub(super) equipment_effects: Vec<(u16, u16, u16, i16)>,

@@ -883,7 +883,8 @@ pub(super) fn render_inventory_menu(
     ui_ticks: u64,
 ) {
     match menu.mode {
-        InventoryMode::Target { item_id, selected } => {
+        InventoryMode::Target { item_id, selected }
+        | InventoryMode::BattleUseTarget { item_id, selected } => {
             render_item_target_menu(
                 renderer,
                 game,
@@ -915,7 +916,10 @@ pub(super) fn render_inventory_menu(
             );
             return;
         }
-        InventoryMode::Items | InventoryMode::EquipItems => {}
+        InventoryMode::Items
+        | InventoryMode::EquipItems
+        | InventoryMode::BattleUseItems
+        | InventoryMode::BattleThrowItems => {}
     }
 
     const PANEL_X: i32 = 2;
@@ -923,10 +927,22 @@ pub(super) fn render_inventory_menu(
     const ROW_HEIGHT: i32 = 18;
     const COLUMN_WIDTH: i32 = 100;
 
-    let inventory = if menu.mode == InventoryMode::EquipItems {
-        game.equippable_inventory()
-    } else {
-        game.inventory().collect::<Vec<_>>()
+    let inventory = match menu.mode {
+        InventoryMode::EquipItems => game.equippable_inventory(),
+        InventoryMode::BattleUseItems => game
+            .battle_usable_inventory()
+            .into_iter()
+            .map(|item| (item.item_id, item.amount))
+            .collect(),
+        InventoryMode::BattleThrowItems => game
+            .throwable_inventory()
+            .into_iter()
+            .map(|item| (item.item_id, item.amount))
+            .collect(),
+        InventoryMode::Items => game.inventory().collect(),
+        InventoryMode::EquipTarget { .. }
+        | InventoryMode::Target { .. }
+        | InventoryMode::BattleUseTarget { .. } => unreachable!("target menus returned above"),
     };
     let first = menu.first_visible(inventory.len());
     draw_ui_box_with_shadow(renderer, sprites, PANEL_X, PANEL_Y, 6, 17, 1, 0);
@@ -946,8 +962,12 @@ pub(super) fn render_inventory_menu(
         let y = PANEL_Y + 12 + line as i32 * ROW_HEIGHT;
         let selected = first + row == menu.selected;
         if let Some(name) = text.word(usize::from(item_id)) {
-            let usable =
-                menu.mode == InventoryMode::EquipItems || game.usable_item(item_id).is_some();
+            let usable = matches!(
+                menu.mode,
+                InventoryMode::EquipItems
+                    | InventoryMode::BattleUseItems
+                    | InventoryMode::BattleThrowItems
+            ) || game.usable_item(item_id).is_some();
             let color = match (selected, usable) {
                 (true, true) => selected_color(ui_ticks),
                 (true, false) => 0x1c,

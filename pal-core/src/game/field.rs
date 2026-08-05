@@ -1,6 +1,7 @@
 pub(super) const MAX_INVENTORY: usize = 1024;
 pub(super) const ITEM_FLAG_USABLE: u16 = 1 << 0;
 pub(super) const ITEM_FLAG_EQUIPPABLE: u16 = 1 << 1;
+pub(super) const ITEM_FLAG_THROWABLE: u16 = 1 << 2;
 pub(super) const ITEM_FLAG_CONSUMING: u16 = 1 << 3;
 pub(super) const ITEM_FLAG_APPLY_TO_ALL: u16 = 1 << 4;
 pub(super) const ITEM_FLAG_SELLABLE: u16 = 1 << 5;
@@ -28,6 +29,14 @@ pub struct EquippableItem {
     pub item_id: u16,
     pub amount: u16,
     pub script_entry: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThrowableItem {
+    pub item_id: u16,
+    pub amount: u16,
+    pub script_entry: u16,
+    pub apply_to_all: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

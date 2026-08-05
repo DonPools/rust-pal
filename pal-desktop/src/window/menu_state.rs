@@ -44,6 +44,9 @@ pub(super) enum InventoryMode {
     EquipItems,
     EquipTarget { item_id: u16, selected: usize },
     Target { item_id: u16, selected: usize },
+    BattleUseItems,
+    BattleThrowItems,
+    BattleUseTarget { item_id: u16, selected: usize },
 }
 
 impl Default for InventoryMenu {

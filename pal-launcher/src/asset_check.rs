@@ -101,6 +101,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut player_confusion_scripts = 0usize;
     let mut player_haste_scripts = 0usize;
     let mut simulated_magic_scripts = 0usize;
+    let mut thrown_weapon_scripts = 0usize;
     let mut mp_scaled_magic_scripts = 0usize;
     let mut cash_scaled_magic_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
@@ -119,6 +120,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             ScriptOpcode::from_raw(entry.opcode),
             Some(
                 ScriptOpcode::SimulatePlayerMagic
+                    | ScriptOpcode::ThrowWeapon
                     | ScriptOpcode::ScaleMagicByMp
                     | ScriptOpcode::ScaleMagicByCash
             )
@@ -131,6 +133,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         }
         simulated_magic_scripts +=
             usize::from(entry.opcode == ScriptOpcode::SimulatePlayerMagic.raw());
+        thrown_weapon_scripts += usize::from(entry.opcode == ScriptOpcode::ThrowWeapon.raw());
         mp_scaled_magic_scripts += usize::from(entry.opcode == ScriptOpcode::ScaleMagicByMp.raw());
         cash_scaled_magic_scripts +=
             usize::from(entry.opcode == ScriptOpcode::ScaleMagicByCash.raw());
@@ -188,6 +191,23 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(
         simulated_magic_scripts > 0 && mp_scaled_magic_scripts > 0 && cash_scaled_magic_scripts > 0,
         "scripts do not exercise simulated and dynamically scaled magic"
+    );
+    assert_eq!(
+        thrown_weapon_scripts, 32,
+        "real scripts no longer match the expected weapon-throw coverage"
+    );
+    let (usable_item_definitions, throwable_item_definitions) = (0..global_objects.len())
+        .filter_map(|index| global_objects.get(u16::try_from(index).ok()?))
+        .fold((0usize, 0usize), |(usable, throwable), object| {
+            let flags = object.item_flags();
+            (
+                usable + usize::from(flags & (1 << 0) != 0),
+                throwable + usize::from(flags & (1 << 2) != 0),
+            )
+        });
+    assert!(
+        usable_item_definitions > 0 && throwable_item_definitions > 0,
+        "object data contains no usable or throwable item definitions"
     );
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
     let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
@@ -1169,8 +1189,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
         "script data passed: {} records, {script_messages} messages, {script_ticks} timed actions, \
          {enemy_turn_jumps} enemy-turn branches, {simulated_magic_scripts} simulated, \
-         {mp_scaled_magic_scripts} MP-scaled and {cash_scaled_magic_scripts} cash-scaled magic \
-         scripts",
+         {thrown_weapon_scripts} weapon-throw, {mp_scaled_magic_scripts} MP-scaled and \
+         {cash_scaled_magic_scripts} cash-scaled magic scripts",
         script_count,
     );
     println!("sound data passed: {sound_effect_count} PCM VOC effects");
@@ -1190,6 +1210,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         battle_data.enemies.len(),
         battle_data.enemy_teams.len(),
         battle_data.battlefields.len(),
+    );
+    println!(
+        "battle item data passed: {usable_item_definitions} usable and \
+         {throwable_item_definitions} throwable object definitions"
     );
     println!(
         "battle graphics passed: {} ABC slots, {} F slots, {} screen pixels, {} feedback pixels, {} settlement pixels",

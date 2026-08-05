@@ -229,6 +229,8 @@ pub enum BattleScriptSource {
     EnemyAttackItem { enemy: usize, item_object: u16 },
     PlayerMagicUse { player: usize, magic_object: u16 },
     PlayerMagicSuccess { player: usize, magic_object: u16 },
+    PlayerItemUse { player: usize, item_object: u16 },
+    PlayerItemThrow { player: usize, item_object: u16 },
 }
 
 /// A battle-owned script invocation consumed by a platform script driver.
@@ -264,6 +266,12 @@ enum BattleFlow {
         phase: PlayerMagicPhase,
         use_succeeded: bool,
     },
+    PlayerItem {
+        player: usize,
+        item_object: u16,
+        target: Option<usize>,
+        kind: PlayerItemKind,
+    },
     RoundScripts,
     TurnStartScripts,
     Outcome(BattleResult),
@@ -286,9 +294,31 @@ enum PlayerMagicPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerItemKind {
+    Use { consuming: bool },
+    Throw,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlayerAction {
-    Attack { target: usize },
-    Magic { magic: usize, target: usize },
+    Attack {
+        target: usize,
+    },
+    Magic {
+        magic: usize,
+        target: usize,
+    },
+    UseItem {
+        item_object: u16,
+        target: Option<usize>,
+        script_entry: u16,
+        consuming: bool,
+    },
+    ThrowItem {
+        item_object: u16,
+        target: Option<usize>,
+        script_entry: u16,
+    },
     AttackMate,
 }
 
@@ -466,6 +496,17 @@ pub enum BattleEvent {
         magic_object: u16,
         damage: u16,
         defeated: bool,
+    },
+    PlayerUseItem {
+        player: usize,
+        item_object: u16,
+        target: Option<usize>,
+        consuming: bool,
+    },
+    PlayerThrowItem {
+        player: usize,
+        item_object: u16,
+        target: Option<usize>,
     },
     RoundCompleted,
     Finished(BattleResult),
@@ -827,6 +868,42 @@ impl BattleState {
                     }
                 }
             }
+            BattleScriptSource::PlayerItemUse {
+                player,
+                item_object,
+            } => {
+                let BattleFlow::PlayerItem {
+                    player: active_player,
+                    item_object: active_item,
+                    kind: PlayerItemKind::Use { .. },
+                    ..
+                } = self.flow
+                else {
+                    return false;
+                };
+                if active_player != player || active_item != item_object {
+                    return false;
+                }
+                self.finish_player_item();
+            }
+            BattleScriptSource::PlayerItemThrow {
+                player,
+                item_object,
+            } => {
+                let BattleFlow::PlayerItem {
+                    player: active_player,
+                    item_object: active_item,
+                    kind: PlayerItemKind::Throw,
+                    ..
+                } = self.flow
+                else {
+                    return false;
+                };
+                if active_player != player || active_item != item_object {
+                    return false;
+                }
+                self.finish_player_item();
+            }
         }
         self.detect_script_outcome();
         true
@@ -864,13 +941,26 @@ impl BattleState {
                     self.action_index += 1;
                     match queued.action {
                         BattleActorAction::Player { player, action } => {
-                            if let PlayerAction::Magic { magic, target } = action {
-                                if self.begin_player_magic(player, magic, target) {
-                                    if self.has_script_work() {
+                            match action {
+                                PlayerAction::Magic { magic, target } => {
+                                    if self.begin_player_magic(player, magic, target) {
+                                        if self.has_script_work() {
+                                            return events;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                PlayerAction::UseItem { .. } | PlayerAction::ThrowItem { .. } => {
+                                    if self.begin_player_item(player, action) {
+                                        if self.has_script_work() {
+                                            return events;
+                                        }
+                                        events.extend(self.pending_events.drain(..));
+                                        self.detect_script_outcome();
                                         return events;
                                     }
-                                    continue;
                                 }
+                                PlayerAction::Attack { .. } | PlayerAction::AttackMate => {}
                             }
                             events.extend(self.perform_player_action(player, action));
                             if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
@@ -1118,6 +1208,12 @@ impl BattleState {
                         return events;
                     }
                 },
+                BattleFlow::PlayerItem { .. } => {
+                    self.finish_player_item();
+                    events.extend(self.pending_events.drain(..));
+                    self.detect_script_outcome();
+                    return events;
+                }
                 BattleFlow::RoundScripts => {
                     for player in &mut self.players {
                         player.statuses.decrement_round();
@@ -1471,6 +1567,88 @@ impl BattleState {
         Some(Vec::new())
     }
 
+    pub fn use_item(
+        &mut self,
+        item_object: u16,
+        target: Option<usize>,
+        script_entry: u16,
+        consuming: bool,
+    ) -> Option<Vec<BattleEvent>> {
+        if !self.can_commit_player_action()
+            || target.is_some_and(|target| target >= self.players.len())
+        {
+            return None;
+        }
+        let player = self.active_player?;
+        self.commit_player_action(
+            player,
+            PlayerAction::UseItem {
+                item_object,
+                target,
+                script_entry,
+                consuming,
+            },
+        );
+        Some(Vec::new())
+    }
+
+    pub fn throw_item(
+        &mut self,
+        item_object: u16,
+        target: Option<usize>,
+        script_entry: u16,
+    ) -> Option<Vec<BattleEvent>> {
+        if !self.can_commit_player_action()
+            || target.is_some_and(|target| {
+                self.enemies
+                    .get(target)
+                    .is_none_or(|enemy| !enemy.is_alive())
+            })
+        {
+            return None;
+        }
+        let player = self.active_player?;
+        self.commit_player_action(
+            player,
+            PlayerAction::ThrowItem {
+                item_object,
+                target,
+                script_entry,
+            },
+        );
+        Some(Vec::new())
+    }
+
+    pub fn reserved_item_count(&self, item_object: u16) -> u16 {
+        let count = self
+            .player_actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Some(PlayerAction::UseItem {
+                        item_object: reserved,
+                        consuming: true,
+                        ..
+                    } | PlayerAction::ThrowItem {
+                        item_object: reserved,
+                        ..
+                    }) if *reserved == item_object
+                )
+            })
+            .count();
+        u16::try_from(count).unwrap_or(u16::MAX)
+    }
+
+    fn can_commit_player_action(&self) -> bool {
+        self.phase == BattlePhase::AwaitingCommand
+            && self.flow == BattleFlow::Command
+            && !self.has_script_work()
+            && self.active_player.is_some_and(|player| {
+                self.players.get(player).is_some_and(BattlePlayer::can_act) && !self.acted[player]
+            })
+    }
+
     pub fn flee(&mut self) -> Option<BattleEvent> {
         if self.phase != BattlePhase::AwaitingCommand
             || self.flow != BattleFlow::Command
@@ -1630,10 +1808,13 @@ impl BattleState {
         self.jitter_dexterity(base)
     }
 
-    fn player_action_dexterity(&mut self, player: usize, _action: PlayerAction) -> i32 {
+    fn player_action_dexterity(&mut self, player: usize, action: PlayerAction) -> i32 {
         let actor = &self.players[player];
         let mut dexterity = u32::from(actor.dexterity);
         if actor.statuses.is_active(BattleStatus::Haste) {
+            dexterity = dexterity.saturating_mul(3);
+        }
+        if matches!(action, PlayerAction::UseItem { .. }) {
             dexterity = dexterity.saturating_mul(3);
         }
         dexterity = dexterity.min(999);
@@ -1682,6 +1863,120 @@ impl BattleState {
         true
     }
 
+    fn begin_player_item(&mut self, player: usize, action: PlayerAction) -> bool {
+        let Some(actor) = self.players.get(player) else {
+            return false;
+        };
+        if !actor.can_act() || actor.statuses.is_active(BattleStatus::Confused) {
+            return false;
+        }
+        let (item_object, target, script_entry, kind, source, object_id) = match action {
+            PlayerAction::UseItem {
+                item_object,
+                target,
+                script_entry,
+                consuming,
+            } => {
+                let object_id = match target {
+                    Some(target) => {
+                        let Some(target) = self.players.get(target) else {
+                            return false;
+                        };
+                        target.role_id
+                    }
+                    None => u16::MAX,
+                };
+                (
+                    item_object,
+                    target,
+                    script_entry,
+                    PlayerItemKind::Use { consuming },
+                    BattleScriptSource::PlayerItemUse {
+                        player,
+                        item_object,
+                    },
+                    object_id,
+                )
+            }
+            PlayerAction::ThrowItem {
+                item_object,
+                target,
+                script_entry,
+            } => {
+                let target_required = target.is_some();
+                let target = match target {
+                    Some(target) if self.enemies.get(target).is_some_and(BattleEnemy::is_alive) => {
+                        Some(target)
+                    }
+                    Some(_) => self.first_living_enemy(),
+                    None => None,
+                };
+                if target_required && target.is_none() {
+                    return false;
+                }
+                (
+                    item_object,
+                    target,
+                    script_entry,
+                    PlayerItemKind::Throw,
+                    BattleScriptSource::PlayerItemThrow {
+                        player,
+                        item_object,
+                    },
+                    target
+                        .and_then(|target| u16::try_from(target).ok())
+                        .unwrap_or(u16::MAX),
+                )
+            }
+            PlayerAction::Attack { .. } | PlayerAction::Magic { .. } | PlayerAction::AttackMate => {
+                return false;
+            }
+        };
+        self.flow = BattleFlow::PlayerItem {
+            player,
+            item_object,
+            target,
+            kind,
+        };
+        if script_entry == 0 {
+            self.finish_player_item();
+        } else {
+            self.pending_scripts.push_back(BattleScriptRequest {
+                source,
+                entry: script_entry,
+                object_id,
+            });
+        }
+        true
+    }
+
+    fn finish_player_item(&mut self) {
+        let BattleFlow::PlayerItem {
+            player,
+            item_object,
+            target,
+            kind,
+        } = self.flow
+        else {
+            return;
+        };
+        let event = match kind {
+            PlayerItemKind::Use { consuming } => BattleEvent::PlayerUseItem {
+                player,
+                item_object,
+                target,
+                consuming,
+            },
+            PlayerItemKind::Throw => BattleEvent::PlayerThrowItem {
+                player,
+                item_object,
+                target,
+            },
+        };
+        self.pending_events.push_front(event);
+        self.flow = BattleFlow::PerformActions;
+    }
+
     fn perform_player_action(&mut self, player: usize, action: PlayerAction) -> Vec<BattleEvent> {
         if !self.players.get(player).is_some_and(BattlePlayer::can_act) {
             return Vec::new();
@@ -1711,6 +2006,7 @@ impl BattleState {
                 self.players[player].mp -= spell.mp_cost;
                 self.perform_player_magic(player, target, spell)
             }
+            PlayerAction::UseItem { .. } | PlayerAction::ThrowItem { .. } => Vec::new(),
             PlayerAction::AttackMate => self
                 .perform_confused_player_action(player)
                 .into_iter()
@@ -1911,6 +2207,41 @@ impl BattleState {
             });
         }
         true
+    }
+
+    pub fn throw_weapon(
+        &mut self,
+        target: usize,
+        magic_object: u16,
+        multiplier: u16,
+        objects: &GlobalObjects,
+        magics: &Magics,
+    ) -> bool {
+        let BattleFlow::PlayerItem {
+            player,
+            kind: PlayerItemKind::Throw,
+            ..
+        } = self.flow
+        else {
+            return false;
+        };
+        let Some(attack_strength) = self
+            .players
+            .get(player)
+            .map(|player| player.attack_strength)
+        else {
+            return false;
+        };
+        let strength = u32::from(multiplier)
+            .saturating_mul(5)
+            .saturating_add(u32::from(attack_strength).saturating_mul(self.random(4)));
+        self.simulate_player_magic(
+            target,
+            magic_object,
+            u16::try_from(strength).unwrap_or(u16::MAX),
+            objects,
+            magics,
+        )
     }
 
     fn queue_round_poison_scripts(&mut self) {
@@ -2697,6 +3028,170 @@ mod tests {
                 ..
             }] if *damage > 0
         ));
+    }
+
+    #[test]
+    fn consuming_and_thrown_items_reserve_inventory_during_command_selection() {
+        let (data, objects, magics, mut role) = fixture(500, 0, 500);
+        role.dexterity = 100;
+        let other = role.clone();
+        let mut battle = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &role), (1, &other)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut battle);
+
+        assert!(battle.use_item(20, Some(0), 30, true).is_some());
+        assert_eq!(battle.reserved_item_count(20), 1);
+        assert!(battle.throw_item(21, Some(0), 40).is_some());
+        assert_eq!(battle.reserved_item_count(21), 1);
+
+        let mut non_consuming = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &role), (1, &other)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut non_consuming);
+        assert!(non_consuming.use_item(22, Some(0), 50, false).is_some());
+        assert_eq!(non_consuming.reserved_item_count(22), 0);
+    }
+
+    #[test]
+    fn battle_item_scripts_use_original_owners_and_finish_even_when_failed() {
+        let (data, objects, magics, mut role) = fixture(500, 0, 500);
+        role.dexterity = 100;
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(4, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        assert!(battle.use_item(20, Some(0), 30, true).is_some());
+
+        assert!(battle.advance_resolution().is_empty());
+        assert_eq!(
+            battle.take_script_request(),
+            Some(BattleScriptRequest {
+                source: BattleScriptSource::PlayerItemUse {
+                    player: 0,
+                    item_object: 20,
+                },
+                entry: 30,
+                object_id: 4,
+            })
+        );
+        assert!(battle.complete_script_with_result(31, false));
+        assert_eq!(
+            battle.advance_resolution(),
+            vec![BattleEvent::PlayerUseItem {
+                player: 0,
+                item_object: 20,
+                target: Some(0),
+                consuming: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn all_target_and_empty_item_scripts_keep_original_completion_semantics() {
+        let (data, objects, magics, mut role) = fixture(500, 0, 500);
+        role.dexterity = 100;
+        let mut use_all =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut use_all);
+        assert!(use_all.use_item(20, None, 30, true).is_some());
+        assert!(use_all.advance_resolution().is_empty());
+        assert_eq!(use_all.take_script_request().unwrap().object_id, u16::MAX);
+
+        let mut throw_all =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut throw_all);
+        assert!(throw_all.throw_item(21, None, 40).is_some());
+        assert!(throw_all.advance_resolution().is_empty());
+        assert_eq!(throw_all.take_script_request().unwrap().object_id, u16::MAX);
+
+        let mut empty_script =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut empty_script);
+        assert!(empty_script.use_item(22, Some(0), 0, false).is_some());
+        assert!(matches!(
+            empty_script.advance_resolution().as_slice(),
+            [BattleEvent::PlayerUseItem {
+                item_object: 22,
+                consuming: false,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn thrown_weapon_script_uses_enemy_owner_and_acting_player_attack() {
+        let (data, objects, magics, mut role) = fixture(500, 0, 500);
+        role.dexterity = 100;
+        role.attack_strength = 80;
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        assert!(battle.throw_item(21, Some(0), 40).is_some());
+
+        assert!(battle.advance_resolution().is_empty());
+        assert_eq!(
+            battle.take_script_request(),
+            Some(BattleScriptRequest {
+                source: BattleScriptSource::PlayerItemThrow {
+                    player: 0,
+                    item_object: 21,
+                },
+                entry: 40,
+                object_id: 0,
+            })
+        );
+        battle.random_state = 1;
+        assert!(battle.throw_weapon(0, 2, 2, &objects, &magics));
+        assert!(battle.complete_script(41));
+        assert!(matches!(
+            battle.advance_resolution().as_slice(),
+            [
+                BattleEvent::PlayerThrowItem {
+                    player: 0,
+                    item_object: 21,
+                    target: Some(0),
+                },
+                BattleEvent::SimulatedMagic {
+                    enemy: 0,
+                    magic_object: 2,
+                    damage,
+                    ..
+                }
+            ] if *damage > 50
+        ));
+    }
+
+    #[test]
+    fn item_is_not_completed_when_player_is_defeated_before_acting() {
+        let (data, objects, magics, mut role) = fixture(500, 500, 1);
+        role.dexterity = 0;
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        assert!(battle.use_item(20, Some(0), 30, true).is_some());
+
+        let events = resolve_until_input_or_finish(&mut battle);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::EnemyAttack { defeated: true, .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            BattleEvent::PlayerUseItem { .. } | BattleEvent::PlayerThrowItem { .. }
+        )));
     }
 
     #[test]

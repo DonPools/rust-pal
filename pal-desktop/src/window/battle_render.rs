@@ -156,6 +156,12 @@ pub fn render_battle(
             Some(BattleEvent::PlayerMagic { player, .. }) if player == index => {
                 y -= action_offset(event_ticks) / 3;
             }
+            Some(
+                BattleEvent::PlayerUseItem { player, .. }
+                | BattleEvent::PlayerThrowItem { player, .. },
+            ) if player == index => {
+                y -= action_offset(event_ticks) / 3;
+            }
             _ => {}
         }
         let sprite = usize::from(player.battle_sprite_num);
@@ -248,7 +254,10 @@ fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: Bat
                 damage,
             )
         }
-        BattleEvent::RoundCompleted | BattleEvent::Finished(_) => return,
+        BattleEvent::PlayerUseItem { .. }
+        | BattleEvent::PlayerThrowItem { .. }
+        | BattleEvent::RoundCompleted
+        | BattleEvent::Finished(_) => return,
     };
     draw_debug_text(renderer, x - 28, y, "DMG", [255, 248, 160, 255]);
     draw_number(
@@ -336,9 +345,16 @@ fn render_status(
         renderer,
         278,
         188,
-        if selected_command == 0 { "ATK" } else { "MAG" },
+        battle_command_label(selected_command),
         [255, 255, 255, 255],
     );
+}
+
+fn battle_command_label(selected: usize) -> &'static str {
+    ["ATK", "MAG", "USE", "THR"]
+        .get(selected)
+        .copied()
+        .unwrap_or("ATK")
 }
 
 fn draw_selector(renderer: &mut Renderer, x: i32, y: i32, color: [u8; 4]) {
@@ -384,5 +400,13 @@ mod tests {
             .map(action_offset)
             .collect::<Vec<_>>();
         assert_eq!(offsets, [0, 3, 6, 9, 12, 9, 6, 3]);
+    }
+
+    #[test]
+    fn battle_command_labels_cover_attack_magic_use_and_throw() {
+        assert_eq!(
+            (0..4).map(battle_command_label).collect::<Vec<_>>(),
+            ["ATK", "MAG", "USE", "THR"]
+        );
     }
 }

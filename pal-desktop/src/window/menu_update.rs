@@ -583,6 +583,11 @@ where
                     .map(|request| (item_id, request, false));
             }
         }
+        InventoryMode::BattleUseItems
+        | InventoryMode::BattleThrowItems
+        | InventoryMode::BattleUseTarget { .. } => {
+            close_menu = true;
+        }
     }
     context.services.inventory_selected = menu.selected;
     if let Some((item_id, role_selected, request)) = equip_request {

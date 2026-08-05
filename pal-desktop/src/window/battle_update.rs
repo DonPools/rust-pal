@@ -3,6 +3,7 @@ use pal_core::game::{GameInput, GameState};
 use pal_core::role::Direction;
 use pal_core::script::ScriptRuntime;
 
+use super::menu_state::{update_wrapping_selection, InventoryMenu, InventoryMode};
 use super::session::SessionState;
 
 pub(super) const ACTION_EVENT_TICKS: u16 = 8;
@@ -52,8 +53,14 @@ pub(super) fn update_battle(
         if !input.confirm {
             return None;
         }
+        services.inventory_menu = None;
+        services.battle_pending_throw_item = None;
         let (result, rewards) = game.settle_battle()?;
         return Some(FinishedBattle { result, rewards });
+    }
+
+    if update_battle_item_menu(input, game, services) {
+        return None;
     }
 
     let living = game
@@ -67,7 +74,7 @@ pub(super) fn update_battle(
         input.direction_pressed,
         Some(Direction::North | Direction::South)
     ) {
-        services.battle_command_selected = (services.battle_command_selected + 1) % 2;
+        services.battle_command_selected = (services.battle_command_selected + 1) % 4;
     }
     if !living.is_empty() {
         services.battle_selected_enemy = select_enemy(
@@ -77,27 +84,52 @@ pub(super) fn update_battle(
         );
     }
 
-    let events = if input.confirm && services.battle_command_selected == 0 {
-        game.battle_mut()
-            .and_then(|battle| battle.attack(services.battle_selected_enemy))
-            .unwrap_or_default()
-    } else if input.confirm {
-        let magic = game.battle().and_then(|battle| {
-            let player = battle.players.get(battle.active_player()?)?;
-            player
-                .magics
-                .iter()
-                .enumerate()
-                .filter(|(_, magic)| player.mp >= magic.mp_cost)
-                .max_by_key(|(_, magic)| magic.base_damage)
-                .map(|(index, _)| index)
-        });
-        magic
-            .and_then(|magic| {
-                game.battle_mut()
-                    .and_then(|battle| battle.cast_magic(magic, services.battle_selected_enemy))
-            })
-            .unwrap_or_default()
+    let events = if input.confirm {
+        match services.battle_command_selected {
+            0 => game
+                .battle_mut()
+                .and_then(|battle| battle.attack(services.battle_selected_enemy))
+                .unwrap_or_default(),
+            1 => {
+                let magic = game.battle().and_then(|battle| {
+                    let player = battle.players.get(battle.active_player()?)?;
+                    player
+                        .magics
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, magic)| player.mp >= magic.mp_cost)
+                        .max_by_key(|(_, magic)| magic.base_damage)
+                        .map(|(index, _)| index)
+                });
+                magic
+                    .and_then(|magic| {
+                        game.battle_mut().and_then(|battle| {
+                            battle.cast_magic(magic, services.battle_selected_enemy)
+                        })
+                    })
+                    .unwrap_or_default()
+            }
+            2 => {
+                let count = game.battle_usable_inventory().len();
+                services.inventory_selected =
+                    services.inventory_selected.min(count.saturating_sub(1));
+                services.inventory_menu = Some(InventoryMenu {
+                    selected: services.inventory_selected,
+                    mode: InventoryMode::BattleUseItems,
+                });
+                Vec::new()
+            }
+            _ => {
+                let count = game.throwable_inventory().len();
+                services.inventory_selected =
+                    services.inventory_selected.min(count.saturating_sub(1));
+                services.inventory_menu = Some(InventoryMenu {
+                    selected: services.inventory_selected,
+                    mode: InventoryMode::BattleThrowItems,
+                });
+                Vec::new()
+            }
+        }
     } else if input.cancel {
         game.battle_mut()
             .and_then(|battle| battle.flee())
@@ -129,6 +161,128 @@ pub(super) fn update_battle(
     }
 
     None
+}
+
+fn update_battle_item_menu(
+    input: GameInput,
+    game: &mut GameState,
+    services: &mut SessionState,
+) -> bool {
+    if let Some(item_id) = services.battle_pending_throw_item {
+        let living = game
+            .battle()
+            .map(|battle| {
+                battle
+                    .enemies
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, enemy)| enemy.is_alive().then_some(index))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if living.is_empty() {
+            services.battle_pending_throw_item = None;
+            return true;
+        }
+        services.battle_selected_enemy = select_enemy(
+            &living,
+            services.battle_selected_enemy,
+            input.direction_pressed,
+        );
+        if input.cancel {
+            services.battle_pending_throw_item = None;
+            services.inventory_menu = Some(InventoryMenu {
+                selected: services.inventory_selected,
+                mode: InventoryMode::BattleThrowItems,
+            });
+        } else if input.confirm {
+            services.battle_pending_throw_item = None;
+            if game
+                .battle_throw_item(item_id, Some(services.battle_selected_enemy))
+                .is_none()
+            {
+                services.inventory_menu = Some(InventoryMenu {
+                    selected: services.inventory_selected,
+                    mode: InventoryMode::BattleThrowItems,
+                });
+            }
+        }
+        return true;
+    }
+
+    let Some(mut menu) = services.inventory_menu.take() else {
+        return false;
+    };
+    match menu.mode {
+        InventoryMode::BattleUseItems => {
+            let inventory = game.battle_usable_inventory();
+            menu.selected = menu.selected.min(inventory.len().saturating_sub(1));
+            menu.update(input.direction_pressed, inventory.len());
+            services.inventory_selected = menu.selected;
+            if input.cancel {
+                return true;
+            }
+            if input.confirm {
+                if let Some(item) = inventory.get(menu.selected).copied() {
+                    if item.apply_to_all {
+                        if game.battle_use_item(item.item_id, None).is_some() {
+                            return true;
+                        }
+                    } else {
+                        let selected = services.item_target_selected.min(
+                            game.battle()
+                                .map_or(0, |battle| battle.players.len().saturating_sub(1)),
+                        );
+                        menu.mode = InventoryMode::BattleUseTarget {
+                            item_id: item.item_id,
+                            selected,
+                        };
+                    }
+                }
+            }
+        }
+        InventoryMode::BattleUseTarget {
+            item_id,
+            mut selected,
+        } => {
+            let player_count = game.battle().map_or(0, |battle| battle.players.len());
+            update_wrapping_selection(&mut selected, input.direction_pressed, player_count);
+            services.item_target_selected = selected;
+            menu.mode = InventoryMode::BattleUseTarget { item_id, selected };
+            if input.cancel {
+                menu.mode = InventoryMode::BattleUseItems;
+            } else if input.confirm && game.battle_use_item(item_id, Some(selected)).is_some() {
+                return true;
+            }
+        }
+        InventoryMode::BattleThrowItems => {
+            let inventory = game.throwable_inventory();
+            menu.selected = menu.selected.min(inventory.len().saturating_sub(1));
+            menu.update(input.direction_pressed, inventory.len());
+            services.inventory_selected = menu.selected;
+            if input.cancel {
+                return true;
+            }
+            if input.confirm {
+                if let Some(item) = inventory.get(menu.selected).copied() {
+                    if item.apply_to_all {
+                        if game.battle_throw_item(item.item_id, None).is_some() {
+                            return true;
+                        }
+                    } else {
+                        services.battle_pending_throw_item = Some(item.item_id);
+                        return true;
+                    }
+                }
+            }
+        }
+        InventoryMode::Items
+        | InventoryMode::EquipItems
+        | InventoryMode::EquipTarget { .. }
+        | InventoryMode::Target { .. } => {}
+    }
+    services.inventory_menu = Some(menu);
+    true
 }
 
 fn advance_battle_events(game: &GameState, services: &mut SessionState) -> bool {
@@ -183,7 +337,9 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         | BattleEvent::EnemyMagic { .. }
         | BattleEvent::EnemyConfusedAttack { .. }
         | BattleEvent::PlayerConfusedAttack { .. }
-        | BattleEvent::SimulatedMagic { .. } => ACTION_EVENT_TICKS,
+        | BattleEvent::SimulatedMagic { .. }
+        | BattleEvent::PlayerUseItem { .. }
+        | BattleEvent::PlayerThrowItem { .. } => ACTION_EVENT_TICKS,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -319,6 +475,12 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 None,
             ])
         }),
+        BattleEvent::PlayerUseItem { player, .. } | BattleEvent::PlayerThrowItem { player, .. } => {
+            game.battle().and_then(|battle| {
+                let player = battle.players.get(player)?;
+                Some(vec![Some(player.magic_sound), None, None])
+            })
+        }
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => None,
     }
     .unwrap_or_default();

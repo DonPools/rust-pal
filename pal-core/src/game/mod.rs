@@ -32,10 +32,10 @@ mod snapshot;
 mod state_support;
 
 pub use exploration::{Camera, CollisionMap, GameInput};
-pub use field::{EquippableItem, FieldMagic, StoreItem, UsableItem};
+pub use field::{EquippableItem, FieldMagic, StoreItem, ThrowableItem, UsableItem};
 use field::{
     ITEM_FLAG_APPLY_TO_ALL, ITEM_FLAG_CONSUMING, ITEM_FLAG_EQUIPPABLE, ITEM_FLAG_ROLE_FIRST,
-    ITEM_FLAG_SELLABLE, ITEM_FLAG_USABLE, MAGIC_FLAG_APPLY_TO_ALL,
+    ITEM_FLAG_SELLABLE, ITEM_FLAG_THROWABLE, ITEM_FLAG_USABLE, MAGIC_FLAG_APPLY_TO_ALL,
     MAGIC_FLAG_USABLE_OUTSIDE_BATTLE, MAX_INVENTORY,
 };
 pub use snapshot::GameSnapshot;
@@ -71,6 +71,7 @@ pub struct GameState<M = Map> {
     inventory: Vec<(u16, u16)>,
     item_use_scripts: BTreeMap<u16, u16>,
     item_equip_scripts: BTreeMap<u16, u16>,
+    item_throw_scripts: BTreeMap<u16, u16>,
     magic_use_scripts: BTreeMap<u16, u16>,
     magic_success_scripts: BTreeMap<u16, u16>,
     equipment_effects: BTreeMap<(u16, u16, u16), i16>,
@@ -131,6 +132,7 @@ impl<M: CollisionMap> GameState<M> {
             inventory: Vec::new(),
             item_use_scripts: BTreeMap::new(),
             item_equip_scripts: BTreeMap::new(),
+            item_throw_scripts: BTreeMap::new(),
             magic_use_scripts: BTreeMap::new(),
             magic_success_scripts: BTreeMap::new(),
             equipment_effects: BTreeMap::new(),
@@ -223,10 +225,36 @@ impl<M: CollisionMap> GameState<M> {
     }
 
     pub fn advance_battle_resolution(&mut self) -> Vec<BattleEvent> {
-        self.active_battle
+        let events = self
+            .active_battle
             .as_mut()
             .map(BattleState::advance_resolution)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for event in &events {
+            match *event {
+                BattleEvent::PlayerUseItem {
+                    item_object,
+                    consuming: true,
+                    ..
+                }
+                | BattleEvent::PlayerThrowItem { item_object, .. } => {
+                    let _ = self.consume_inventory_item(item_object);
+                }
+                BattleEvent::PlayerUseItem {
+                    consuming: false, ..
+                }
+                | BattleEvent::PlayerAttack { .. }
+                | BattleEvent::PlayerMagic { .. }
+                | BattleEvent::EnemyAttack { .. }
+                | BattleEvent::EnemyMagic { .. }
+                | BattleEvent::EnemyConfusedAttack { .. }
+                | BattleEvent::PlayerConfusedAttack { .. }
+                | BattleEvent::SimulatedMagic { .. }
+                | BattleEvent::RoundCompleted
+                | BattleEvent::Finished(_) => {}
+            }
+        }
+        events
     }
 
     pub fn take_battle_script(&mut self) -> Option<TriggerRequest> {
@@ -273,6 +301,12 @@ impl<M: CollisionMap> GameState<M> {
             }
             BattleScriptSource::EnemyAttackItem { item_object, .. } => {
                 self.item_use_scripts.insert(item_object, next_entry);
+            }
+            BattleScriptSource::PlayerItemUse { item_object, .. } => {
+                self.item_use_scripts.insert(item_object, next_entry);
+            }
+            BattleScriptSource::PlayerItemThrow { item_object, .. } => {
+                self.item_throw_scripts.insert(item_object, next_entry);
             }
             BattleScriptSource::EnemyTurnStart { .. }
             | BattleScriptSource::EnemyReady { .. }
@@ -1099,6 +1133,83 @@ impl<M: CollisionMap> GameState<M> {
             .collect()
     }
 
+    pub fn battle_usable_item(&self, item_id: u16) -> Option<UsableItem> {
+        let mut item = self.usable_item(item_id)?;
+        let reserved = self.active_battle.as_ref()?.reserved_item_count(item_id);
+        item.amount = item.amount.saturating_sub(reserved);
+        (item.amount > 0 || !item.consuming).then_some(item)
+    }
+
+    pub fn battle_usable_inventory(&self) -> Vec<UsableItem> {
+        self.inventory()
+            .filter_map(|(item_id, _)| self.battle_usable_item(item_id))
+            .collect()
+    }
+
+    pub fn throwable_item(&self, item_id: u16) -> Option<ThrowableItem> {
+        let amount = self
+            .inventory_count(item_id)
+            .saturating_sub(self.active_battle.as_ref()?.reserved_item_count(item_id));
+        let object = self.global_objects.as_ref()?.get(item_id)?;
+        let flags = object.item_flags();
+        (amount > 0 && flags & ITEM_FLAG_THROWABLE != 0).then_some(ThrowableItem {
+            item_id,
+            amount,
+            script_entry: self
+                .item_throw_scripts
+                .get(&item_id)
+                .copied()
+                .unwrap_or_else(|| object.item_throw_script()),
+            apply_to_all: flags & ITEM_FLAG_APPLY_TO_ALL != 0,
+        })
+    }
+
+    pub fn throwable_inventory(&self) -> Vec<ThrowableItem> {
+        self.inventory()
+            .filter_map(|(item_id, _)| self.throwable_item(item_id))
+            .collect()
+    }
+
+    pub fn battle_use_item(
+        &mut self,
+        item_id: u16,
+        target_player: Option<usize>,
+    ) -> Option<Vec<BattleEvent>> {
+        let item = self.battle_usable_item(item_id)?;
+        let battle = self.active_battle.as_mut()?;
+        if item.apply_to_all != target_player.is_none()
+            || target_player.is_some_and(|target| target >= battle.players.len())
+        {
+            return None;
+        }
+        battle.use_item(
+            item.item_id,
+            target_player,
+            item.script_entry,
+            item.consuming,
+        )
+    }
+
+    pub fn battle_throw_item(
+        &mut self,
+        item_id: u16,
+        target_enemy: Option<usize>,
+    ) -> Option<Vec<BattleEvent>> {
+        let item = self.throwable_item(item_id)?;
+        let battle = self.active_battle.as_mut()?;
+        if item.apply_to_all != target_enemy.is_none()
+            || target_enemy.is_some_and(|target| {
+                battle
+                    .enemies
+                    .get(target)
+                    .is_none_or(|enemy| !enemy.is_alive())
+            })
+        {
+            return None;
+        }
+        battle.throw_item(item.item_id, target_enemy, item.script_entry)
+    }
+
     pub fn equippable_item(&self, item_id: u16, role_id: u16) -> Option<EquippableItem> {
         let amount = self.inventory_count(item_id);
         let object = self.global_objects.as_ref()?.get(item_id)?;
@@ -1703,6 +1814,7 @@ impl<M: CollisionMap> GameState<M> {
             inventory: self.inventory.clone(),
             item_use_scripts: self.item_use_scripts.clone(),
             item_equip_scripts: self.item_equip_scripts.clone(),
+            item_throw_scripts: self.item_throw_scripts.clone(),
             magic_use_scripts: self.magic_use_scripts.clone(),
             magic_success_scripts: self.magic_success_scripts.clone(),
             equipment_effects: self.equipment_effects.clone(),
@@ -1752,6 +1864,7 @@ impl<M: CollisionMap> GameState<M> {
             inventory: snapshot.inventory,
             item_use_scripts: snapshot.item_use_scripts.into_iter().collect(),
             item_equip_scripts: snapshot.item_equip_scripts.into_iter().collect(),
+            item_throw_scripts: snapshot.item_throw_scripts.into_iter().collect(),
             magic_use_scripts: snapshot.magic_use_scripts.into_iter().collect(),
             magic_success_scripts: snapshot.magic_success_scripts.into_iter().collect(),
             equipment_effects: snapshot
@@ -1810,6 +1923,7 @@ impl<M: CollisionMap> GameState<M> {
             || data.inventory.len() > MAX_INVENTORY
             || data.item_use_scripts.len() > MAX_INVENTORY
             || data.item_equip_scripts.len() > MAX_INVENTORY
+            || data.item_throw_scripts.len() > MAX_INVENTORY
             || data.magic_use_scripts.len() > MAX_INVENTORY
             || data.magic_success_scripts.len() > MAX_INVENTORY
             || data.equipment_effects.len() > MAX_INVENTORY
@@ -1905,6 +2019,7 @@ impl<M: CollisionMap> GameState<M> {
             return None;
         }
         let item_equip_scripts = unique_script_entries(data.item_equip_scripts)?;
+        let item_throw_scripts = unique_script_entries(data.item_throw_scripts)?;
         let magic_use_scripts = unique_script_entries(data.magic_use_scripts)?;
         let magic_success_scripts = unique_script_entries(data.magic_success_scripts)?;
         let equipment_effect_count = data.equipment_effects.len();
@@ -1973,6 +2088,7 @@ impl<M: CollisionMap> GameState<M> {
             inventory,
             item_use_scripts,
             item_equip_scripts,
+            item_throw_scripts,
             magic_use_scripts,
             magic_success_scripts,
             equipment_effects,
@@ -2012,6 +2128,7 @@ impl<M: CollisionMap> GameState<M> {
         self.inventory = snapshot.inventory;
         self.item_use_scripts = snapshot.item_use_scripts;
         self.item_equip_scripts = snapshot.item_equip_scripts;
+        self.item_throw_scripts = snapshot.item_throw_scripts;
         self.magic_use_scripts = snapshot.magic_use_scripts;
         self.magic_success_scripts = snapshot.magic_success_scripts;
         self.equipment_effects = snapshot.equipment_effects;
@@ -2212,6 +2329,7 @@ impl<M: CollisionMap> GameState<M> {
         self.inventory = inventory;
         self.item_use_scripts.clear();
         self.item_equip_scripts.clear();
+        self.item_throw_scripts.clear();
         self.magic_use_scripts.clear();
         self.magic_success_scripts.clear();
         self.equipment_effects.clear();
@@ -2644,6 +2762,26 @@ impl<M: CollisionMap> GameState<M> {
                     usize::from(enemy_index),
                     magic_object,
                     base_strength,
+                    objects,
+                    magics,
+                );
+            }
+            ScriptAction::ThrowWeapon {
+                enemy_index,
+                magic_object,
+                multiplier,
+            } => {
+                let (Some(battle), Some(objects), Some(magics)) = (
+                    self.active_battle.as_mut(),
+                    self.global_objects.as_ref(),
+                    self.magics.as_ref(),
+                ) else {
+                    return false;
+                };
+                return battle.throw_weapon(
+                    usize::from(enemy_index),
+                    magic_object,
+                    multiplier,
                     objects,
                     magics,
                 );
@@ -4253,6 +4391,59 @@ mod tests {
         BattleData::parse(&archive).unwrap()
     }
 
+    fn battle_item_state(party_size: usize) -> GameState<TestMap> {
+        let mut role_data = vec![0; 900];
+        for role in 0..party_size {
+            for (array, value) in [(7, 500u16), (9, 500), (17, 80), (19, 20), (20, 100)] {
+                let offset = (array * PLAYER_ROLE_COUNT + role) * 2;
+                role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let mut party = Party::single(0, &roles).unwrap();
+        for role in 1..party_size {
+            assert!(party.add(u16::try_from(role).unwrap(), &roles));
+        }
+        let object_words = [
+            [0u16; 6],
+            [0, 0, 0, 0, 0, 0],
+            [0, 0, 31, 0, 0, ITEM_FLAG_USABLE | ITEM_FLAG_CONSUMING],
+            [0, 0, 32, 0, 0, ITEM_FLAG_USABLE],
+            [0, 0, 0, 0, 41, ITEM_FLAG_THROWABLE],
+        ];
+        let objects = GlobalObjects::parse(
+            &object_words
+                .into_iter()
+                .flatten()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            pal_assets::objects::ObjectLayout::Dos,
+        )
+        .unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let magics = Magics::parse(&[0; 32]).unwrap();
+        let scripts = ScriptTable::parse(&[0; 8]).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects)
+            .with_magic_data(magics)
+            .with_battle_data(battle_data_for_growth());
+        for item_id in 2..=4 {
+            assert!(state.apply_script_action(ScriptAction::AddItem { item_id, amount: 1 }));
+        }
+        assert!(state.start_battle(
+            BattleRequest {
+                enemy_team: 0,
+                lost_entry: 0,
+                flee_entry: 0,
+                is_boss: true,
+            },
+            &scripts,
+        ));
+        state
+    }
+
     #[test]
     fn battle_experience_levels_living_roles_and_teaches_magic() {
         let mut role_data = vec![0; 900];
@@ -4434,6 +4625,71 @@ mod tests {
             state.advance_battle_resolution().as_slice(),
             [BattleEvent::PlayerMagic { damage, .. }] if *damage >= 40
         ));
+    }
+
+    #[test]
+    fn battle_item_selection_reserves_the_last_inventory_copy() {
+        let mut state = battle_item_state(2);
+        assert!(state.battle_use_item(2, Some(0)).is_some());
+        assert!(state.battle_usable_item(2).is_none());
+        assert!(state.battle_use_item(2, Some(1)).is_none());
+
+        assert!(state.battle_throw_item(4, Some(0)).is_some());
+        assert!(state.throwable_item(4).is_none());
+
+        let mut reusable = battle_item_state(2);
+        assert!(reusable.battle_use_item(3, Some(0)).is_some());
+        assert_eq!(reusable.battle_usable_item(3).unwrap().amount, 1);
+        assert!(reusable.battle_use_item(3, Some(1)).is_some());
+    }
+
+    #[test]
+    fn battle_items_consume_after_completion_and_persist_script_entries() {
+        let mut consuming = battle_item_state(1);
+        assert!(consuming.battle_use_item(2, Some(0)).is_some());
+        assert!(consuming.advance_battle_resolution().is_empty());
+        let request = consuming.take_battle_script().unwrap();
+        assert_eq!(request.script_entry, 31);
+        assert!(consuming.finish_battle_script(51, false));
+        assert!(matches!(
+            consuming.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerUseItem {
+                item_object: 2,
+                consuming: true,
+                ..
+            }]
+        ));
+        assert_eq!(consuming.inventory_count(2), 0);
+        assert_eq!(consuming.item_use_scripts.get(&2), Some(&51));
+
+        let mut reusable = battle_item_state(1);
+        assert!(reusable.battle_use_item(3, Some(0)).is_some());
+        assert!(reusable.advance_battle_resolution().is_empty());
+        assert!(reusable.take_battle_script().is_some());
+        assert!(reusable.finish_battle_script(52, true));
+        assert!(matches!(
+            reusable.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerUseItem {
+                item_object: 3,
+                consuming: false,
+                ..
+            }]
+        ));
+        assert_eq!(reusable.inventory_count(3), 1);
+        assert_eq!(reusable.item_use_scripts.get(&3), Some(&52));
+
+        let mut thrown = battle_item_state(1);
+        assert!(thrown.battle_throw_item(4, Some(0)).is_some());
+        assert!(thrown.advance_battle_resolution().is_empty());
+        let request = thrown.take_battle_script().unwrap();
+        assert_eq!(request.script_entry, 41);
+        assert!(thrown.finish_battle_script(53, false));
+        assert!(matches!(
+            thrown.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerThrowItem { item_object: 4, .. }]
+        ));
+        assert_eq!(thrown.inventory_count(4), 0);
+        assert_eq!(thrown.item_throw_scripts.get(&4), Some(&53));
     }
 
     #[test]
@@ -5417,6 +5673,7 @@ mod tests {
             value: 7,
         }));
         state.finish_item_equip(9, 44);
+        state.item_throw_scripts.insert(9, 77);
         state.finish_magic_script(88, 55, false);
         state.finish_magic_script(88, 66, true);
         assert!(state.apply_script_action(ScriptAction::SetBattleMusic { music_id: 7 }));
@@ -5437,6 +5694,7 @@ mod tests {
         assert_eq!(state.player_role(0).unwrap().hp, 321);
         assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 7);
         assert_eq!(state.scene_enter_script(0), 321);
+        assert_eq!(state.item_throw_scripts.get(&9), Some(&77));
         assert_eq!(
             (
                 state.scene_objects[0].world_x,
@@ -5451,7 +5709,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":17", "\"version\":16");
+            .replace("\"version\":18", "\"version\":17");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 

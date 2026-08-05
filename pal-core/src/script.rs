@@ -205,7 +205,7 @@ define_script_opcodes! {
     SpeedUpEnemyChase = 0x0063, "CHASE_FAST", "Speed up enemy chasing for a period.", Unsupported;
     JumpIfEnemyHpAbove = 0x0064, "JGT_ENEMY_HP", "Jump when enemy HP exceeds a percentage threshold.", Implemented;
     SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite; only the leader slot is currently applied.", Stub;
-    ThrowWeapon = 0x0066, "THROW_WEAPON", "Throw a weapon at an enemy.", Unsupported;
+    ThrowWeapon = 0x0066, "THROW_WEAPON", "Simulate a weapon-throw magic attack against an enemy.", Implemented;
     EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Set the magic and casting rate used by an enemy.", Implemented;
     JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Implemented;
     EnemyEscape = 0x0069, "ENEMY_FLEE", "Make the enemy party escape and terminate the battle.", Implemented;
@@ -600,6 +600,11 @@ pub enum ScriptAction {
         enemy_index: u16,
         magic_object: u16,
         base_strength: u16,
+    },
+    ThrowWeapon {
+        enemy_index: u16,
+        magic_object: u16,
+        multiplier: u16,
     },
     ScaleMagicByMp {
         role_id: u16,
@@ -1461,6 +1466,15 @@ impl ScriptRuntime {
                         base_strength: entry.operands[1],
                     }));
                 }
+                ThrowWeapon => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::ThrowWeapon {
+                        enemy_index: execution.object_id,
+                        magic_object: entry.operands[0],
+                        multiplier: entry.operands[1],
+                    }));
+                }
                 ScaleMagicByMp => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2143,7 +2157,6 @@ impl ScriptRuntime {
                 | HideBattleActor
                 | PauseEnemyChase
                 | SpeedUpEnemyChase
-                | ThrowWeapon
                 | StealEnemy
                 | BlowEnemiesAway
                 | JumpIfObjectOutsideZone
@@ -2278,7 +2291,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [143, 1, 21]);
+        assert_eq!(support_counts, [144, 1, 20]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2804,6 +2817,7 @@ mod tests {
             [ScriptOpcode::EnemyEscape.raw(), 0, 0, 0],
             [ScriptOpcode::SetBattleResult.raw(), 0, 0, 0],
             [ScriptOpcode::SimulatePlayerMagic.raw(), 88, 123, 0],
+            [ScriptOpcode::ThrowWeapon.raw(), 91, 7, 0],
             [ScriptOpcode::ScaleMagicByMp.raw(), 89, 0, 0],
             [ScriptOpcode::ScaleMagicByCash.raw(), 90, 0, 0],
             [ScriptOpcode::JumpIfPlayerLacksPoison.raw(), 40, 91, 0],
@@ -2884,6 +2898,11 @@ mod tests {
                 enemy_index: 7,
                 magic_object: 88,
                 base_strength: 123,
+            },
+            ScriptAction::ThrowWeapon {
+                enemy_index: 7,
+                magic_object: 91,
+                multiplier: 7,
             },
             ScriptAction::ScaleMagicByMp {
                 role_id: 7,
@@ -3511,7 +3530,7 @@ mod tests {
     fn reports_unsupported_and_invalid_entries() {
         let mut runtime = ScriptRuntime::new(table(&[
             [0, 0, 0, 0],
-            [ScriptOpcode::ThrowWeapon.raw(), 0, 0, 0],
+            [ScriptOpcode::StealEnemy.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
         assert_eq!(
@@ -3519,7 +3538,7 @@ mod tests {
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: ScriptOpcode::ThrowWeapon.raw(),
+                opcode: ScriptOpcode::StealEnemy.raw(),
             })
         );
 
