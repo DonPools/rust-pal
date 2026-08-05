@@ -37,6 +37,8 @@ pub struct GameSnapshot {
     pub(super) scene_teleport_scripts: BTreeMap<u16, u16>,
     pub(super) scene_maps: BTreeMap<u16, u16>,
     pub(super) script_frame: u32,
+    pub(super) chase_range: u16,
+    pub(super) chase_speed_change_cycles: u16,
     pub(super) viewport_locked: bool,
     pub(super) camera_x: i32,
     pub(super) camera_y: i32,
@@ -56,8 +58,8 @@ impl GameSnapshot {
     }
 }
 
-// Version 18 preserves mutable battle item throw-script entries.
-pub(super) const SNAPSHOT_VERSION: u16 = 18;
+// Version 19 preserves the original enemy-chase range and remaining override cycles.
+pub(super) const SNAPSHOT_VERSION: u16 = 19;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -89,6 +91,8 @@ pub(super) struct SnapshotData {
     pub(super) scene_teleport_scripts: Vec<(u16, u16)>,
     pub(super) scene_maps: Vec<(u16, u16)>,
     pub(super) script_frame: u32,
+    pub(super) chase_range: u16,
+    pub(super) chase_speed_change_cycles: u16,
     pub(super) viewport_locked: bool,
     pub(super) camera_x: i32,
     pub(super) camera_y: i32,

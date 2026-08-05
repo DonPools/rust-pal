@@ -82,6 +82,8 @@ pub struct GameState<M = Map> {
     scene_maps: BTreeMap<u16, u16>,
     pending_auto_sounds: Vec<u16>,
     script_frame: u32,
+    chase_range: u16,
+    chase_speed_change_cycles: u16,
     viewport_locked: bool,
     party_followers: Vec<Role>,
     extra_follower_ids: Vec<u16>,
@@ -143,6 +145,8 @@ impl<M: CollisionMap> GameState<M> {
             scene_maps: BTreeMap::new(),
             pending_auto_sounds: Vec::new(),
             script_frame: 0,
+            chase_range: 1,
+            chase_speed_change_cycles: 0,
             viewport_locked: false,
             party_followers: Vec::new(),
             extra_follower_ids: Vec::new(),
@@ -1006,6 +1010,72 @@ impl<M: CollisionMap> GameState<M> {
             }
             self.item_equip_scripts.insert(item_id, next_entry);
             self.current_equipment_slot = None;
+        }
+        true
+    }
+
+    fn increase_player_level(&mut self, role_id: u16, levels: u16) -> bool {
+        let role_index = usize::from(role_id);
+        if self
+            .player_roles
+            .as_ref()
+            .and_then(|roles| roles.role(role_index))
+            .is_none()
+        {
+            return false;
+        }
+        let mut max_hp = 0u16;
+        let mut max_mp = 0u16;
+        let mut attack = 0u16;
+        let mut magic = 0u16;
+        let mut defense = 0u16;
+        let mut dexterity = 0u16;
+        for _ in 0..levels {
+            max_hp = max_hp.saturating_add((10 + self.growth_random(8)) as u16);
+            max_mp = max_mp.saturating_add((8 + self.growth_random(6)) as u16);
+            attack = attack.saturating_add((4 + self.growth_random(2)) as u16);
+            magic = magic.saturating_add((4 + self.growth_random(2)) as u16);
+            defense = defense.saturating_add((2 + self.growth_random(2)) as u16);
+            dexterity = dexterity.saturating_add((2 + self.growth_random(2)) as u16);
+        }
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let Some(role) = roles.role_mut(role_index) else {
+            return false;
+        };
+        role.level = role.level.saturating_add(levels).min(99);
+        role.max_hp = role.max_hp.saturating_add(max_hp).min(999);
+        role.max_mp = role.max_mp.saturating_add(max_mp).min(999);
+        role.attack_strength = role.attack_strength.saturating_add(attack).min(999);
+        role.magic_strength = role.magic_strength.saturating_add(magic).min(999);
+        role.defense = role.defense.saturating_add(defense).min(999);
+        role.dexterity = role.dexterity.saturating_add(dexterity).min(999);
+        role.flee_rate = role
+            .flee_rate
+            .saturating_add(levels.saturating_mul(2))
+            .min(999);
+        let updated = role.clone();
+        self.role_experience[role_index] = 0;
+        self.party.sync_from_roles(roles);
+
+        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+            battle
+                .players
+                .iter_mut()
+                .find(|player| player.role_id == role_id)
+        }) {
+            player.level = updated.level;
+            player.max_hp = player.max_hp.saturating_add(max_hp).min(999);
+            player.max_mp = player.max_mp.saturating_add(max_mp).min(999);
+            player.attack_strength = player.attack_strength.saturating_add(attack).min(999);
+            player.magic_strength = player.magic_strength.saturating_add(magic).min(999);
+            player.defense = player.defense.saturating_add(defense).min(999);
+            player.dexterity = player.dexterity.saturating_add(dexterity).min(999);
+            player.flee_rate = player
+                .flee_rate
+                .saturating_add(levels.saturating_mul(2))
+                .min(999);
         }
         true
     }
@@ -1880,6 +1950,8 @@ impl<M: CollisionMap> GameState<M> {
             scene_teleport_scripts: self.scene_teleport_scripts.clone(),
             scene_maps: self.scene_maps.clone(),
             script_frame: self.script_frame,
+            chase_range: self.chase_range,
+            chase_speed_change_cycles: self.chase_speed_change_cycles,
             viewport_locked: self.viewport_locked,
             camera_x: self.camera.x,
             camera_y: self.camera.y,
@@ -1938,6 +2010,8 @@ impl<M: CollisionMap> GameState<M> {
             scene_teleport_scripts: snapshot.scene_teleport_scripts.into_iter().collect(),
             scene_maps: snapshot.scene_maps.into_iter().collect(),
             script_frame: snapshot.script_frame,
+            chase_range: snapshot.chase_range,
+            chase_speed_change_cycles: snapshot.chase_speed_change_cycles,
             viewport_locked: snapshot.viewport_locked,
             camera_x: snapshot.camera_x,
             camera_y: snapshot.camera_y,
@@ -2154,6 +2228,8 @@ impl<M: CollisionMap> GameState<M> {
             scene_teleport_scripts,
             scene_maps,
             script_frame: data.script_frame,
+            chase_range: data.chase_range,
+            chase_speed_change_cycles: data.chase_speed_change_cycles,
             viewport_locked: data.viewport_locked,
             camera_x: data.camera_x,
             camera_y: data.camera_y,
@@ -2195,6 +2271,8 @@ impl<M: CollisionMap> GameState<M> {
         self.scene_teleport_scripts = snapshot.scene_teleport_scripts;
         self.scene_maps = snapshot.scene_maps;
         self.script_frame = snapshot.script_frame;
+        self.chase_range = snapshot.chase_range;
+        self.chase_speed_change_cycles = snapshot.chase_speed_change_cycles;
         self.viewport_locked = snapshot.viewport_locked;
         self.camera.x = snapshot.camera_x;
         self.camera.y = snapshot.camera_y;
@@ -2397,6 +2475,8 @@ impl<M: CollisionMap> GameState<M> {
         self.scene_maps = scene_maps;
         self.pending_auto_sounds.clear();
         self.script_frame = 0;
+        self.chase_range = save.chase_range;
+        self.chase_speed_change_cycles = save.chase_speed_change_cycles;
         self.viewport_locked = false;
         self.party_trail = trail;
         self.extra_follower_ids = extra_follower_ids;
@@ -2987,6 +3067,14 @@ impl<M: CollisionMap> GameState<M> {
                 self.cash -= spent;
                 return true;
             }
+            ScriptAction::SetEnemyChase { range, cycles } => {
+                self.chase_range = range;
+                self.chase_speed_change_cycles = cycles;
+            }
+            ScriptAction::LevelUpPlayer { role_id, levels } => {
+                return self.increase_player_level(role_id, levels);
+            }
+            ScriptAction::HalveCash => self.cash /= 2,
             ScriptAction::SetEquipmentEffect {
                 role_id,
                 attribute,
@@ -3504,6 +3592,12 @@ impl<M: CollisionMap> GameState<M> {
                     first_error.get_or_insert(error);
                 }
             };
+        }
+        if self.chase_speed_change_cycles > 0 {
+            self.chase_speed_change_cycles -= 1;
+            if self.chase_speed_change_cycles == 0 {
+                self.chase_range = 1;
+            }
         }
         if let Some(error) = first_error {
             Err(error)
@@ -4275,10 +4369,22 @@ impl<M: CollisionMap> GameState<M> {
 
     fn chase_player(&mut self, object_index: usize, speed: u16, range: u16, floating: bool) {
         let player = (self.player.world_x, self.player.world_y);
+        let chase_range = self.chase_range;
+        let script_frame = self.script_frame;
         let object = &mut self.scene_objects[object_index];
+        if chase_range == 0 {
+            if !script_frame.is_multiple_of(2) {
+                object.direction = Direction::from_pal((object.direction as u16 + 1) % 4)
+                    .unwrap_or(object.direction);
+            }
+            object.advance_animation();
+            return;
+        }
         let x_offset = player.0 - object.world_x;
         let y_offset = player.1 - object.world_y;
-        if i64::from(x_offset.abs()) + i64::from(y_offset.abs()) * 2 < i64::from(range) * 32 {
+        if i64::from(x_offset.abs()) + i64::from(y_offset.abs()) * 2
+            < i64::from(range) * 32 * i64::from(chase_range)
+        {
             object.direction = direction_toward(x_offset, y_offset);
             let (dx, dy) = object.direction.step_at_speed(i32::from(speed));
             let target = (object.world_x + dx, object.world_y + dy);
@@ -4677,6 +4783,52 @@ mod tests {
         assert_eq!(role.mp, role.max_mp);
         assert_eq!(role.magic[0], 9);
         assert_eq!(state.party.leader().unwrap().attributes.level, 2);
+    }
+
+    #[test]
+    fn scripted_level_up_grows_stats_without_restoring_health_and_halves_cash() {
+        let mut role_data = vec![0; 900];
+        for (array, value) in [
+            (6, 1u16),
+            (7, 100),
+            (8, 60),
+            (9, 50),
+            (10, 20),
+            (17, 30),
+            (18, 25),
+            (19, 20),
+            (20, 15),
+            (21, 10),
+        ] {
+            let offset = array * PLAYER_ROLE_COUNT * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let mut state = state(&[]).with_party(party).with_player_roles(roles);
+        state.role_experience[0] = 123;
+        state.cash = 101;
+
+        assert!(state.apply_script_action(ScriptAction::LevelUpPlayer {
+            role_id: 0,
+            levels: 2,
+        }));
+        let role = state.player_role(0).unwrap();
+        assert_eq!(role.level, 3);
+        assert!((120..=134).contains(&role.max_hp));
+        assert!((76..=86).contains(&role.max_mp));
+        assert!((38..=40).contains(&role.attack_strength));
+        assert!((33..=35).contains(&role.magic_strength));
+        assert!((24..=26).contains(&role.defense));
+        assert!((19..=21).contains(&role.dexterity));
+        assert_eq!(role.flee_rate, 14);
+        assert_eq!(role.hp, 50);
+        assert_eq!(role.mp, 20);
+        assert_eq!(state.player_experience(0), Some(0));
+        assert_eq!(state.party.leader().unwrap().attributes.level, 3);
+
+        assert!(state.apply_script_action(ScriptAction::HalveCash));
+        assert_eq!(state.cash, 50);
     }
 
     #[test]
@@ -5972,6 +6124,10 @@ mod tests {
         state.finish_magic_script(88, 66, true);
         assert!(state.apply_script_action(ScriptAction::SetBattleMusic { music_id: 7 }));
         assert!(state.apply_script_action(ScriptAction::SetBattlefield { battlefield_id: 21 }));
+        assert!(state.apply_script_action(ScriptAction::SetEnemyChase {
+            range: 3,
+            cycles: 12,
+        }));
         state.role_experience[0] = 42;
 
         let encoded = state.encode_snapshot().unwrap();
@@ -5989,6 +6145,8 @@ mod tests {
         assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 7);
         assert_eq!(state.scene_enter_script(0), 321);
         assert_eq!(state.item_throw_scripts.get(&9), Some(&77));
+        assert_eq!(state.chase_range, 3);
+        assert_eq!(state.chase_speed_change_cycles, 12);
         assert_eq!(
             (
                 state.scene_objects[0].world_x,
@@ -6003,7 +6161,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":18", "\"version\":17");
+            .replace("\"version\":19", "\"version\":18");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 
@@ -6040,6 +6198,52 @@ mod tests {
             ),
             (128, 96)
         );
+    }
+
+    #[test]
+    fn chase_overrides_pause_and_expand_monster_detection_until_expiry() {
+        let scripts = ScriptTable::parse(
+            &[
+                [0u16, 0, 0, 0],
+                [ScriptOpcode::ChasePlayer.raw(), 1, 4, 1],
+                [0, 0, 0, 0],
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut monster = blocking_object(256, 240);
+        monster.auto_script = 1;
+        let mut state = state(&[]).with_scene_objects(vec![monster]);
+
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert_eq!(state.scene_objects[0].world_x, 256);
+
+        state.scene_objects[0].auto_script = 1;
+        assert!(state.apply_script_action(ScriptAction::SetEnemyChase {
+            range: 3,
+            cycles: 1,
+        }));
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert!(state.scene_objects[0].world_x > 256);
+        assert_eq!(state.chase_range, 1);
+        assert_eq!(state.chase_speed_change_cycles, 0);
+
+        let paused_x = state.scene_objects[0].world_x;
+        state.scene_objects[0].auto_script = 1;
+        assert!(state.apply_script_action(ScriptAction::SetEnemyChase {
+            range: 0,
+            cycles: 2,
+        }));
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert_eq!(state.scene_objects[0].world_x, paused_x);
+        assert_eq!(state.chase_speed_change_cycles, 1);
+        state.scene_objects[0].auto_script = 1;
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert_eq!(state.scene_objects[0].world_x, paused_x);
+        assert_eq!(state.chase_range, 1);
     }
 
     #[test]
@@ -6332,6 +6536,8 @@ mod tests {
         write_u16(&mut bytes, 16, 5);
         write_u16(&mut bytes, 18, 9);
         write_u16(&mut bytes, 24, 17);
+        write_u16(&mut bytes, 28, 3);
+        write_u16(&mut bytes, 30, 45);
         bytes[40..44].copy_from_slice(&1234u32.to_le_bytes());
         write_u16(&mut bytes, 44, 0);
         write_i16(&mut bytes, 46, 160);
@@ -6357,6 +6563,8 @@ mod tests {
         assert_eq!(state.current_battlefield, 9);
         assert_eq!(state.cash, 1234);
         assert_eq!(state.collect_value(), 17);
+        assert_eq!(state.chase_range, 3);
+        assert_eq!(state.chase_speed_change_cycles, 45);
         assert_eq!(state.player_poisons(0).unwrap()[0].object_id, 1);
         assert_eq!(state.player_poisons(0).unwrap()[0].script_entry, 77);
         assert_eq!(state.inventory_count(99), 3);

@@ -201,8 +201,8 @@ define_script_opcodes! {
     KillPlayer = 0x005F, "KILL_PLAYER", "Immediately knock out a player.", Implemented;
     KillEnemy = 0x0060, "KILL_ENEMY", "Immediately knock out an enemy.", Implemented;
     JumpIfPlayerNotPoisoned = 0x0061, "JNOT_POISONED", "Jump when a player has no poison.", Implemented;
-    PauseEnemyChase = 0x0062, "CHASE_PAUSE", "Pause enemy chasing for a period.", Unsupported;
-    SpeedUpEnemyChase = 0x0063, "CHASE_FAST", "Speed up enemy chasing for a period.", Unsupported;
+    PauseEnemyChase = 0x0062, "CHASE_PAUSE", "Pause enemy chasing for a period.", Implemented;
+    SpeedUpEnemyChase = 0x0063, "CHASE_FAST", "Speed up enemy chasing for a period.", Implemented;
     JumpIfEnemyHpAbove = 0x0064, "JGT_ENEMY_HP", "Jump when enemy HP exceeds a percentage threshold.", Implemented;
     SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite; only the leader slot is currently applied.", Stub;
     ThrowWeapon = 0x0066, "THROW_WEAPON", "Simulate a weapon-throw magic attack against an enemy.", Implemented;
@@ -243,9 +243,9 @@ define_script_opcodes! {
     EnableAutoBattle = 0x008A, "AUTO_BATTLE", "Enable automatic commands for the next battle.", Unsupported;
     SetPalette = 0x008B, "PALETTE_SET", "Change the current palette number.", Implemented;
     FadeColor = 0x008C, "COLOR_FADE", "Fade the screen from or to a palette color.", Implemented;
-    LevelUpPlayer = 0x008D, "LEVEL_UP", "Increase a player's level.", Unsupported;
+    LevelUpPlayer = 0x008D, "LEVEL_UP", "Increase a player's level.", Implemented;
     RestoreScreen = 0x008E, "SCREEN_RESTORE", "Restore the screen saved by a previous backup operation.", Implemented;
-    HalveCash = 0x008F, "CASH_HALF", "Halve the party's cash.", Unsupported;
+    HalveCash = 0x008F, "CASH_HALF", "Halve the party's cash.", Implemented;
     SetObjectScript = 0x0090, "OBJECT_SCRIPT", "Replace one script field in a global object definition.", Unsupported;
     JumpIfEnemyNotFirstKind = 0x0091, "JNOT_FIRST_ENEMY", "Jump when an enemy is not the first living instance of its kind.", Implemented;
     PlayerMagicAnimation = 0x0092, "MAGIC_ANIM", "Show a player's battle magic-casting animation.", Unsupported;
@@ -638,6 +638,15 @@ pub enum ScriptAction {
     ScaleMagicByCash {
         magic_object: u16,
     },
+    SetEnemyChase {
+        range: u16,
+        cycles: u16,
+    },
+    LevelUpPlayer {
+        role_id: u16,
+        levels: u16,
+    },
+    HalveCash,
     SetEquipmentEffect {
         role_id: u16,
         attribute: u16,
@@ -1543,6 +1552,27 @@ impl ScriptRuntime {
                         magic_object: entry.operands[0],
                     }));
                 }
+                PauseEnemyChase | SpeedUpEnemyChase => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetEnemyChase {
+                        range: if opcode == PauseEnemyChase { 0 } else { 3 },
+                        cycles: entry.operands[0],
+                    }));
+                }
+                LevelUpPlayer => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::LevelUpPlayer {
+                        role_id: execution.object_id,
+                        levels: entry.operands[0],
+                    }));
+                }
+                HalveCash => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::HalveCash));
+                }
                 DrainEnemyHp => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2228,14 +2258,10 @@ impl ScriptRuntime {
                 | TransmuteCollectedEnemies
                 | ChasePlayer
                 | HideBattleActor
-                | PauseEnemyChase
-                | SpeedUpEnemyChase
                 | StealEnemy
                 | BlowEnemiesAway
                 | JumpIfObjectOutsideZone
                 | EnableAutoBattle
-                | LevelUpPlayer
-                | HalveCash
                 | SetObjectScript
                 | PlayerMagicAnimation
                 | PlayEndingAnimation
@@ -2361,7 +2387,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [149, 1, 15]);
+        assert_eq!(support_counts, [153, 1, 11]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -3057,6 +3083,40 @@ mod tests {
                 target_entry: 97,
             }))
         );
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn yields_chase_growth_and_cash_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::PauseEnemyChase.raw(), 30, 0, 0],
+            [ScriptOpcode::SpeedUpEnemyChase.raw(), 40, 0, 0],
+            [ScriptOpcode::LevelUpPlayer.raw(), 2, 0, 0],
+            [ScriptOpcode::HalveCash.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        for expected in [
+            ScriptAction::SetEnemyChase {
+                range: 0,
+                cycles: 30,
+            },
+            ScriptAction::SetEnemyChase {
+                range: 3,
+                cycles: 40,
+            },
+            ScriptAction::LevelUpPlayer {
+                role_id: 7,
+                levels: 2,
+            },
+            ScriptAction::HalveCash,
+        ] {
+            assert_eq!(runtime.advance(), Some(ScriptEvent::Action(expected)));
+        }
         assert!(matches!(
             runtime.advance(),
             Some(ScriptEvent::Completed { .. })
