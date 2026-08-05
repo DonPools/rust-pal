@@ -870,6 +870,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                         pal_core::battle::BattleEvent::PlayerAttack { .. }
                             | pal_core::battle::BattleEvent::PlayerMagic { .. }
                             | pal_core::battle::BattleEvent::EnemyAttack { .. }
+                            | pal_core::battle::BattleEvent::EnemyMagic { .. }
                     )
                 })
                 .expect("first battle action produced no presentation event");

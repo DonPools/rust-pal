@@ -386,7 +386,7 @@ pub(super) fn advance_script<L>(
             succeeded,
         }) => {
             if trigger.kind == TriggerKind::Battle {
-                if !game.finish_battle_script(next_entry) {
+                if !game.finish_battle_script(next_entry, succeeded) {
                     set_title("Rust-PAL [battle script completion failed]");
                 }
                 return;
@@ -515,7 +515,7 @@ pub(super) fn advance_script<L>(
             opcode,
         }) => {
             if trigger.kind == TriggerKind::Battle {
-                game.finish_battle_script(trigger.script_entry);
+                game.finish_battle_script(trigger.script_entry, false);
             }
             resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!(
@@ -525,14 +525,14 @@ pub(super) fn advance_script<L>(
         }
         Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
             if trigger.kind == TriggerKind::Battle {
-                game.finish_battle_script(trigger.script_entry);
+                game.finish_battle_script(trigger.script_entry, false);
             }
             resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
         }
         Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
             if trigger.kind == TriggerKind::Battle {
-                game.finish_battle_script(trigger.script_entry);
+                game.finish_battle_script(trigger.script_entry, false);
             }
             resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!("Rust-PAL [script loop at {entry}]"));

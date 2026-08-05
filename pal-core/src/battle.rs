@@ -224,6 +224,8 @@ pub enum BattleScriptSource {
     EnemyBattleEnd { enemy: usize },
     PlayerPoison { role_id: u16, poison_id: u16 },
     EnemyPoison { enemy: usize, poison_id: u16 },
+    EnemyMagicUse { enemy: usize, magic_object: u16 },
+    EnemyMagicSuccess { enemy: usize, magic_object: u16 },
 }
 
 /// A battle-owned script invocation consumed by a platform script driver.
@@ -242,11 +244,26 @@ enum BattleFlow {
         action: u8,
         ready_complete: bool,
     },
+    EnemyMagic {
+        enemy: usize,
+        action: u8,
+        target: usize,
+        magic: BattleMagic,
+        phase: EnemyMagicPhase,
+        use_succeeded: bool,
+    },
     RoundScripts,
     TurnStartScripts,
     Outcome(BattleResult),
     BattleEndScripts(BattleResult),
     Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnemyMagicPhase {
+    UseScript,
+    SuccessScript,
+    Damage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +281,7 @@ pub struct BattlePlayer {
     pub defense: u16,
     pub dexterity: u16,
     pub poison_resistance: u16,
+    pub elemental_resistance: [u16; pal_assets::player_roles::MAGIC_ELEMENT_COUNT],
     pub attacks_all: bool,
     pub magics: Vec<BattleMagic>,
     pub death_sound: u16,
@@ -277,11 +295,14 @@ pub struct BattlePlayer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BattleMagic {
     pub object_id: u16,
+    pub magic_type: u16,
     pub mp_cost: u16,
     pub base_damage: u16,
     pub elemental: u16,
     pub attacks_all: bool,
     pub sound: i16,
+    pub use_script: u16,
+    pub success_script: u16,
 }
 
 impl BattlePlayer {
@@ -333,6 +354,7 @@ pub struct BattleEnemy {
     pub ready_script: u16,
     pub magic_object: u16,
     pub magic_rate: u16,
+    pub magic: Option<BattleMagic>,
     pub attack_equivalent_item: u16,
     pub attack_equivalent_item_rate: u16,
     pub steal_item: u16,
@@ -374,6 +396,13 @@ pub enum BattleEvent {
     EnemyAttack {
         enemy: usize,
         player: usize,
+        damage: u16,
+        defeated: bool,
+    },
+    EnemyMagic {
+        enemy: usize,
+        player: usize,
+        magic_object: u16,
         damage: u16,
         defeated: bool,
     },
@@ -438,7 +467,14 @@ impl BattleState {
                 let object = objects.get(object_id)?;
                 let enemy_id = object.enemy_id();
                 let enemy = data.enemies.get(enemy_id)?;
-                battle_enemy(slot, layout.len(), object_id, enemy_id, enemy, object, data)
+                let position = data.enemy_positions.get(layout.len(), slot)?;
+                let magic = match enemy.magic {
+                    0 | u16::MAX => None,
+                    object_id => Some(battle_magic(object_id, objects, magics)?),
+                };
+                Some(battle_enemy(
+                    slot, position, object_id, enemy_id, enemy, object, magic,
+                ))
             })
             .collect::<Option<Vec<_>>>()?;
         if enemies.is_empty() {
@@ -571,8 +607,16 @@ impl BattleState {
         Some(request)
     }
 
+    pub fn active_script_request(&self) -> Option<BattleScriptRequest> {
+        self.active_script
+    }
+
     /// Persist the next entry returned by a completed battle-owned script.
     pub fn complete_script(&mut self, next_entry: u16) -> bool {
+        self.complete_script_with_result(next_entry, true)
+    }
+
+    pub fn complete_script_with_result(&mut self, next_entry: u16, succeeded: bool) -> bool {
         let Some(request) = self.active_script.take() else {
             return false;
         };
@@ -618,6 +662,43 @@ impl BattleState {
                         .find(|poison| poison.object_id == poison_id)
                 }) {
                     poison.script_entry = next_entry;
+                }
+            }
+            BattleScriptSource::EnemyMagicUse {
+                enemy,
+                magic_object,
+            } => {
+                if let Some(magic) = self
+                    .enemies
+                    .get_mut(enemy)
+                    .and_then(|actor| actor.magic.as_mut())
+                    .filter(|magic| magic.object_id == magic_object)
+                {
+                    magic.use_script = next_entry;
+                }
+                if let BattleFlow::EnemyMagic {
+                    enemy: active_enemy,
+                    magic: active_magic,
+                    use_succeeded,
+                    ..
+                } = &mut self.flow
+                {
+                    if *active_enemy == enemy && active_magic.object_id == magic_object {
+                        *use_succeeded = succeeded;
+                    }
+                }
+            }
+            BattleScriptSource::EnemyMagicSuccess {
+                enemy,
+                magic_object,
+            } => {
+                if let Some(magic) = self
+                    .enemies
+                    .get_mut(enemy)
+                    .and_then(|actor| actor.magic.as_mut())
+                    .filter(|magic| magic.object_id == magic_object)
+                {
+                    magic.success_script = next_entry;
                 }
             }
         }
@@ -673,6 +754,54 @@ impl BattleState {
                         };
                         return events;
                     }
+                    let magic_object = actor.magic_object;
+                    let magic_rate = actor.magic_rate;
+                    let silenced = actor.statuses.is_active(BattleStatus::Silence);
+                    let magic = actor.magic;
+                    if magic_object != 0 && !silenced && self.random(10) < u32::from(magic_rate) {
+                        if magic_object == u16::MAX {
+                            self.flow = BattleFlow::EnemyRound {
+                                enemy,
+                                action: action + 1,
+                                ready_complete: false,
+                            };
+                            return events;
+                        }
+                        if let Some(magic) = magic {
+                            let living_players = self
+                                .players
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, player)| player.is_alive().then_some(index))
+                                .collect::<Vec<_>>();
+                            let Some(&target) = living_players
+                                .get(self.random(living_players.len() as u32) as usize)
+                            else {
+                                self.flow = BattleFlow::Outcome(BattleResult::Lost);
+                                continue;
+                            };
+                            self.flow = BattleFlow::EnemyMagic {
+                                enemy,
+                                action,
+                                target,
+                                magic,
+                                phase: EnemyMagicPhase::UseScript,
+                                use_succeeded: true,
+                            };
+                            if magic.use_script != 0 {
+                                self.pending_scripts.push_back(BattleScriptRequest {
+                                    source: BattleScriptSource::EnemyMagicUse {
+                                        enemy,
+                                        magic_object: magic.object_id,
+                                    },
+                                    entry: magic.use_script,
+                                    object_id: self.players[target].role_id,
+                                });
+                                return events;
+                            }
+                            continue;
+                        }
+                    }
                     self.flow = BattleFlow::EnemyRound {
                         enemy,
                         action: action + 1,
@@ -686,6 +815,66 @@ impl BattleState {
                     }
                     return events;
                 }
+                BattleFlow::EnemyMagic {
+                    enemy,
+                    action,
+                    target,
+                    magic,
+                    phase,
+                    use_succeeded,
+                } => match phase {
+                    EnemyMagicPhase::UseScript => {
+                        if use_succeeded && magic.success_script != 0 {
+                            self.pending_scripts.push_back(BattleScriptRequest {
+                                source: BattleScriptSource::EnemyMagicSuccess {
+                                    enemy,
+                                    magic_object: magic.object_id,
+                                },
+                                entry: magic.success_script,
+                                object_id: self.players[target].role_id,
+                            });
+                            self.flow = BattleFlow::EnemyMagic {
+                                enemy,
+                                action,
+                                target,
+                                magic,
+                                phase: EnemyMagicPhase::SuccessScript,
+                                use_succeeded,
+                            };
+                            return events;
+                        }
+                        self.flow = BattleFlow::EnemyMagic {
+                            enemy,
+                            action,
+                            target,
+                            magic,
+                            phase: EnemyMagicPhase::Damage,
+                            use_succeeded,
+                        };
+                    }
+                    EnemyMagicPhase::SuccessScript => {
+                        self.flow = BattleFlow::EnemyMagic {
+                            enemy,
+                            action,
+                            target,
+                            magic,
+                            phase: EnemyMagicPhase::Damage,
+                            use_succeeded,
+                        };
+                    }
+                    EnemyMagicPhase::Damage => {
+                        events.extend(self.perform_enemy_magic(enemy, target, magic));
+                        self.flow = BattleFlow::EnemyRound {
+                            enemy,
+                            action: action + 1,
+                            ready_complete: false,
+                        };
+                        if self.players.iter().all(|player| !player.is_combat_active()) {
+                            self.flow = BattleFlow::Outcome(BattleResult::Lost);
+                        }
+                        return events;
+                    }
+                },
                 BattleFlow::RoundScripts => {
                     for player in &mut self.players {
                         player.statuses.decrement_round();
@@ -825,12 +1014,29 @@ impl BattleState {
         )
     }
 
-    pub fn set_enemy_magic(&mut self, enemy_index: usize, magic_object: u16, rate: u16) -> bool {
+    pub fn set_enemy_magic(
+        &mut self,
+        enemy_index: usize,
+        magic_object: u16,
+        rate: u16,
+        objects: &GlobalObjects,
+        magics: &Magics,
+    ) -> bool {
+        let magic = match magic_object {
+            0 | u16::MAX => None,
+            object_id => {
+                let Some(magic) = battle_magic(object_id, objects, magics) else {
+                    return false;
+                };
+                Some(magic)
+            }
+        };
         let Some(enemy) = self.enemies.get_mut(enemy_index) else {
             return false;
         };
         enemy.magic_object = magic_object;
         enemy.magic_rate = if rate == 0 { 10 } else { rate };
+        enemy.magic = magic;
         true
     }
 
@@ -1108,6 +1314,44 @@ impl BattleState {
         })
     }
 
+    fn perform_enemy_magic(
+        &mut self,
+        enemy: usize,
+        target: usize,
+        magic: BattleMagic,
+    ) -> Vec<BattleEvent> {
+        if magic.base_damage as i16 <= 0 {
+            return Vec::new();
+        }
+        let targets = if magic.attacks_all {
+            self.players
+                .iter()
+                .enumerate()
+                .filter_map(|(index, player)| player.is_alive().then_some(index))
+                .collect::<Vec<_>>()
+        } else if self.players.get(target).is_some_and(BattlePlayer::is_alive) {
+            vec![target]
+        } else {
+            Vec::new()
+        };
+        let mut events = Vec::with_capacity(targets.len());
+        for player in targets {
+            let damage = self
+                .enemy_magic_damage(enemy, player, magic)
+                .min(self.players[player].hp);
+            let target = &mut self.players[player];
+            target.hp = target.hp.saturating_sub(damage);
+            events.push(BattleEvent::EnemyMagic {
+                enemy,
+                player,
+                magic_object: magic.object_id,
+                damage,
+                defeated: !target.is_alive(),
+            });
+        }
+        events
+    }
+
     fn end_player_action(&mut self, player_index: usize, events: &mut Vec<BattleEvent>) {
         self.acted[player_index] = true;
         if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
@@ -1275,6 +1519,33 @@ impl BattleState {
         u16::try_from(damage.max(1)).unwrap_or(u16::MAX)
     }
 
+    fn enemy_magic_damage(&mut self, enemy: usize, player: usize, magic: BattleMagic) -> u16 {
+        let attacker = &self.enemies[enemy];
+        let raw_strength = i32::from(attacker.magic_strength as i16)
+            + i32::from(attacker.level.saturating_add(6)) * 6;
+        let strength = u32::try_from(raw_strength.max(0))
+            .unwrap_or(0)
+            .saturating_mul(10 + self.random(2))
+            / 10;
+        let defender = &self.players[player];
+        let mut damage = physical_damage(strength, u32::from(defender.defense), 0) / 4
+            + u32::from(magic.base_damage);
+        let element = usize::from(magic.elemental);
+        if (1..=pal_assets::player_roles::MAGIC_ELEMENT_COUNT).contains(&element) {
+            let resistance = u32::from(defender.elemental_resistance[element - 1].min(100));
+            damage = damage.saturating_mul(100 - resistance) / 100;
+            let field = i32::from(self.battlefield_magic_effect[element - 1]) + 10;
+            damage = damage.saturating_mul(u32::try_from(field.max(0)).unwrap_or(0)) / 10;
+        } else if element > pal_assets::player_roles::MAGIC_ELEMENT_COUNT {
+            let resistance = u32::from(defender.poison_resistance.min(100));
+            damage = damage.saturating_mul(100 - resistance) / 100;
+        }
+        if defender.statuses.is_active(BattleStatus::Protect) {
+            damage /= 2;
+        }
+        u16::try_from(damage.max(1)).unwrap_or(u16::MAX)
+    }
+
     fn random(&mut self, upper_exclusive: u32) -> u32 {
         if upper_exclusive <= 1 {
             return 0;
@@ -1305,18 +1576,18 @@ impl BattleState {
 
 fn battle_enemy(
     slot: usize,
-    team_size: usize,
+    position: BattlePosition,
     object_id: u16,
     enemy_id: u16,
     enemy: &Enemy,
     object: &GlobalObject,
-    data: &BattleData,
-) -> Option<BattleEnemy> {
-    Some(BattleEnemy {
+    magic: Option<BattleMagic>,
+) -> BattleEnemy {
+    BattleEnemy {
         slot,
         object_id,
         enemy_id,
-        position: data.enemy_positions.get(team_size, slot)?,
+        position,
         y_offset: enemy.y_offset,
         hp: enemy.health,
         max_hp: enemy.health,
@@ -1344,6 +1615,7 @@ fn battle_enemy(
         ready_script: object.enemy_ready_script(),
         magic_object: enemy.magic,
         magic_rate: enemy.magic_rate,
+        magic,
         attack_equivalent_item: enemy.attack_equivalent_item,
         attack_equivalent_item_rate: enemy.attack_equivalent_item_rate,
         steal_item: enemy.steal_item,
@@ -1353,6 +1625,22 @@ fn battle_enemy(
         sorcery_resistance: object.enemy_sorcery_resistance(),
         statuses: BattleStatuses::default(),
         poisons: [BattlePoison::default(); MAX_BATTLE_POISONS],
+    }
+}
+
+fn battle_magic(object_id: u16, objects: &GlobalObjects, magics: &Magics) -> Option<BattleMagic> {
+    let object = objects.get(object_id)?;
+    let definition = magics.get(object.magic_number())?;
+    Some(BattleMagic {
+        object_id,
+        magic_type: definition.magic_type,
+        mp_cost: definition.mp_cost,
+        base_damage: definition.base_damage,
+        elemental: definition.elemental,
+        attacks_all: definition.magic_type != 0,
+        sound: definition.sound,
+        use_script: object.magic_use_script(),
+        success_script: object.magic_success_script(),
     })
 }
 
@@ -1368,15 +1656,8 @@ fn battle_player(
         .copied()
         .filter(|&object_id| object_id != 0)
         .filter_map(|object_id| {
-            let definition = magics.get(objects.get(object_id)?.magic_number())?;
-            (definition.magic_type <= 3 && definition.base_damage > 0).then_some(BattleMagic {
-                object_id,
-                mp_cost: definition.mp_cost,
-                base_damage: definition.base_damage,
-                elemental: definition.elemental,
-                attacks_all: matches!(definition.magic_type, 1..=3),
-                sound: definition.sound,
-            })
+            let magic = battle_magic(object_id, objects, magics)?;
+            (magic.magic_type <= 3 && magic.base_damage > 0).then_some(magic)
         })
         .collect();
     Some(BattlePlayer {
@@ -1393,6 +1674,7 @@ fn battle_player(
         defense: role.defense,
         dexterity: role.dexterity,
         poison_resistance: role.poison_resistance,
+        elemental_resistance: role.elemental_resistance,
         attacks_all: role.attack_all,
         magics: battle_magics,
         death_sound: role.death_sound,
@@ -1452,6 +1734,17 @@ mod tests {
         enemy_attack: u16,
         player_hp: u16,
     ) -> (BattleData, GlobalObjects, Magics, PlayerRole) {
+        fixture_with_enemy_magic(enemy_hp, enemy_attack, player_hp, 0, 0, 0)
+    }
+
+    fn fixture_with_enemy_magic(
+        enemy_hp: u16,
+        enemy_attack: u16,
+        player_hp: u16,
+        enemy_magic: u16,
+        magic_rate: u16,
+        magic_type: u16,
+    ) -> (BattleData, GlobalObjects, Magics, PlayerRole) {
         let mut chunks = vec![Vec::new(); 15];
         let mut enemy = vec![0; ENEMY_BYTES];
         for (word, value) in [
@@ -1459,8 +1752,8 @@ mod tests {
             (12, 26),
             (13, 48),
             (14, 2),
-            (15, 2),
-            (16, 7),
+            (15, enemy_magic),
+            (16, magic_rate),
             (17, 9),
             (18, 3),
             (19, 8),
@@ -1489,7 +1782,7 @@ mod tests {
             &words(&[
                 0, 0, 0, 0, 0, 0, // object 0
                 0, 0, 11, 12, 13, 0, // enemy object 1 -> enemy definition 0
-                0, 0, 0, 0, 0, 0, // magic object 2 -> magic definition 0
+                0, 0, 32, 31, 0, 0, // magic object 2 -> definition 0 and scripts
             ]),
             ObjectLayout::Dos,
         )
@@ -1529,6 +1822,7 @@ mod tests {
             dying_sound: 0,
         };
         let mut magic_data = [0; 32];
+        magic_data[2..4].copy_from_slice(&magic_type.to_le_bytes());
         magic_data[24..26].copy_from_slice(&5u16.to_le_bytes());
         magic_data[26..28].copy_from_slice(&50u16.to_le_bytes());
         magic_data[30..32].copy_from_slice(&9i16.to_le_bytes());
@@ -1567,7 +1861,7 @@ mod tests {
 
     #[test]
     fn creates_enemy_instances_from_team_objects_and_positions() {
-        let (data, objects, magics, role) = fixture(100, 10, 100);
+        let (data, objects, magics, role) = fixture_with_enemy_magic(100, 10, 100, 2, 7, 0);
         let battle =
             BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
         assert_eq!(battle.players.len(), 1);
@@ -1667,8 +1961,8 @@ mod tests {
         complete_pending_scripts(&mut battle);
         assert!(!battle.enemy_not_first_kind(0).unwrap());
         assert!(battle.enemy_not_first_kind(1).unwrap());
-        assert!(battle.set_enemy_magic(0, 88, 0));
-        assert_eq!(battle.enemies[0].magic_object, 88);
+        assert!(battle.set_enemy_magic(0, 2, 0, &objects, &magics));
+        assert_eq!(battle.enemies[0].magic_object, 2);
         assert_eq!(battle.enemies[0].magic_rate, 10);
 
         assert!(battle.set_script_result(0));
@@ -1712,6 +2006,153 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn enemy_magic_runs_use_and_success_scripts_before_damage() {
+        let (data, objects, magics, role) = fixture_with_enemy_magic(1000, 0, 200, 2, 10, 0);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        battle.enemies[1]
+            .statuses
+            .set_for_enemy(BattleStatus::Paralyzed, 2);
+        assert!(battle.attack(0).is_some());
+
+        assert!(battle.advance_resolution().is_empty());
+        let ready = battle.take_script_request().unwrap();
+        assert_eq!(ready.source, BattleScriptSource::EnemyReady { enemy: 0 });
+        assert!(battle.complete_script(ready.entry));
+        assert!(battle.advance_resolution().is_empty());
+        let use_script = battle.take_script_request().unwrap();
+        assert_eq!(
+            use_script,
+            BattleScriptRequest {
+                source: BattleScriptSource::EnemyMagicUse {
+                    enemy: 0,
+                    magic_object: 2,
+                },
+                entry: 31,
+                object_id: 0,
+            }
+        );
+        assert!(battle.complete_script_with_result(41, true));
+        assert!(battle.advance_resolution().is_empty());
+        let success_script = battle.take_script_request().unwrap();
+        assert_eq!(
+            success_script,
+            BattleScriptRequest {
+                source: BattleScriptSource::EnemyMagicSuccess {
+                    enemy: 0,
+                    magic_object: 2,
+                },
+                entry: 32,
+                object_id: 0,
+            }
+        );
+        assert!(battle.complete_script(42));
+        assert!(matches!(
+            battle.advance_resolution().as_slice(),
+            [BattleEvent::EnemyMagic {
+                enemy: 0,
+                player: 0,
+                magic_object: 2,
+                damage,
+                ..
+            }] if *damage > 0
+        ));
+        assert!(battle.players[0].hp < 200);
+        assert_eq!(battle.enemies[0].magic.unwrap().use_script, 41);
+        assert_eq!(battle.enemies[0].magic.unwrap().success_script, 42);
+    }
+
+    #[test]
+    fn failed_enemy_magic_use_skips_success_but_keeps_base_damage() {
+        let (data, objects, magics, role) = fixture_with_enemy_magic(1000, 0, 200, 2, 10, 0);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        battle.enemies[1]
+            .statuses
+            .set_for_enemy(BattleStatus::Paralyzed, 2);
+        assert!(battle.attack(0).is_some());
+        assert!(battle.advance_resolution().is_empty());
+        let ready = battle.take_script_request().unwrap();
+        assert!(battle.complete_script(ready.entry));
+        assert!(battle.advance_resolution().is_empty());
+        let use_script = battle.take_script_request().unwrap();
+        assert_eq!(
+            use_script.source,
+            BattleScriptSource::EnemyMagicUse {
+                enemy: 0,
+                magic_object: 2,
+            }
+        );
+        assert!(battle.complete_script_with_result(41, false));
+
+        assert!(matches!(
+            battle.advance_resolution().as_slice(),
+            [BattleEvent::EnemyMagic { enemy: 0, damage, .. }] if *damage > 0
+        ));
+        assert!(!battle.has_script_work());
+        assert!(battle.players[0].hp < 200);
+    }
+
+    #[test]
+    fn enemy_magic_targets_all_living_players_and_protect_reduces_damage() {
+        let (data, objects, magics, role) = fixture_with_enemy_magic(1000, 0, 500, 2, 10, 1);
+        let other = role.clone();
+        let mut battle = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &role), (1, &other)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        let magic = battle.enemies[0].magic.unwrap();
+        let events = battle.perform_enemy_magic(0, 0, magic);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                BattleEvent::EnemyMagic { player: 0, .. },
+                BattleEvent::EnemyMagic { player: 1, .. }
+            ]
+        ));
+
+        battle.players[0].hp = 500;
+        battle.random_state = 1234;
+        let normal = battle.enemy_magic_damage(0, 0, magic);
+        battle.players[0]
+            .statuses
+            .set_for_player(BattleStatus::Protect, 1, true);
+        battle.random_state = 1234;
+        let protected = battle.enemy_magic_damage(0, 0, magic);
+        assert_eq!(protected, (normal / 2).max(1));
+    }
+
+    #[test]
+    fn silence_forces_an_enemy_with_magic_to_attack_normally() {
+        let (data, objects, magics, role) = fixture_with_enemy_magic(1000, 20, 500, 2, 10, 0);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        battle.enemies[0]
+            .statuses
+            .set_for_enemy(BattleStatus::Silence, 1);
+        battle.enemies[1]
+            .statuses
+            .set_for_enemy(BattleStatus::Paralyzed, 1);
+        assert!(battle.attack(0).is_some());
+        let events = resolve_until_input_or_finish(&mut battle);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::EnemyAttack { enemy: 0, .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::EnemyMagic { enemy: 0, .. })));
     }
 
     #[test]

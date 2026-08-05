@@ -44,7 +44,7 @@ pub(super) fn update_battle(
     }
     if let Some(request) = game.take_battle_script() {
         if !battle_scripts.start(request) {
-            game.finish_battle_script(request.script_entry);
+            game.finish_battle_script(request.script_entry, false);
         }
         return None;
     }
@@ -179,7 +179,8 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
     match event {
         BattleEvent::PlayerAttack { .. }
         | BattleEvent::PlayerMagic { .. }
-        | BattleEvent::EnemyAttack { .. } => ACTION_EVENT_TICKS,
+        | BattleEvent::EnemyAttack { .. }
+        | BattleEvent::EnemyMagic { .. } => ACTION_EVENT_TICKS,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -243,6 +244,25 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 u16::try_from(enemy.attack_sound).ok(),
                 defeated.then_some(player.death_sound),
                 None,
+            ])
+        }),
+        BattleEvent::EnemyMagic {
+            enemy,
+            player,
+            magic_object,
+            defeated,
+            ..
+        } => game.battle().and_then(|battle| {
+            let enemy = battle.enemies.get(enemy)?;
+            let magic = enemy
+                .magic
+                .filter(|magic| magic.object_id == magic_object)
+                .map(|magic| magic.sound);
+            let player = battle.players.get(player)?;
+            Some(vec![
+                u16::try_from(enemy.magic_sound).ok(),
+                magic.and_then(|sound| u16::try_from(sound).ok()),
+                defeated.then_some(player.death_sound),
             ])
         }),
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => None,

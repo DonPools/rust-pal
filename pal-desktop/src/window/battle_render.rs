@@ -67,7 +67,17 @@ pub fn render_battle(
         }
         let idle_frames = usize::from(enemy.idle_frames.max(1));
         let speed = u64::from(enemy.idle_animation_speed.max(1));
-        let frame = usize::try_from(ticks / speed).unwrap_or(0) % idle_frames;
+        let frame = match event {
+            Some(BattleEvent::EnemyMagic { enemy: caster, .. })
+                if caster == index && enemy.magic_frames > 0 =>
+            {
+                let elapsed =
+                    ACTION_EVENT_TICKS.saturating_sub(event_ticks.min(ACTION_EVENT_TICKS));
+                idle_frames
+                    + usize::from(elapsed).min(usize::from(enemy.magic_frames).saturating_sub(1))
+            }
+            _ => usize::try_from(ticks / speed).unwrap_or(0) % idle_frames,
+        };
         let Some(bitmap) = resources
             .enemy_sprites
             .decode_frame(usize::from(enemy.enemy_id), frame)
@@ -77,6 +87,9 @@ pub fn render_battle(
         let enemy_offset = match event {
             Some(BattleEvent::EnemyAttack { enemy, .. }) if enemy == index => {
                 action_offset(event_ticks)
+            }
+            Some(BattleEvent::EnemyMagic { enemy, .. }) if enemy == index => {
+                action_offset(event_ticks) / 2
             }
             _ => 0,
         };
@@ -138,7 +151,10 @@ pub fn render_battle(
             renderer.blit_rle(&bitmap, left, top);
             let is_hit = matches!(
                 event,
-                Some(BattleEvent::EnemyAttack { player, .. }) if player == index
+                Some(
+                    BattleEvent::EnemyAttack { player, .. }
+                        | BattleEvent::EnemyMagic { player, .. }
+                ) if player == index
             );
             if is_hit && event_ticks.is_multiple_of(2) {
                 stroke_rect(
@@ -190,7 +206,8 @@ fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: Bat
                 damage,
             )
         }
-        BattleEvent::EnemyAttack { player, damage, .. } => {
+        BattleEvent::EnemyAttack { player, damage, .. }
+        | BattleEvent::EnemyMagic { player, damage, .. } => {
             let (x, y) = player_position(battle.players.len(), player);
             (x + 12, y - 34, damage)
         }

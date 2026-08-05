@@ -12,8 +12,8 @@ use pal_assets::store::Stores;
 
 use crate::battle::{
     add_poison, cure_poison, cure_poison_by_level, BattleEvent, BattlePhase, BattlePoison,
-    BattleRequest, BattleResult, BattleRewards, BattleState, BattleStatus, BattleStatuses,
-    BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
+    BattleRequest, BattleResult, BattleRewards, BattleScriptSource, BattleState, BattleStatus,
+    BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
 };
 use crate::map::tile_to_world;
 use crate::map::Map;
@@ -232,20 +232,39 @@ impl<M: CollisionMap> GameState<M> {
         })
     }
 
-    pub fn finish_battle_script(&mut self, next_entry: u16) -> bool {
-        let updates = {
+    pub fn finish_battle_script(&mut self, next_entry: u16, succeeded: bool) -> bool {
+        let (source, updates) = {
             let Some(battle) = self.active_battle.as_mut() else {
                 return false;
             };
-            if !battle.complete_script(next_entry) {
+            let Some(source) = battle.active_script_request().map(|request| request.source) else {
+                return false;
+            };
+            if !battle.complete_script_with_result(next_entry, succeeded) {
                 return false;
             }
-            battle
-                .players
-                .iter()
-                .map(|player| (player.role_id, player.statuses, player.poisons))
-                .collect::<Vec<_>>()
+            (
+                source,
+                battle
+                    .players
+                    .iter()
+                    .map(|player| (player.role_id, player.statuses, player.poisons))
+                    .collect::<Vec<_>>(),
+            )
         };
+        match source {
+            BattleScriptSource::EnemyMagicUse { magic_object, .. } => {
+                self.magic_use_scripts.insert(magic_object, next_entry);
+            }
+            BattleScriptSource::EnemyMagicSuccess { magic_object, .. } => {
+                self.magic_success_scripts.insert(magic_object, next_entry);
+            }
+            BattleScriptSource::EnemyTurnStart { .. }
+            | BattleScriptSource::EnemyReady { .. }
+            | BattleScriptSource::EnemyBattleEnd { .. }
+            | BattleScriptSource::PlayerPoison { .. }
+            | BattleScriptSource::EnemyPoison { .. } => {}
+        }
         for (role_id, statuses, poisons) in updates {
             let role = usize::from(role_id);
             let (Some(saved_statuses), Some(saved_poisons)) = (
@@ -580,6 +599,20 @@ impl<M: CollisionMap> GameState<M> {
         ) else {
             return false;
         };
+        for enemy in &mut battle.enemies {
+            if let Some(magic) = enemy.magic.as_mut() {
+                magic.use_script = self
+                    .magic_use_scripts
+                    .get(&magic.object_id)
+                    .copied()
+                    .unwrap_or(magic.use_script);
+                magic.success_script = self
+                    .magic_success_scripts
+                    .get(&magic.object_id)
+                    .copied()
+                    .unwrap_or(magic.success_script);
+            }
+        }
         for player in &mut battle.players {
             let role_index = usize::from(player.role_id);
             let (Some(statuses), Some(poisons)) = (
@@ -2498,9 +2531,33 @@ impl<M: CollisionMap> GameState<M> {
                 magic_object,
                 rate,
             } => {
-                return self.active_battle.as_mut().is_some_and(|battle| {
-                    battle.set_enemy_magic(usize::from(enemy_index), magic_object, rate)
-                });
+                let persisted_use = self.magic_use_scripts.get(&magic_object).copied();
+                let persisted_success = self.magic_success_scripts.get(&magic_object).copied();
+                let (Some(battle), Some(objects), Some(magics)) = (
+                    self.active_battle.as_mut(),
+                    self.global_objects.as_ref(),
+                    self.magics.as_ref(),
+                ) else {
+                    return false;
+                };
+                if !battle.set_enemy_magic(
+                    usize::from(enemy_index),
+                    magic_object,
+                    rate,
+                    objects,
+                    magics,
+                ) {
+                    return false;
+                }
+                if let Some(magic) = battle
+                    .enemies
+                    .get_mut(usize::from(enemy_index))
+                    .and_then(|enemy| enemy.magic.as_mut())
+                {
+                    magic.use_script = persisted_use.unwrap_or(magic.use_script);
+                    magic.success_script = persisted_success.unwrap_or(magic.success_script);
+                }
+                return true;
             }
             ScriptAction::EnemyEscape => {
                 return self
