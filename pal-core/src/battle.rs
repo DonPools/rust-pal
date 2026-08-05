@@ -465,6 +465,7 @@ pub enum BattleEvent {
         player: usize,
         enemy: usize,
         magic_object: u16,
+        blow: i16,
         damage: u16,
         defeated: bool,
     },
@@ -478,6 +479,7 @@ pub enum BattleEvent {
         enemy: usize,
         player: usize,
         magic_object: u16,
+        blow: i16,
         damage: u16,
         defeated: bool,
     },
@@ -496,6 +498,7 @@ pub enum BattleEvent {
     SimulatedMagic {
         enemy: usize,
         magic_object: u16,
+        blow: i16,
         damage: u16,
         defeated: bool,
     },
@@ -553,6 +556,7 @@ pub struct BattleState {
     round: u32,
     random_state: u32,
     battlefield_magic_effect: [i16; pal_assets::battle::MAGIC_ELEMENT_COUNT],
+    magic_blow: i16,
     flow: BattleFlow,
     pending_scripts: VecDeque<BattleScriptRequest>,
     active_script: Option<BattleScriptRequest>,
@@ -651,6 +655,7 @@ impl BattleState {
             round: 1,
             random_state: 0x6d2b_79f5,
             battlefield_magic_effect: battlefield_definition.magic_effect,
+            magic_blow: 0,
             flow: if phase == BattlePhase::AwaitingCommand {
                 BattleFlow::Command
             } else {
@@ -1040,6 +1045,7 @@ impl BattleState {
                         };
                         return events;
                     }
+                    self.magic_blow = 0;
                     if actor.statuses.is_active(BattleStatus::Confused) {
                         self.flow = BattleFlow::PerformActions;
                         if let Some(event) = self.perform_confused_enemy_action(enemy) {
@@ -2045,6 +2051,7 @@ impl BattleState {
         target: usize,
         magic: BattleMagic,
     ) -> Vec<BattleEvent> {
+        let mut blow = self.magic_blow;
         if magic.base_damage as i16 <= 0 {
             return Vec::new();
         }
@@ -2070,9 +2077,11 @@ impl BattleState {
                 enemy,
                 player,
                 magic_object: magic.object_id,
+                blow,
                 damage,
                 defeated: !target.is_alive(),
             });
+            blow = 0;
         }
         events
     }
@@ -2170,6 +2179,7 @@ impl BattleState {
         if actor.statuses.is_active(BattleStatus::Silence) || actor.mp < spell.mp_cost {
             return false;
         }
+        self.magic_blow = 0;
         self.players[player].mp -= spell.mp_cost;
         self.flow = BattleFlow::PlayerMagic {
             player,
@@ -2198,6 +2208,7 @@ impl BattleState {
         if !actor.can_act() || actor.statuses.is_active(BattleStatus::Confused) {
             return false;
         }
+        self.magic_blow = 0;
         let (item_object, target, script_entry, kind, source, object_id) = match action {
             PlayerAction::UseItem {
                 item_object,
@@ -2414,6 +2425,7 @@ impl BattleState {
         target: usize,
         magic: BattleMagic,
     ) -> Vec<BattleEvent> {
+        let mut blow = self.magic_blow;
         let targets = if magic.attacks_all {
             self.enemies
                 .iter()
@@ -2434,9 +2446,11 @@ impl BattleState {
                 player,
                 enemy,
                 magic_object: magic.object_id,
+                blow,
                 damage,
                 defeated: !target.is_alive(),
             });
+            blow = 0;
         }
         events
     }
@@ -2519,6 +2533,14 @@ impl BattleState {
         true
     }
 
+    pub fn set_magic_blow(&mut self, amount: i16) -> bool {
+        if self.phase != BattlePhase::AwaitingCommand {
+            return false;
+        }
+        self.magic_blow = amount;
+        true
+    }
+
     pub fn simulate_player_magic(
         &mut self,
         target: usize,
@@ -2547,6 +2569,7 @@ impl BattleState {
         if targets.is_empty() {
             return false;
         }
+        let mut blow = self.magic_blow;
         if magic.base_damage == 0 && base_strength == 0 {
             return true;
         }
@@ -2557,9 +2580,11 @@ impl BattleState {
             self.pending_events.push_back(BattleEvent::SimulatedMagic {
                 enemy,
                 magic_object,
+                blow,
                 damage,
                 defeated: !actor.is_alive(),
             });
+            blow = 0;
         }
         true
     }
@@ -3559,6 +3584,7 @@ mod tests {
         );
         assert_eq!(battle.players[0].mp, 5);
         assert_eq!(battle.scale_active_magic_by_mp(0, 2, 8), Some(40));
+        assert!(battle.set_magic_blow(-3));
         assert_eq!(battle.players[0].mp, 0);
         assert!(battle.complete_script(41));
 
@@ -3582,8 +3608,9 @@ mod tests {
                 player: 0,
                 enemy: 0,
                 magic_object: 2,
+                blow: -3,
                 damage,
-                ..
+                defeated: _,
             }] if *damage >= 40
         ));
         assert_eq!(battle.players[0].magics[0].use_script, 41);
@@ -3600,6 +3627,7 @@ mod tests {
         battle.enemies[0].hp = 0;
         let target_hp = battle.enemies[1].hp;
 
+        assert!(battle.set_magic_blow(-2));
         assert!(battle.simulate_player_magic(0, 2, 80, &objects, &magics));
         assert!(battle.enemies[1].hp < target_hp);
         assert!(matches!(
@@ -3607,8 +3635,9 @@ mod tests {
             [BattleEvent::SimulatedMagic {
                 enemy: 1,
                 magic_object: 2,
+                blow: -2,
                 damage,
-                ..
+                defeated: _,
             }] if *damage > 0
         ));
     }
@@ -3886,12 +3915,21 @@ mod tests {
         )
         .unwrap();
         let magic = battle.enemies[0].magic.unwrap();
+        assert!(battle.set_magic_blow(2));
         let events = battle.perform_enemy_magic(0, 0, magic);
         assert!(matches!(
             events.as_slice(),
             [
-                BattleEvent::EnemyMagic { player: 0, .. },
-                BattleEvent::EnemyMagic { player: 1, .. }
+                BattleEvent::EnemyMagic {
+                    player: 0,
+                    blow: 2,
+                    ..
+                },
+                BattleEvent::EnemyMagic {
+                    player: 1,
+                    blow: 0,
+                    ..
+                }
             ]
         ));
 

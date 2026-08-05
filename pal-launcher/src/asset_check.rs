@@ -122,6 +122,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut hide_battle_scripts = 0usize;
     let mut steal_enemy_scripts = 0usize;
     let mut auto_battle_scripts = 0usize;
+    let mut battle_blow_amounts = Vec::new();
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -229,6 +230,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         hide_battle_scripts += usize::from(entry.opcode == ScriptOpcode::HideBattleActor.raw());
         steal_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::StealEnemy.raw());
         auto_battle_scripts += usize::from(entry.opcode == ScriptOpcode::EnableAutoBattle.raw());
+        if entry.opcode == ScriptOpcode::BlowEnemiesAway.raw() {
+            battle_blow_amounts.push(entry.operands[0] as i16);
+        }
         if entry.opcode == ScriptOpcode::TransformEnemy.raw()
             || (entry.opcode == ScriptOpcode::SummonEnemy.raw()
                 && !matches!(entry.operands[0], 0 | u16::MAX))
@@ -357,6 +361,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         ),
         (1, 1, 1, 1, 1),
         "real scripts no longer match collection, hiding, stealing and auto-battle coverage"
+    );
+    battle_blow_amounts.sort_unstable();
+    assert_eq!(
+        battle_blow_amounts,
+        [-3, -2],
+        "real scripts no longer match signed magic-blow coverage"
     );
     let (usable_item_definitions, throwable_item_definitions) = (0..global_objects.len())
         .filter_map(|index| global_objects.get(u16::try_from(index).ok()?))
@@ -1093,6 +1103,62 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         .count();
     assert!(battle_sprite_pixels > 0, "battle screen did not render");
 
+    let blow_event = |blow| pal_core::battle::BattleEvent::PlayerMagic {
+        player: 0,
+        enemy: 0,
+        magic_object: 314,
+        blow,
+        damage: 0,
+        defeated: false,
+    };
+    render_battle(
+        &mut renderer,
+        battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+        },
+        BattleRenderState {
+            selected_enemy: 0,
+            selected_command: 0,
+            ticks: 0,
+            event: Some(blow_event(0)),
+            event_ticks: 1,
+        },
+    );
+    let magic_without_blow = renderer.screen().to_vec();
+    render_battle(
+        &mut renderer,
+        battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+        },
+        BattleRenderState {
+            selected_enemy: 0,
+            selected_command: 0,
+            ticks: 0,
+            event: Some(blow_event(-3)),
+            event_ticks: 1,
+        },
+    );
+    let battle_blow_pixels = renderer
+        .screen()
+        .chunks_exact(4)
+        .zip(magic_without_blow.chunks_exact(4))
+        .filter(|(blown, stationary)| blown != stationary)
+        .count();
+    assert!(
+        battle_blow_pixels > 0,
+        "signed magic blow did not displace rendered enemies"
+    );
+
     let mut battle_feedback_pixels = 0;
     for _ in 0..1024 {
         let events = game.advance_battle_resolution();
@@ -1379,7 +1445,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
          {throwable_item_definitions} throwable object definitions"
     );
     println!(
-        "battle graphics passed: {} ABC slots, {} F slots, {} screen pixels, {} feedback pixels, {} settlement pixels",
+        "battle graphics passed: {} ABC slots, {} F slots, {} screen pixels, {} feedback pixels, \
+         {battle_blow_pixels} blow pixels, {} settlement pixels",
         enemy_battle_sprites.len(),
         player_battle_sprites.len(),
         battle_sprite_pixels,
@@ -1423,7 +1490,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
         "M6 battle command data passed: {collect_enemy_scripts} collection, \
          {transmute_scripts} transmutation, {hide_battle_scripts} hiding, \
-         {steal_enemy_scripts} stealing, {auto_battle_scripts} auto-battle"
+         {steal_enemy_scripts} stealing, {auto_battle_scripts} auto-battle, {} signed magic blows",
+        battle_blow_amounts.len(),
     );
     println!(
         "asset check passed: {visible_pixels} visible pixels, \

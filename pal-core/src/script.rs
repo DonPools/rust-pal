@@ -210,7 +210,7 @@ define_script_opcodes! {
     JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Implemented;
     EnemyEscape = 0x0069, "ENEMY_FLEE", "Make the enemy party escape and terminate the battle.", Implemented;
     StealEnemy = 0x006A, "STEAL", "Steal from an enemy.", Implemented;
-    BlowEnemiesAway = 0x006B, "BLOW_ENEMIES", "Apply a battlefield displacement to enemies.", Unsupported;
+    BlowEnemiesAway = 0x006B, "BLOW_ENEMIES", "Apply a battlefield displacement to enemies.", Implemented;
     OffsetObjectAndAnimate = 0x006C, "OBJ_STEP", "Offset an event object and advance its animation.", Implemented;
     SetSceneScripts = 0x006D, "SCENE_SCRIPTS", "Set a scene's enter and teleport script entries.", Implemented;
     OffsetParty = 0x006E, "PARTY_STEP", "Move the party by a signed pixel offset.", Implemented;
@@ -595,6 +595,9 @@ pub enum ScriptAction {
     StealEnemy {
         enemy_index: u16,
         rate: u16,
+    },
+    SetBattleBlow {
+        amount: i16,
     },
     EnableAutoBattle,
     DrainEnemyHp {
@@ -1694,6 +1697,13 @@ impl ScriptRuntime {
                         rate: entry.operands[0],
                     }));
                 }
+                BlowEnemiesAway => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetBattleBlow {
+                        amount: entry.operands[0] as i16,
+                    }));
+                }
                 SetBattleResult => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2340,8 +2350,8 @@ impl ScriptRuntime {
                     });
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
-                SetEquipmentEffect | EquipItem | ChasePlayer | BlowEnemiesAway
-                | PlayerMagicAnimation | PlayEndingAnimation => {
+                SetEquipmentEffect | EquipItem | ChasePlayer | PlayerMagicAnimation
+                | PlayEndingAnimation => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2463,7 +2473,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [162, 0, 3]);
+        assert_eq!(support_counts, [163, 0, 2]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -3863,7 +3873,7 @@ mod tests {
     fn reports_unsupported_and_invalid_entries() {
         let mut runtime = ScriptRuntime::new(table(&[
             [0, 0, 0, 0],
-            [ScriptOpcode::BlowEnemiesAway.raw(), 0, 0, 0],
+            [ScriptOpcode::PlayerMagicAnimation.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
         assert_eq!(
@@ -3871,7 +3881,7 @@ mod tests {
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: ScriptOpcode::BlowEnemiesAway.raw(),
+                opcode: ScriptOpcode::PlayerMagicAnimation.raw(),
             })
         );
 
@@ -3882,6 +3892,29 @@ mod tests {
                 trigger: trigger(99),
                 entry: 99,
             })
+        );
+    }
+
+    #[test]
+    fn yields_signed_battle_blow_amounts() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::BlowEnemiesAway.raw(), 2, 0, 0],
+            [ScriptOpcode::BlowEnemiesAway.raw(), 0xfffd, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetBattleBlow {
+                amount: 2
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetBattleBlow {
+                amount: -3
+            }))
         );
     }
 

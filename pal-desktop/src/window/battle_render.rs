@@ -92,7 +92,7 @@ pub fn render_battle(
         else {
             continue;
         };
-        let enemy_offset = match event {
+        let enemy_action_offset = match event {
             Some(BattleEvent::EnemyAttack { enemy, .. }) if enemy == index => {
                 action_offset(event_ticks)
             }
@@ -104,6 +104,13 @@ pub fn render_battle(
             }
             _ => 0,
         };
+        let enemy_blow_offset = match event {
+            Some(
+                BattleEvent::PlayerMagic { blow, .. } | BattleEvent::SimulatedMagic { blow, .. },
+            ) => magic_blow_offset(blow, event_ticks),
+            _ => 0,
+        };
+        let enemy_offset = enemy_action_offset + enemy_blow_offset;
         let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2 + enemy_offset;
         let y = i32::from(enemy.position.y) + i32::from(enemy.y_offset) - i32::from(bitmap.height)
             + enemy_offset / 2;
@@ -142,6 +149,11 @@ pub fn render_battle(
 
     for (index, player) in battle.players.iter().enumerate() {
         let (mut x, mut y) = player_position(battle.players.len(), index);
+        if let Some(BattleEvent::EnemyMagic { blow, .. }) = event {
+            let offset = magic_blow_offset(blow, event_ticks);
+            x += offset;
+            y += offset / 2;
+        }
         match event {
             Some(BattleEvent::PlayerAttack { player, .. }) if player == index => {
                 let offset = action_offset(event_ticks);
@@ -218,6 +230,25 @@ fn action_offset(ticks_remaining: u16) -> i32 {
     let elapsed = ACTION_EVENT_TICKS.saturating_sub(ticks_remaining.min(ACTION_EVENT_TICKS));
     let distance = elapsed.min(ACTION_EVENT_TICKS.saturating_sub(elapsed));
     i32::from(distance) * 3
+}
+
+fn magic_blow_offset(amount: i16, ticks_remaining: u16) -> i32 {
+    if amount == 0 {
+        return 0;
+    }
+    let frame_count = ACTION_EVENT_TICKS
+        .saturating_sub(ticks_remaining.min(ACTION_EVENT_TICKS))
+        .saturating_add(1);
+    let lower = i32::from(amount.min(0));
+    let upper = i32::from(amount.max(0));
+    let span = u32::try_from(upper - lower + 1).unwrap_or(1);
+    let mut state = 0x6d2b_79f5 ^ u32::from(amount as u16);
+    let mut offset = 0i32;
+    for _ in 0..frame_count {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        offset += lower + i32::try_from(state % span).unwrap_or(0);
+    }
+    offset
 }
 
 fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: BattleEvent) {
@@ -401,6 +432,23 @@ mod tests {
             .map(action_offset)
             .collect::<Vec<_>>();
         assert_eq!(offsets, [0, 3, 6, 9, 12, 9, 6, 3]);
+    }
+
+    #[test]
+    fn magic_blow_accumulates_with_the_requested_sign_and_resets_after_feedback() {
+        let negative = (1..=ACTION_EVENT_TICKS)
+            .rev()
+            .map(|ticks| magic_blow_offset(-3, ticks))
+            .collect::<Vec<_>>();
+        let positive = (1..=ACTION_EVENT_TICKS)
+            .rev()
+            .map(|ticks| magic_blow_offset(2, ticks))
+            .collect::<Vec<_>>();
+        assert!(negative.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert!(positive.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(negative.last().is_some_and(|&offset| offset < 0));
+        assert!(positive.last().is_some_and(|&offset| offset > 0));
+        assert_eq!(magic_blow_offset(0, 1), 0);
     }
 
     #[test]

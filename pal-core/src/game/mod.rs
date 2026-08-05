@@ -3014,6 +3014,12 @@ impl<M: CollisionMap> GameState<M> {
                 }
                 return true;
             }
+            ScriptAction::SetBattleBlow { amount } => {
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.set_magic_blow(amount));
+            }
             ScriptAction::EnableAutoBattle => self.auto_battle = true,
             ScriptAction::DrainEnemyHp {
                 enemy_index,
@@ -5328,6 +5334,7 @@ mod tests {
         assert_eq!(state.player_role(0).unwrap().mp, 0);
         assert!(state.apply_script_action(ScriptAction::ScaleMagicByCash { magic_object: 2 }));
         assert_eq!(state.cash, 0);
+        assert!(state.apply_script_action(ScriptAction::SetBattleBlow { amount: -3 }));
         assert!(state.finish_battle_script(41, true));
         assert!(state.advance_battle_resolution().is_empty());
         let success_script = state.take_battle_script().unwrap();
@@ -5335,7 +5342,11 @@ mod tests {
         assert!(state.finish_battle_script(42, true));
         assert!(matches!(
             state.advance_battle_resolution().as_slice(),
-            [BattleEvent::PlayerMagic { damage, .. }] if *damage >= 40
+            [BattleEvent::PlayerMagic {
+                blow: -3,
+                damage,
+                ..
+            }] if *damage >= 40
         ));
     }
 
