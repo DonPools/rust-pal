@@ -246,7 +246,7 @@ define_script_opcodes! {
     LevelUpPlayer = 0x008D, "LEVEL_UP", "Increase a player's level.", Implemented;
     RestoreScreen = 0x008E, "SCREEN_RESTORE", "Restore the screen saved by a previous backup operation.", Implemented;
     HalveCash = 0x008F, "CASH_HALF", "Halve the party's cash.", Implemented;
-    SetObjectScript = 0x0090, "OBJECT_SCRIPT", "Replace one script field in a global object definition.", Unsupported;
+    SetObjectScript = 0x0090, "OBJECT_SCRIPT", "Replace one script field in a global object definition.", Implemented;
     JumpIfEnemyNotFirstKind = 0x0091, "JNOT_FIRST_ENEMY", "Jump when an enemy is not the first living instance of its kind.", Implemented;
     PlayerMagicAnimation = 0x0092, "MAGIC_ANIM", "Show a player's battle magic-casting animation.", Unsupported;
     FadeSceneWithUpdate = 0x0093, "SCENE_FADE_UPDATE", "Fade the screen while rebuilding the scene.", Implemented;
@@ -668,6 +668,11 @@ pub enum ScriptAction {
         levels: u16,
     },
     HalveCash,
+    SetObjectScript {
+        object_id: u16,
+        script_entry: u16,
+        field: u16,
+    },
     SetEquipmentEffect {
         role_id: u16,
         attribute: u16,
@@ -1607,6 +1612,15 @@ impl ScriptRuntime {
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Action(ScriptAction::HalveCash));
                 }
+                SetObjectScript if entry.operands[2] <= 2 => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetObjectScript {
+                        object_id: entry.operands[0],
+                        script_entry: entry.operands[1],
+                        field: entry.operands[2],
+                    }));
+                }
                 DrainEnemyHp => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2327,7 +2341,7 @@ impl ScriptRuntime {
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
                 SetEquipmentEffect | EquipItem | ChasePlayer | BlowEnemiesAway
-                | SetObjectScript | PlayerMagicAnimation | PlayEndingAnimation => {
+                | PlayerMagicAnimation | PlayEndingAnimation => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2336,7 +2350,7 @@ impl ScriptRuntime {
                     });
                 }
                 // Implemented instructions with malformed operands are rejected explicitly.
-                SetObjectStates | SetSceneMap | RandomSelect => {
+                SetObjectScript | SetObjectStates | SetSceneMap | RandomSelect => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2449,7 +2463,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [161, 0, 4]);
+        assert_eq!(support_counts, [162, 0, 3]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -3199,6 +3213,47 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Completed { .. })
         ));
+    }
+
+    #[test]
+    fn yields_object_script_mutations_and_rejects_invalid_fields() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::SetObjectScript.raw(), 435, 0, 0],
+            [ScriptOpcode::SetObjectScript.raw(), 454, 123, 2],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetObjectScript {
+                object_id: 435,
+                script_entry: 0,
+                field: 0,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetObjectScript {
+                object_id: 454,
+                script_entry: 123,
+                field: 2,
+            }))
+        );
+
+        let mut invalid = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::SetObjectScript.raw(), 1, 2, 3],
+        ]));
+        invalid.start(trigger(1));
+        assert_eq!(
+            invalid.advance(),
+            Some(ScriptEvent::Unsupported {
+                trigger: trigger(1),
+                entry: 1,
+                opcode: ScriptOpcode::SetObjectScript.raw(),
+            })
+        );
     }
 
     #[test]

@@ -113,6 +113,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut speed_chase_scripts = 0usize;
     let mut level_up_scripts = 0usize;
     let mut halve_cash_scripts = 0usize;
+    let mut set_object_script_scripts = 0usize;
     let mut player_sprite_scripts = 0usize;
     let mut outside_zone_scripts = 0usize;
     let mut cd_music_scripts = 0usize;
@@ -184,6 +185,19 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         speed_chase_scripts += usize::from(entry.opcode == ScriptOpcode::SpeedUpEnemyChase.raw());
         level_up_scripts += usize::from(entry.opcode == ScriptOpcode::LevelUpPlayer.raw());
         halve_cash_scripts += usize::from(entry.opcode == ScriptOpcode::HalveCash.raw());
+        if entry.opcode == ScriptOpcode::SetObjectScript.raw() {
+            assert!(
+                global_objects.get(entry.operands[0]).is_some(),
+                "object-script mutation {index} references unavailable object {}",
+                entry.operands[0]
+            );
+            assert!(
+                entry.operands[2] <= 2,
+                "object-script mutation {index} references unavailable field {}",
+                entry.operands[2]
+            );
+            set_object_script_scripts += 1;
+        }
         if entry.opcode == ScriptOpcode::SetPlayerSprite.raw() {
             assert!(
                 usize::from(entry.operands[0]) < pal_assets::player_roles::PLAYER_ROLE_COUNT,
@@ -319,9 +333,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             speed_chase_scripts,
             level_up_scripts,
             halve_cash_scripts,
+            set_object_script_scripts,
         ),
-        (1, 1, 1, 1),
-        "real scripts no longer match chase, level-up and cash coverage"
+        (1, 1, 1, 1, 3),
+        "real scripts no longer match chase, level-up, cash and object-script coverage"
     );
     assert!(
         player_sprite_scripts > 0,
@@ -1399,7 +1414,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
         "M6 world-state data passed: {pause_chase_scripts} chase pause, \
          {speed_chase_scripts} chase speed-up, {level_up_scripts} scripted level-up, \
-         {halve_cash_scripts} cash-halving"
+         {halve_cash_scripts} cash-halving, {set_object_script_scripts} object-script mutations"
     );
     println!(
         "M6 script fallback data passed: {player_sprite_scripts} player-sprite changes, \

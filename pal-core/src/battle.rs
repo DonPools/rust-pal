@@ -719,6 +719,22 @@ impl BattleState {
         self.active_script.is_some() || !self.pending_scripts.is_empty()
     }
 
+    /// Rebuild the opening turn-start queue after the owning game state layers
+    /// mutable global-object script fields over freshly loaded enemies.
+    pub(crate) fn refresh_initial_enemy_scripts(&mut self) {
+        debug_assert_eq!(self.round, 1);
+        debug_assert!(matches!(
+            self.flow,
+            BattleFlow::Command | BattleFlow::Finished
+        ));
+        debug_assert!(self.active_script.is_none());
+        debug_assert!(self.action_queue.is_empty());
+        self.pending_scripts.clear();
+        if self.phase == BattlePhase::AwaitingCommand {
+            self.queue_turn_start_scripts();
+        }
+    }
+
     /// Begin the next queued battle-owned script and retain its source until completion.
     pub fn take_script_request(&mut self) -> Option<BattleScriptRequest> {
         if self.active_script.is_some() {

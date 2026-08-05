@@ -31,6 +31,7 @@ pub struct GameSnapshot {
     pub(super) item_throw_scripts: BTreeMap<u16, u16>,
     pub(super) magic_use_scripts: BTreeMap<u16, u16>,
     pub(super) magic_success_scripts: BTreeMap<u16, u16>,
+    pub(super) object_script_overrides: BTreeMap<(u16, u16), u16>,
     pub(super) equipment_effects: BTreeMap<(u16, u16, u16), i16>,
     pub(super) inactive_objects: BTreeMap<u16, SceneObject>,
     pub(super) scene_enter_scripts: BTreeMap<u16, u16>,
@@ -58,8 +59,8 @@ impl GameSnapshot {
     }
 }
 
-// Version 19 preserves the original enemy-chase range and remaining override cycles.
-pub(super) const SNAPSHOT_VERSION: u16 = 19;
+// Version 20 preserves mutable global-object script fields changed by opcode 0x0090.
+pub(super) const SNAPSHOT_VERSION: u16 = 20;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -85,6 +86,7 @@ pub(super) struct SnapshotData {
     pub(super) item_throw_scripts: Vec<(u16, u16)>,
     pub(super) magic_use_scripts: Vec<(u16, u16)>,
     pub(super) magic_success_scripts: Vec<(u16, u16)>,
+    pub(super) object_script_overrides: Vec<(u16, u16, u16)>,
     pub(super) equipment_effects: Vec<(u16, u16, u16, i16)>,
     pub(super) inactive_objects: Vec<SavedSceneObject>,
     pub(super) scene_enter_scripts: Vec<(u16, u16)>,

@@ -75,6 +75,7 @@ pub struct GameState<M = Map> {
     item_throw_scripts: BTreeMap<u16, u16>,
     magic_use_scripts: BTreeMap<u16, u16>,
     magic_success_scripts: BTreeMap<u16, u16>,
+    object_script_overrides: BTreeMap<(u16, u16), u16>,
     equipment_effects: BTreeMap<(u16, u16, u16), i16>,
     current_equipment_slot: Option<u16>,
     inactive_objects: BTreeMap<u16, SceneObject>,
@@ -139,6 +140,7 @@ impl<M: CollisionMap> GameState<M> {
             item_throw_scripts: BTreeMap::new(),
             magic_use_scripts: BTreeMap::new(),
             magic_success_scripts: BTreeMap::new(),
+            object_script_overrides: BTreeMap::new(),
             equipment_effects: BTreeMap::new(),
             current_equipment_slot: None,
             inactive_objects: BTreeMap::new(),
@@ -429,6 +431,7 @@ impl<M: CollisionMap> GameState<M> {
     /// Returns `Some(false)` when the instruction is valid but an active status suppresses it.
     pub fn transform_enemy(&mut self, enemy_slot: u16, object_id: u16) -> Option<bool> {
         let enemy_index = self.battle_enemy_index(enemy_slot)?;
+        let object_script_overrides = &self.object_script_overrides;
         let magic_use_scripts = &self.magic_use_scripts;
         let magic_success_scripts = &self.magic_success_scripts;
         let item_use_scripts = &self.item_use_scripts;
@@ -443,9 +446,11 @@ impl<M: CollisionMap> GameState<M> {
             let enemy = battle.enemies.get_mut(enemy_index)?;
             apply_enemy_script_overrides(
                 enemy,
+                object_script_overrides,
                 magic_use_scripts,
                 magic_success_scripts,
                 item_use_scripts,
+                false,
             );
         }
         Some(transformed)
@@ -588,6 +593,11 @@ impl<M: CollisionMap> GameState<M> {
         else {
             return false;
         };
+        let poison_script = self
+            .object_script_overrides
+            .get(&(poison_id, 0))
+            .copied()
+            .unwrap_or_else(|| poison_object.poison_player_script());
         let targets = if apply_to_all {
             self.party
                 .members()
@@ -632,7 +642,7 @@ impl<M: CollisionMap> GameState<M> {
             let added = add_poison(
                 &mut self.player_poisons[target_index],
                 poison_id,
-                poison_object.poison_player_script(),
+                poison_script,
             );
             if let Some(battle) = self.active_battle.as_mut() {
                 if let Some(player) = battle
@@ -643,11 +653,7 @@ impl<M: CollisionMap> GameState<M> {
                     player.poisons = self.player_poisons[target_index];
                 }
                 if added && !already_present {
-                    battle.queue_player_poison_script(
-                        target,
-                        poison_id,
-                        poison_object.poison_player_script(),
-                    );
+                    battle.queue_player_poison_script(target, poison_id, poison_script);
                 }
             }
         }
@@ -766,24 +772,16 @@ impl<M: CollisionMap> GameState<M> {
             return false;
         };
         for enemy in &mut battle.enemies {
-            if let Some(magic) = enemy.magic.as_mut() {
-                magic.use_script = self
-                    .magic_use_scripts
-                    .get(&magic.object_id)
-                    .copied()
-                    .unwrap_or(magic.use_script);
-                magic.success_script = self
-                    .magic_success_scripts
-                    .get(&magic.object_id)
-                    .copied()
-                    .unwrap_or(magic.success_script);
-            }
-            enemy.attack_equivalent_item_script = self
-                .item_use_scripts
-                .get(&enemy.attack_equivalent_item)
-                .copied()
-                .unwrap_or(enemy.attack_equivalent_item_script);
+            apply_enemy_script_overrides(
+                enemy,
+                &self.object_script_overrides,
+                &self.magic_use_scripts,
+                &self.magic_success_scripts,
+                &self.item_use_scripts,
+                true,
+            );
         }
+        battle.refresh_initial_enemy_scripts();
         for player in &mut battle.players {
             for magic in &mut player.magics {
                 magic.use_script = self
@@ -1996,6 +1994,7 @@ impl<M: CollisionMap> GameState<M> {
             item_throw_scripts: self.item_throw_scripts.clone(),
             magic_use_scripts: self.magic_use_scripts.clone(),
             magic_success_scripts: self.magic_success_scripts.clone(),
+            object_script_overrides: self.object_script_overrides.clone(),
             equipment_effects: self.equipment_effects.clone(),
             inactive_objects: self.inactive_objects.clone(),
             scene_enter_scripts: self.scene_enter_scripts.clone(),
@@ -2048,6 +2047,11 @@ impl<M: CollisionMap> GameState<M> {
             item_throw_scripts: snapshot.item_throw_scripts.into_iter().collect(),
             magic_use_scripts: snapshot.magic_use_scripts.into_iter().collect(),
             magic_success_scripts: snapshot.magic_success_scripts.into_iter().collect(),
+            object_script_overrides: snapshot
+                .object_script_overrides
+                .into_iter()
+                .map(|((object_id, field), entry)| (object_id, field, entry))
+                .collect(),
             equipment_effects: snapshot
                 .equipment_effects
                 .into_iter()
@@ -2109,6 +2113,7 @@ impl<M: CollisionMap> GameState<M> {
             || data.item_throw_scripts.len() > MAX_INVENTORY
             || data.magic_use_scripts.len() > MAX_INVENTORY
             || data.magic_success_scripts.len() > MAX_INVENTORY
+            || data.object_script_overrides.len() > MAX_OBJECTS * 3
             || data.equipment_effects.len() > MAX_INVENTORY
             || data.scene_objects.len() > MAX_OBJECTS
             || data.inactive_objects.len() > MAX_OBJECTS
@@ -2205,6 +2210,24 @@ impl<M: CollisionMap> GameState<M> {
         let item_throw_scripts = unique_script_entries(data.item_throw_scripts)?;
         let magic_use_scripts = unique_script_entries(data.magic_use_scripts)?;
         let magic_success_scripts = unique_script_entries(data.magic_success_scripts)?;
+        let object_script_override_count = data.object_script_overrides.len();
+        let object_script_overrides = data
+            .object_script_overrides
+            .into_iter()
+            .map(|(object_id, field, entry)| ((object_id, field), entry))
+            .collect::<BTreeMap<_, _>>();
+        if object_script_overrides.len() != object_script_override_count
+            || object_script_overrides.keys().any(|&(object_id, field)| {
+                field > 2
+                    || self
+                        .global_objects
+                        .as_ref()
+                        .and_then(|objects| objects.get(object_id))
+                        .is_none()
+            })
+        {
+            return None;
+        }
         let equipment_effect_count = data.equipment_effects.len();
         let equipment_effects = data
             .equipment_effects
@@ -2274,6 +2297,7 @@ impl<M: CollisionMap> GameState<M> {
             item_throw_scripts,
             magic_use_scripts,
             magic_success_scripts,
+            object_script_overrides,
             equipment_effects,
             inactive_objects,
             scene_enter_scripts,
@@ -2317,6 +2341,7 @@ impl<M: CollisionMap> GameState<M> {
         self.item_throw_scripts = snapshot.item_throw_scripts;
         self.magic_use_scripts = snapshot.magic_use_scripts;
         self.magic_success_scripts = snapshot.magic_success_scripts;
+        self.object_script_overrides = snapshot.object_script_overrides;
         self.equipment_effects = snapshot.equipment_effects;
         self.current_equipment_slot = None;
         self.inactive_objects = snapshot.inactive_objects;
@@ -2521,6 +2546,7 @@ impl<M: CollisionMap> GameState<M> {
         self.item_throw_scripts.clear();
         self.magic_use_scripts.clear();
         self.magic_success_scripts.clear();
+        self.object_script_overrides.clear();
         self.equipment_effects.clear();
         self.current_equipment_slot = None;
         self.inactive_objects = inactive_objects;
@@ -2830,14 +2856,18 @@ impl<M: CollisionMap> GameState<M> {
                 poison_id,
                 apply_to_all,
             } => {
-                let Some(script_entry) = self
+                let Some(poison_object) = self
                     .global_objects
                     .as_ref()
                     .and_then(|objects| objects.get(poison_id))
-                    .map(|object| object.poison_enemy_script())
                 else {
                     return false;
                 };
+                let script_entry = self
+                    .object_script_overrides
+                    .get(&(poison_id, 2))
+                    .copied()
+                    .unwrap_or_else(|| poison_object.poison_enemy_script());
                 let enemy_index = if apply_to_all {
                     0
                 } else if let Some(index) = self.battle_enemy_index(enemy_index) {
@@ -3085,6 +3115,7 @@ impl<M: CollisionMap> GameState<M> {
                 let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
                     return false;
                 };
+                let object_script_overrides = &self.object_script_overrides;
                 let magic_use_scripts = &self.magic_use_scripts;
                 let magic_success_scripts = &self.magic_success_scripts;
                 let item_use_scripts = &self.item_use_scripts;
@@ -3107,9 +3138,11 @@ impl<M: CollisionMap> GameState<M> {
                     };
                     apply_enemy_script_overrides(
                         enemy,
+                        object_script_overrides,
                         magic_use_scripts,
                         magic_success_scripts,
                         item_use_scripts,
+                        true,
                     );
                 }
                 return true;
@@ -3210,6 +3243,39 @@ impl<M: CollisionMap> GameState<M> {
                 return self.increase_player_level(role_id, levels);
             }
             ScriptAction::HalveCash => self.cash /= 2,
+            ScriptAction::SetObjectScript {
+                object_id,
+                script_entry,
+                field,
+            } => {
+                if field > 2
+                    || self
+                        .global_objects
+                        .as_ref()
+                        .and_then(|objects| objects.get(object_id))
+                        .is_none()
+                {
+                    return false;
+                }
+                self.object_script_overrides
+                    .insert((object_id, field), script_entry);
+                if object_id != 0 {
+                    match field {
+                        0 => {
+                            self.item_use_scripts.insert(object_id, script_entry);
+                            self.magic_success_scripts.insert(object_id, script_entry);
+                        }
+                        1 => {
+                            self.item_equip_scripts.insert(object_id, script_entry);
+                            self.magic_use_scripts.insert(object_id, script_entry);
+                        }
+                        2 => {
+                            self.item_throw_scripts.insert(object_id, script_entry);
+                        }
+                        _ => unreachable!("object script field was validated above"),
+                    }
+                }
+            }
             ScriptAction::SetEquipmentEffect {
                 role_id,
                 attribute,
@@ -4706,10 +4772,26 @@ fn direction_toward(x_offset: i32, y_offset: i32) -> Direction {
 
 fn apply_enemy_script_overrides(
     enemy: &mut BattleEnemy,
+    object_script_overrides: &BTreeMap<(u16, u16), u16>,
     magic_use_scripts: &BTreeMap<u16, u16>,
     magic_success_scripts: &BTreeMap<u16, u16>,
     item_use_scripts: &BTreeMap<u16, u16>,
+    apply_lifecycle: bool,
 ) {
+    if apply_lifecycle {
+        enemy.turn_start_script = object_script_overrides
+            .get(&(enemy.object_id, 0))
+            .copied()
+            .unwrap_or(enemy.turn_start_script);
+        enemy.battle_end_script = object_script_overrides
+            .get(&(enemy.object_id, 1))
+            .copied()
+            .unwrap_or(enemy.battle_end_script);
+        enemy.ready_script = object_script_overrides
+            .get(&(enemy.object_id, 2))
+            .copied()
+            .unwrap_or(enemy.ready_script);
+    }
     if let Some(magic) = enemy.magic.as_mut() {
         magic.use_script = magic_use_scripts
             .get(&magic.object_id)
@@ -4964,6 +5046,151 @@ mod tests {
 
         assert!(state.apply_script_action(ScriptAction::HalveCash));
         assert_eq!(state.cash, 50);
+    }
+
+    #[test]
+    fn object_script_overrides_update_union_views_and_round_trip() {
+        let mut role_data = vec![0; 900];
+        let hp_offset = 9 * PLAYER_ROLE_COUNT * 2;
+        role_data[hp_offset..hp_offset + 2].copy_from_slice(&100u16.to_le_bytes());
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let objects = GlobalObjects::parse(
+            &[[0u16; 6], [2, 0, 11, 12, 13, 0]]
+                .into_iter()
+                .flatten()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            pal_assets::objects::ObjectLayout::Dos,
+        )
+        .unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects);
+
+        for (field, script_entry) in [(0, 21), (1, 22), (2, 23)] {
+            assert!(state.apply_script_action(ScriptAction::SetObjectScript {
+                object_id: 1,
+                script_entry,
+                field,
+            }));
+        }
+        assert_eq!(state.item_use_scripts.get(&1), Some(&21));
+        assert_eq!(state.magic_success_scripts.get(&1), Some(&21));
+        assert_eq!(state.item_equip_scripts.get(&1), Some(&22));
+        assert_eq!(state.magic_use_scripts.get(&1), Some(&22));
+        assert_eq!(state.item_throw_scripts.get(&1), Some(&23));
+        assert!(!state.apply_script_action(ScriptAction::SetObjectScript {
+            object_id: 1,
+            script_entry: 99,
+            field: 3,
+        }));
+        assert!(!state.apply_script_action(ScriptAction::SetObjectScript {
+            object_id: 2,
+            script_entry: 99,
+            field: 0,
+        }));
+
+        assert!(state.apply_script_action(ScriptAction::PoisonPlayer {
+            role_id: 0,
+            poison_id: 1,
+            apply_to_all: false,
+        }));
+        assert_eq!(state.player_poisons(0).unwrap()[0].script_entry, 21);
+
+        let snapshot = state
+            .decode_snapshot(&state.encode_snapshot().unwrap())
+            .unwrap();
+        assert!(state.apply_script_action(ScriptAction::SetObjectScript {
+            object_id: 1,
+            script_entry: 99,
+            field: 0,
+        }));
+        state.restore_snapshot(snapshot, test_map());
+        assert_eq!(state.object_script_overrides.get(&(1, 0)), Some(&21));
+        assert_eq!(state.item_use_scripts.get(&1), Some(&21));
+        assert_eq!(state.magic_success_scripts.get(&1), Some(&21));
+    }
+
+    #[test]
+    fn object_script_overrides_seed_enemy_lifecycle_without_rewriting_transform_state() {
+        let mut role_data = vec![0; 900];
+        for (array, value) in [(7, 100u16), (9, 100), (17, 20), (19, 20), (20, 20)] {
+            let offset = array * PLAYER_ROLE_COUNT * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let objects = GlobalObjects::parse(
+            &[[0u16; 6], [0, 0, 11, 12, 13, 0], [0, 0, 101, 102, 103, 0]]
+                .into_iter()
+                .flatten()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            pal_assets::objects::ObjectLayout::Dos,
+        )
+        .unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let magics = Magics::parse(&[0; 32]).unwrap();
+        let scripts = ScriptTable::parse(&[0; 8]).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects)
+            .with_magic_data(magics)
+            .with_battle_data(battle_data_for_growth());
+        for (object_id, entries) in [(1, [0, 22, 23]), (2, [201, 202, 203])] {
+            for (field, script_entry) in entries.into_iter().enumerate() {
+                assert!(state.apply_script_action(ScriptAction::SetObjectScript {
+                    object_id,
+                    script_entry,
+                    field: u16::try_from(field).unwrap(),
+                }));
+            }
+        }
+        assert!(state.start_battle(
+            BattleRequest {
+                enemy_team: 0,
+                lost_entry: 0,
+                flee_entry: 0,
+                is_boss: true,
+            },
+            &scripts,
+        ));
+        let enemy = &state.battle().unwrap().enemies[0];
+        assert_eq!(
+            (
+                enemy.turn_start_script,
+                enemy.battle_end_script,
+                enemy.ready_script,
+            ),
+            (0, 22, 23)
+        );
+        assert!(state.take_battle_script().is_none());
+        assert!(state.apply_script_action(ScriptAction::PoisonEnemy {
+            enemy_index: 0,
+            poison_id: 2,
+            apply_to_all: false,
+        }));
+        assert_eq!(
+            state.battle().unwrap().enemies[0].poisons[0].script_entry,
+            203
+        );
+
+        assert_eq!(state.transform_enemy(0, 2), Some(true));
+        let transformed = &state.battle().unwrap().enemies[0];
+        assert_eq!(transformed.object_id, 2);
+        assert_eq!(
+            (
+                transformed.turn_start_script,
+                transformed.battle_end_script,
+                transformed.ready_script,
+            ),
+            (0, 22, 23)
+        );
+        assert_eq!(transformed.poisons[0].script_entry, 203);
     }
 
     #[test]
@@ -6335,7 +6562,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":19", "\"version\":18");
+            .replace("\"version\":20", "\"version\":19");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 
@@ -6776,6 +7003,7 @@ mod tests {
 
         let save = OriginalSave::parse(&bytes).unwrap();
         let mut state = state(&[]);
+        state.object_script_overrides.insert((1, 0), 999);
         assert!(state.restore_original_save(save, test_map(), Vec::new()));
         assert_eq!(state.scene_number, 1);
         assert_eq!((state.camera.x, state.camera.y), (100, 50));
@@ -6794,5 +7022,6 @@ mod tests {
         assert_eq!(state.player_experience(0), Some(42));
         assert_eq!(state.scene_enter_script(0), 123);
         assert_eq!(state.scene_teleport_script(0), 456);
+        assert!(state.object_script_overrides.is_empty());
     }
 }
