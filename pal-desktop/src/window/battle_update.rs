@@ -94,10 +94,16 @@ pub(super) fn update_battle(
         .collect::<Vec<_>>();
     if input.battle_auto {
         services.battle_auto_attack = !services.battle_auto_attack;
+        if let Some(battle) = game.battle_mut() {
+            battle.set_auto_attack_mode(services.battle_auto_attack);
+        }
         services.battle_menu = BattleMenuState::Main;
     }
     if services.battle_auto_attack && input.cancel {
         services.battle_auto_attack = false;
+        if let Some(battle) = game.battle_mut() {
+            battle.set_auto_attack_mode(false);
+        }
         return None;
     }
     if input.battle_status {
@@ -127,6 +133,9 @@ pub(super) fn update_battle(
     }
     if input.battle_repeat {
         services.battle_repeat_all = true;
+        services.battle_auto_attack = game
+            .battle()
+            .is_some_and(|battle| battle.previous_round_used_auto_attack());
     }
     if services.battle_repeat_all {
         let committed = game.repeat_battle_action();
@@ -146,7 +155,7 @@ pub(super) fn update_battle(
         return None;
     }
     if services.battle_auto_attack {
-        commit_normal_attack(game, services);
+        commit_automatic_attack(game, services);
         return None;
     }
 
@@ -253,6 +262,16 @@ fn commit_normal_attack(game: &mut GameState, services: &mut SessionState) {
         return;
     };
     let committed = game.battle_mut().and_then(|battle| battle.attack(target));
+    commit_battle_action(game, services, committed);
+}
+
+fn commit_automatic_attack(game: &mut GameState, services: &mut SessionState) {
+    let Some(target) = game.battle().and_then(|battle| battle.first_living_enemy()) else {
+        return;
+    };
+    let committed = game
+        .battle_mut()
+        .and_then(|battle| battle.attack_automatically(target));
     commit_battle_action(game, services, committed);
 }
 

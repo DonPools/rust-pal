@@ -1574,12 +1574,7 @@ impl<M: CollisionMap> GameState<M> {
             };
             if !available {
                 let battle = self.active_battle.as_mut()?;
-                return if thrown {
-                    let target = battle.first_living_enemy()?;
-                    battle.attack(target)
-                } else {
-                    battle.defend()
-                };
+                return battle.repeat_unavailable_item(thrown);
             }
         }
         self.active_battle.as_mut()?.repeat_last_action()
