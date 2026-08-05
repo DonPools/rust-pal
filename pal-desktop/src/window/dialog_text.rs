@@ -9,7 +9,6 @@ pub(super) struct DialogLayout {
     pub(super) title_y: i32,
     pub(super) text_x: i32,
     pub(super) text_y: i32,
-    pub(super) max_width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,28 +36,24 @@ pub(super) fn dialog_layout(dialog: &ActiveDialog) -> DialogLayout {
             title_y: 8,
             text_x: if has_face { 96 } else { 44 },
             text_y: 26,
-            max_width: if has_face { 216 } else { 268 },
         },
         DialogPosition::Lower => DialogLayout {
             title_x: if has_face { 4 } else { 12 },
             title_y: 108,
             text_x: if has_face { 20 } else { 44 },
             text_y: 126,
-            max_width: if has_face { 220 } else { 268 },
         },
         DialogPosition::Center => DialogLayout {
             title_x: 12,
             title_y: 8,
             text_x: 80,
             text_y: 40,
-            max_width: 232,
         },
         DialogPosition::CenterWindow => DialogLayout {
             title_x: 12,
             title_y: 8,
             text_x: 160,
             text_y: 40,
-            max_width: 280,
         },
     }
 }
@@ -76,7 +71,6 @@ pub(super) fn dialog_title<'a>(text: &'a TextLibrary, dialog: &ActiveDialog) -> 
 }
 
 pub(super) fn dialog_body_lines<'a>(text: &'a TextLibrary, dialog: &ActiveDialog) -> Vec<&'a [u8]> {
-    let layout = dialog_layout(dialog);
     dialog
         .message_ids
         .iter()
@@ -86,7 +80,6 @@ pub(super) fn dialog_body_lines<'a>(text: &'a TextLibrary, dialog: &ActiveDialog
                 index != 0 || dialog.position == DialogPosition::Center || !is_dialog_title(message)
             })
         })
-        .flat_map(|message| wrap_big5_lines(message, layout.max_width))
         .collect()
 }
 
@@ -94,6 +87,7 @@ fn is_dialog_title(text: &[u8]) -> bool {
     text.ends_with(b":") || text.ends_with(&[0xa1, 0x47])
 }
 
+#[cfg(test)]
 pub(super) fn dialog_text_width(text: &[u8]) -> usize {
     let mut width = 0;
     let mut index = 0;
@@ -111,37 +105,21 @@ pub(super) fn dialog_text_width(text: &[u8]) -> usize {
     width
 }
 
-pub(super) fn wrap_big5_lines(text: &[u8], max_width: usize) -> Vec<&[u8]> {
-    let mut lines = Vec::new();
-    let mut start = 0;
+/// Return the original center-window width in eight-pixel units. Unlike
+/// normal drawing, PAL measures control characters when sizing this box.
+pub(super) fn center_window_width_units(text: &[u8]) -> usize {
+    let mut units = 0;
     let mut index = 0;
-    let mut width = 0;
     while index < text.len() {
-        let token = dialog_token(text, index);
-        if token.kind == DialogTokenKind::LineBreak {
-            lines.push(&text[start..index]);
-            index += token.bytes;
-            start = index;
-            width = 0;
-            continue;
+        if text[index] >= 0x80 && index + 1 < text.len() {
+            units += 2;
+            index += 2;
+        } else {
+            units += 1;
+            index += 1;
         }
-        if matches!(token.kind, DialogTokenKind::Terminate(_)) {
-            index += token.bytes;
-            lines.push(&text[start..index]);
-            return lines;
-        }
-        if width + token.width > max_width && index > start {
-            lines.push(&text[start..index]);
-            start = index;
-            width = 0;
-        }
-        index += token.bytes;
-        width += token.width;
     }
-    if start < text.len() {
-        lines.push(&text[start..]);
-    }
-    lines
+    units
 }
 
 pub(super) fn dialog_glyph_count(text: &[u8]) -> usize {

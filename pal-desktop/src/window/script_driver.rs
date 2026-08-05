@@ -21,6 +21,14 @@ pub(super) struct ScriptRenderResources<'a> {
     pub(super) role_sprites: &'a RoleSprites,
 }
 
+fn script_event_needs_dialog_confirmation(
+    text: &TextLibrary,
+    dialog: &ActiveDialog,
+    event: ScriptEvent,
+) -> bool {
+    !matches!(event, ScriptEvent::Message { .. }) && !dialog_body_lines(text, dialog).is_empty()
+}
+
 pub(super) fn advance_script<L>(
     scripts: &mut ScriptRuntime,
     game: &mut GameState,
@@ -60,29 +68,52 @@ fn advance_script_with_budget<L>(
 ) where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
-    match scripts.advance() {
+    let event = services
+        .pending_script_event
+        .take()
+        .or_else(|| scripts.advance());
+    if let (Some(active), Some(event_value)) = (dialog.as_ref(), event) {
+        if script_event_needs_dialog_confirmation(resources.text, active, event_value) {
+            let active = dialog.as_mut().expect("dialog body was checked above");
+            active.wait_after_reveal = true;
+            active.awaiting_input = true;
+            active.auto_wait_ticks = None;
+            services.pending_script_event = event;
+            return;
+        }
+        if !matches!(event_value, ScriptEvent::Message { .. }) {
+            *dialog = None;
+        }
+    }
+
+    match event {
         Some(ScriptEvent::Message {
             message_id,
             position,
             font_color,
             face_index,
+            playing_rng,
         }) => {
             let mut next = ActiveDialog::new(
                 message_id,
                 position,
                 font_color,
                 face_index,
+                playing_rng,
                 services.dialog_delay_ms,
             );
             if let Some(active) = dialog.as_mut() {
                 if active.position == position
                     && active.font_color == font_color
                     && active.face_index == face_index
+                    && active.playing_rng == playing_rng
                     && !active.awaiting_input
                 {
                     active.message_ids.push(message_id);
                     active.wait_after_reveal =
                         dialog_body_lines(resources.text, active).len() >= (active.page + 1) * 4;
+                } else if dialog_body_lines(resources.text, active).is_empty() {
+                    *dialog = Some(next);
                 } else {
                     active.awaiting_input = true;
                     next.wait_after_reveal |= dialog_body_lines(resources.text, &next).len() >= 4;
@@ -783,5 +814,53 @@ pub(super) fn update_trigger_world(
         if !services.sound_effects.play(sound_id) {
             set_title(&format!("Rust-PAL [invalid auto sound {sound_id}]"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_library(messages: &[&[u8]]) -> TextLibrary {
+        let word_data = [b' '; 10];
+        let mut message_data = Vec::new();
+        let mut message_index = 0u32.to_le_bytes().to_vec();
+        for message in messages {
+            message_data.extend_from_slice(message);
+            message_index.extend_from_slice(&(message_data.len() as u32).to_le_bytes());
+        }
+        TextLibrary::parse(&word_data, &message_data, &message_index).unwrap()
+    }
+
+    #[test]
+    fn non_message_events_wait_for_body_confirmation_but_not_title_only_dialogs() {
+        let text = text_library(&[b"Name:", b"body"]);
+        let title = ActiveDialog::new(
+            0,
+            pal_core::script::DialogPosition::Upper,
+            0x4f,
+            None,
+            false,
+            24,
+        );
+        let mut body = title.clone();
+        body.message_ids.push(1);
+        let delay = ScriptEvent::Delay;
+
+        assert!(!script_event_needs_dialog_confirmation(
+            &text, &title, delay
+        ));
+        assert!(script_event_needs_dialog_confirmation(&text, &body, delay));
+        assert!(!script_event_needs_dialog_confirmation(
+            &text,
+            &body,
+            ScriptEvent::Message {
+                message_id: 1,
+                position: pal_core::script::DialogPosition::Upper,
+                font_color: 0x4f,
+                face_index: None,
+                playing_rng: false,
+            }
+        ));
     }
 }

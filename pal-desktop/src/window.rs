@@ -57,8 +57,6 @@ use dialog::{advance_dialog_playback, DialogPlayback};
 #[cfg(test)]
 use dialog_text::dialog_body_lines;
 use dialog_text::dialog_page_count;
-#[cfg(test)]
-use dialog_text::wrap_big5_lines;
 use input::HeldInput;
 #[cfg(test)]
 use menu_state::{update_wrapping_selection, InventoryMenu, ShopMenu, ShopMode};
@@ -280,6 +278,8 @@ pub fn run_game_window<L>(
                                             script_services.shop_menu = None;
                                             script_services.confirmation_menu = None;
                                             script_services.pending_scene_change = None;
+                                            script_services.pending_dialog = None;
+                                            script_services.pending_script_event = None;
                                             input = HeldInput::default();
                                             window.set_title("Rust-PAL [Snapshot restored]");
                                         }
@@ -413,7 +413,7 @@ pub fn run_game_window<L>(
                     tick
                 };
                 while accumulator >= update_tick {
-                    let sampled = input.sample();
+                    let (sampled, any_pressed) = input.sample();
                     if opening_intro.is_some() {
                         let (intro_changed, action) = opening_intro
                             .as_mut()
@@ -511,6 +511,8 @@ pub fn run_game_window<L>(
                                 );
                                 dialog = None;
                                 script_services.pending_dialog = None;
+                                script_services.pending_script_event = None;
+                                script_services.pending_scene_change = None;
                                 script_services.field_menu = None;
                                 script_services.inventory_menu = None;
                                 script_services.shop_menu = None;
@@ -556,6 +558,9 @@ pub fn run_game_window<L>(
                             match action {
                                 OpeningMenuAction::StartNewGame => {
                                     opening_menu = None;
+                                    script_services.pending_dialog = None;
+                                    script_services.pending_script_event = None;
+                                    script_services.pending_scene_change = None;
                                     script_services.music.stop();
                                     script_services.visual.prepare_scene_fade_in();
                                     let enter_script =
@@ -587,6 +592,8 @@ pub fn run_game_window<L>(
                                             script_services.visual.prepare_scene_fade_in();
                                             dialog = None;
                                             script_services.pending_dialog = None;
+                                            script_services.pending_script_event = None;
+                                            script_services.pending_scene_change = None;
                                             script_services.field_menu = None;
                                             script_services.inventory_menu = None;
                                             script_services.shop_menu = None;
@@ -642,8 +649,7 @@ pub fn run_game_window<L>(
                             }
                         }
                     } else if script_services.waiting_for_key {
-                        if sampled.confirm || sampled.cancel || sampled.direction_pressed.is_some()
-                        {
+                        if any_pressed {
                             script_services.waiting_for_key = false;
                             let active_scripts = if battle_scripts.is_active() {
                                 &mut battle_scripts
@@ -685,7 +691,7 @@ pub fn run_game_window<L>(
                         } else {
                             false
                         };
-                        if awaiting_input && (sampled.confirm || sampled.cancel || timed_out) {
+                        if awaiting_input && (any_pressed || timed_out) {
                             changed = true;
                             let active_dialog = dialog.as_mut().expect("dialog was checked above");
                             let page_count = dialog_page_count(&text, active_dialog);
@@ -987,9 +993,9 @@ fn update_debug_title(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::window::dialog_text::{dialog_text_width, dialog_title};
+    use crate::window::dialog_text::{center_window_width_units, dialog_text_width, dialog_title};
     use crate::window::presentation::cycle_dialog_icon_palette;
-    use crate::window::text_render::dialog_color_after;
+    use crate::window::text_render::{dialog_color_after, DialogTextMode};
 
     fn text_library(messages: &[&[u8]]) -> TextLibrary {
         let word_data = [b' '; 10];
@@ -1056,25 +1062,21 @@ mod tests {
     }
 
     #[test]
-    fn wraps_big5_without_splitting_double_byte_characters() {
-        let text = [0xb8, 0x67, 0xc5, 0xe7, b'A'];
-        let lines = wrap_big5_lines(&text, 24);
-        assert_eq!(lines, [&text[..2], &text[2..]]);
-    }
+    fn each_original_message_remains_exactly_one_dialog_line() {
+        let full_width_line = [0xa4, 0x40].repeat(14);
+        let text = text_library(&[b"Name:", &full_width_line, b"last"]);
+        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, false, 24);
+        dialog.message_ids = vec![0, 1, 2];
 
-    #[test]
-    fn long_dialog_text_wraps_without_losing_bytes() {
-        let text = [b'A'; 109];
-        let lines = wrap_big5_lines(&text, 272);
-        assert_eq!(lines.len(), 4);
-        assert_eq!(lines[..3].iter().map(|line| line.len()).sum::<usize>(), 102);
-        assert_eq!(lines[3].len(), 7);
+        let lines = dialog_body_lines(&text, &dialog);
+        assert_eq!(lines, [&full_width_line, b"last".as_slice()]);
+        assert_eq!(center_window_width_units(&full_width_line), 28);
     }
 
     #[test]
     fn dialog_title_does_not_consume_one_of_four_body_lines() {
         let text = text_library(&[b"Name:", b"one", b"two", b"three", b"four"]);
-        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, 24);
+        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, false, 24);
         dialog.message_ids = vec![0, 1, 2, 3, 4];
         dialog.awaiting_input = true;
         assert_eq!(dialog_title(&text, &dialog), Some(b"Name:".as_slice()));
@@ -1085,20 +1087,30 @@ mod tests {
     #[test]
     fn dialog_controls_do_not_consume_layout_width() {
         assert_eq!(dialog_text_width(b"A-$03B"), 16);
-        let lines = wrap_big5_lines(b"A-$03B", 8);
-        assert_eq!(lines, [b"A-$03".as_slice(), b"B".as_slice()]);
         assert_eq!(dialog_text_width(br"A\$B"), 24);
-        assert_eq!(wrap_big5_lines(b"A~70ignored", 80), [b"A~70".as_slice()]);
-        assert_eq!(dialog_color_after(b"-cyan", 0x4f), 0x8d);
-        assert_eq!(dialog_color_after(b"still cyan-", 0x8d), 0x4f);
-        assert_eq!(dialog_color_after(br#"\"literal"#, 0x4f), 0x4f);
+        assert_eq!(
+            dialog_color_after(b"-cyan", 0x4f, DialogTextMode::Normal),
+            0x8d
+        );
+        assert_eq!(
+            dialog_color_after(b"still cyan-", 0x8d, DialogTextMode::Normal),
+            0x4f
+        );
+        assert_eq!(
+            dialog_color_after(br#"\"literal"#, 0x4f, DialogTextMode::Normal),
+            0x4f
+        );
+        assert_eq!(
+            dialog_color_after(b"\"quoted\"", 0x4f, DialogTextMode::CenterWindow),
+            0x4f
+        );
     }
 
     #[test]
     fn dialog_playback_applies_speed_terminal_delay_and_icon_controls() {
-        let text = text_library(&[b"A$07BC", b"A~70ignored", b"A)"]);
+        let text = text_library(&[b"A$07BC", b"A~70ignored", b"A)", b"B"]);
         let mut persistent_delay = 24;
-        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, 24);
+        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, false, 24);
         assert_eq!(
             advance_dialog_playback(&text, &mut dialog, &mut persistent_delay, 24, false),
             DialogPlayback::Revealing
@@ -1116,7 +1128,7 @@ mod tests {
         );
         assert_eq!(dialog.revealed_glyphs, 2);
 
-        let mut terminal = ActiveDialog::new(1, DialogPosition::Upper, 0x4f, None, 24);
+        let mut terminal = ActiveDialog::new(1, DialogPosition::Upper, 0x4f, None, false, 24);
         assert_eq!(
             advance_dialog_playback(&text, &mut terminal, &mut persistent_delay, 0, true),
             DialogPlayback::Revealing
@@ -1131,13 +1143,22 @@ mod tests {
             DialogPlayback::AutoClose
         );
 
-        let mut icon = ActiveDialog::new(2, DialogPosition::Upper, 0x4f, None, 24);
+        let mut icon = ActiveDialog::new(2, DialogPosition::Upper, 0x4f, None, false, 24);
         icon.wait_after_reveal = true;
         assert_eq!(
             advance_dialog_playback(&text, &mut icon, &mut persistent_delay, 0, true),
             DialogPlayback::AwaitingInput
         );
         assert_eq!(icon.wait_icon, 1);
+
+        let mut reset_icon = ActiveDialog::new(2, DialogPosition::Upper, 0x4f, None, false, 24);
+        reset_icon.message_ids.push(3);
+        reset_icon.wait_after_reveal = true;
+        assert_eq!(
+            advance_dialog_playback(&text, &mut reset_icon, &mut persistent_delay, 0, true),
+            DialogPlayback::AwaitingInput
+        );
+        assert_eq!(reset_icon.wait_icon, 0);
     }
 
     #[test]

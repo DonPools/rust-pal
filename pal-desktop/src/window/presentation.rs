@@ -156,6 +156,7 @@ pub(super) fn render_game(
             ui.font,
             ui.dialog_faces,
             ui.dialog_icons,
+            ui.ui_sprites,
             dialog,
         );
     } else if let Some(menu) = ui.confirmation_menu {

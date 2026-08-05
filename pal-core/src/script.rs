@@ -288,6 +288,7 @@ pub enum ScriptEvent {
         position: DialogPosition,
         font_color: u8,
         face_index: Option<u16>,
+        playing_rng: bool,
     },
     Waiting,
     Delay,
@@ -829,6 +830,7 @@ struct Execution {
     dialog_position: DialogPosition,
     dialog_color: u8,
     dialog_face: Option<u16>,
+    dialog_playing_rng: bool,
     wait_frames: u16,
     wait_updates_auto_scripts: bool,
     viewport_frames_remaining: u16,
@@ -903,9 +905,10 @@ impl ScriptRuntime {
             object_id: trigger.object_id,
             entry: trigger.script_entry,
             next_entry: trigger.script_entry,
-            dialog_position: DialogPosition::Lower,
+            dialog_position: DialogPosition::Upper,
             dialog_color: 0x4f,
             dialog_face: None,
+            dialog_playing_rng: false,
             wait_frames: 0,
             wait_updates_auto_scripts: false,
             viewport_frames_remaining: 0,
@@ -2305,6 +2308,8 @@ impl ScriptRuntime {
                         execution.dialog_color = entry.operands[1] as u8;
                     }
                     execution.dialog_face = (entry.operands[0] != 0).then_some(entry.operands[0]);
+                    execution.dialog_playing_rng |=
+                        entry.operands[2] != 0 && execution.dialog_face.is_some();
                     execution.entry = execution.entry.wrapping_add(1);
                 }
                 DialogLower => {
@@ -2313,6 +2318,8 @@ impl ScriptRuntime {
                         execution.dialog_color = entry.operands[1] as u8;
                     }
                     execution.dialog_face = (entry.operands[0] != 0).then_some(entry.operands[0]);
+                    execution.dialog_playing_rng |=
+                        entry.operands[2] != 0 && execution.dialog_face.is_some();
                     execution.entry = execution.entry.wrapping_add(1);
                 }
                 DialogCenterWindow => {
@@ -2357,13 +2364,26 @@ impl ScriptRuntime {
                     return Some(ScriptEvent::Delay);
                 }
                 PrintMessage => {
+                    let position = execution.dialog_position;
+                    let font_color = execution.dialog_color;
+                    let face_index = execution.dialog_face;
+                    let playing_rng = execution.dialog_playing_rng;
                     execution.entry = execution.entry.wrapping_add(1);
+                    // A center-window message calls PAL_EndDialog immediately,
+                    // which restores the original upper/default dialog state.
+                    if position == DialogPosition::CenterWindow {
+                        execution.dialog_position = DialogPosition::Upper;
+                        execution.dialog_color = 0x4f;
+                        execution.dialog_face = None;
+                        execution.dialog_playing_rng = false;
+                    }
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Message {
                         message_id: entry.operands[0],
-                        position: execution.dialog_position,
-                        font_color: execution.dialog_color,
-                        face_index: execution.dialog_face,
+                        position,
+                        font_color,
+                        face_index,
+                        playing_rng,
                     });
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
@@ -2918,6 +2938,7 @@ mod tests {
                 position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
         assert_eq!(
@@ -2927,6 +2948,7 @@ mod tests {
                 position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
         assert_eq!(
@@ -3332,7 +3354,7 @@ mod tests {
     fn dialog_opcodes_preserve_face_and_font_color() {
         let mut runtime = ScriptRuntime::new(table(&[
             [0, 0, 0, 0],
-            [0x003c, 5, 0x2d, 0],
+            [0x003c, 5, 0x2d, 0xffff],
             [0xffff, 42, 0, 0],
             [0x003d, 6, 0x1a, 0],
             [0xffff, 43, 0, 0],
@@ -3345,6 +3367,7 @@ mod tests {
                 position: DialogPosition::Upper,
                 font_color: 0x2d,
                 face_index: Some(5),
+                playing_rng: true,
             })
         );
         assert_eq!(
@@ -3354,6 +3377,39 @@ mod tests {
                 position: DialogPosition::Lower,
                 font_color: 0x1a,
                 face_index: Some(6),
+                playing_rng: true,
+            })
+        );
+    }
+
+    #[test]
+    fn center_window_is_single_message_and_restores_default_upper_dialog() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [0x003e, 0, 0, 0],
+            [0xffff, 42, 0, 0],
+            [0xffff, 43, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Message {
+                message_id: 42,
+                position: DialogPosition::CenterWindow,
+                font_color: 0x4f,
+                face_index: None,
+                playing_rng: false,
+            })
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Message {
+                message_id: 43,
+                position: DialogPosition::Upper,
+                font_color: 0x4f,
+                face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -3403,9 +3459,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 9,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
 
@@ -3420,9 +3477,10 @@ mod tests {
             jump.advance(),
             Some(ScriptEvent::Message {
                 message_id: 20,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -3450,9 +3508,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 42,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
         assert!(matches!(
@@ -3476,9 +3535,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 42,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -3497,9 +3557,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 20,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
 
@@ -3514,9 +3575,10 @@ mod tests {
             impossible.advance(),
             Some(ScriptEvent::Message {
                 message_id: 30,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -3535,9 +3597,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 12,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -3705,9 +3768,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 11,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -4114,9 +4178,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 42,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }
@@ -4257,9 +4322,10 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Message {
                 message_id: 20,
-                position: DialogPosition::Lower,
+                position: DialogPosition::Upper,
                 font_color: 0x4f,
                 face_index: None,
+                playing_rng: false,
             })
         );
     }

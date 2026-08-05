@@ -106,7 +106,7 @@ fn draw_single_line_box(
     draw_single_line_box_with_shadow(renderer, sprites, x, y, length, 6);
 }
 
-fn draw_single_line_box_with_shadow(
+pub(super) fn draw_single_line_box_with_shadow(
     renderer: &mut Renderer,
     sprites: &[RleBitmap],
     x: i32,

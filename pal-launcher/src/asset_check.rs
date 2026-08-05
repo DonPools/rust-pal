@@ -536,6 +536,19 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         speed_controls > 0 && terminal_controls > 0 && icon_controls > 0,
         "M.MSG does not exercise all supported dialog timing and icon controls"
     );
+    let opening_inn_dialog = [1903usize, 1904, 1905, 1906].map(|message_id| {
+        text.message(message_id)
+            .unwrap_or_else(|| panic!("M.MSG is missing message {message_id}"))
+    });
+    assert!(
+        opening_inn_dialog[0].ends_with(&[0xa1, 0x47]),
+        "message 1903 is no longer the expected speaker title"
+    );
+    assert_eq!(
+        opening_inn_dialog[2].len(),
+        28,
+        "message 1905 must remain one 14-glyph, 224-pixel source line"
+    );
     render_tile_map(
         &mut renderer,
         &game.map,

@@ -3,11 +3,13 @@ use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::script::DialogPosition;
 
 use super::dialog_text::{
-    dialog_body_lines, dialog_glyph_count, dialog_layout, dialog_page_glyph_target,
-    dialog_text_width, dialog_title, dialog_token, DialogTokenKind,
+    center_window_width_units, dialog_body_lines, dialog_glyph_count, dialog_layout,
+    dialog_page_glyph_target, dialog_title, dialog_token, DialogTokenKind,
 };
-use super::draw::{fill_rect, stroke_rect};
-use super::text_render::{dialog_color_after, draw_dialog_text, draw_dialog_wait_icon};
+use super::menu_render::draw_single_line_box_with_shadow;
+use super::text_render::{
+    dialog_color_after, draw_dialog_text, draw_dialog_wait_icon, DialogTextMode, DialogTextStyle,
+};
 use crate::renderer::Renderer;
 
 #[derive(Debug, Clone)]
@@ -16,6 +18,7 @@ pub(super) struct ActiveDialog {
     pub(super) position: DialogPosition,
     pub(super) font_color: u8,
     pub(super) face_index: Option<u16>,
+    pub(super) playing_rng: bool,
     pub(super) page: usize,
     pub(super) awaiting_input: bool,
     pub(super) wait_after_reveal: bool,
@@ -42,6 +45,7 @@ impl ActiveDialog {
         position: DialogPosition,
         font_color: u8,
         face_index: Option<u16>,
+        playing_rng: bool,
         initial_delay_ms: u16,
     ) -> Self {
         let center_window = position == DialogPosition::CenterWindow;
@@ -50,6 +54,7 @@ impl ActiveDialog {
             position,
             font_color,
             face_index,
+            playing_rng,
             page: 0,
             awaiting_input: false,
             wait_after_reveal: center_window,
@@ -95,6 +100,8 @@ pub(super) fn advance_dialog_playback(
         .into_iter()
         .take((dialog.page + 1) * 4)
     {
+        // PAL resets the waiting icon at the beginning of every MESSAGE.
+        icon = 0;
         let mut index = 0;
         while index < line.len() {
             let token = dialog_token(line, index);
@@ -166,6 +173,7 @@ pub(super) fn render_dialog(
     font: &BitmapFont,
     faces: &[Option<RleBitmap>],
     icons: &[RleBitmap],
+    ui_sprites: &[RleBitmap],
     dialog: &ActiveDialog,
 ) {
     let layout = dialog_layout(dialog);
@@ -177,11 +185,13 @@ pub(super) fn render_dialog(
                 _ => (0, 0),
             };
             if center_x != 0 {
-                renderer.blit_rle(
-                    face,
-                    center_x - i32::from(face.width) / 2,
-                    center_y - i32::from(face.height) / 2,
-                );
+                let mut left = center_x - i32::from(face.width) / 2;
+                let mut top = center_y - i32::from(face.height) / 2;
+                if dialog.position == DialogPosition::Upper {
+                    left = left.max(0);
+                    top = top.max(0);
+                }
+                renderer.blit_rle(face, left, top);
             }
         }
     }
@@ -190,11 +200,15 @@ pub(super) fn render_dialog(
         let _ = draw_dialog_text(
             renderer,
             font,
+            ui_sprites,
             title,
             layout.title_x,
             layout.title_y,
-            0x8c,
-            usize::MAX,
+            DialogTextStyle {
+                color: 0x8c,
+                glyph_limit: usize::MAX,
+                mode: DialogTextMode::Normal,
+            },
         );
     }
 
@@ -206,7 +220,7 @@ pub(super) fn render_dialog(
         .copied()
         .collect::<Vec<_>>();
     if dialog.position == DialogPosition::CenterWindow {
-        render_center_dialog_window(renderer, font, dialog, &lines, &visible);
+        render_center_dialog_window(renderer, font, ui_sprites, dialog, &visible);
         return;
     }
 
@@ -221,7 +235,7 @@ pub(super) fn render_dialog(
         .iter()
         .take(dialog.page * 4)
         .fold(dialog.font_color, |color, line| {
-            dialog_color_after(line, color)
+            dialog_color_after(line, color, DialogTextMode::Normal)
         });
     let mut last_end = None;
     for (line, bytes) in visible.iter().enumerate() {
@@ -229,11 +243,15 @@ pub(super) fn render_dialog(
         let (end, drawn, next_color) = draw_dialog_text(
             renderer,
             font,
+            ui_sprites,
             bytes,
             layout.text_x,
             y,
-            color,
-            remaining_glyphs,
+            DialogTextStyle {
+                color,
+                glyph_limit: remaining_glyphs,
+                mode: DialogTextMode::Normal,
+            },
         );
         color = next_color;
         remaining_glyphs = remaining_glyphs.saturating_sub(drawn);
@@ -249,57 +267,29 @@ pub(super) fn render_dialog(
 fn render_center_dialog_window(
     renderer: &mut Renderer,
     font: &BitmapFont,
+    ui_sprites: &[RleBitmap],
     dialog: &ActiveDialog,
-    all_lines: &[&[u8]],
     lines: &[&[u8]],
 ) {
-    let content_width = lines
-        .iter()
-        .map(|line| dialog_text_width(line))
-        .max()
-        .unwrap_or(0)
-        .clamp(16, 280) as i32;
-    let width = content_width + 24;
-    let height = lines.len().max(1) as i32 * 18 + 18;
-    let x = (320 - width) / 2;
+    let Some(&line) = lines.first() else {
+        return;
+    };
+    let units = center_window_width_units(line);
+    let x = 160 - i32::try_from(units).unwrap_or(0) * 4;
     let y = 40;
-    fill_rect(renderer, x + 6, y + 6, width, height, [0, 0, 0, 160]);
-    fill_rect(renderer, x, y, width, height, [16, 20, 24, 255]);
-    stroke_rect(renderer, x, y, width, height, [232, 224, 192, 255]);
-    stroke_rect(
+    draw_single_line_box_with_shadow(renderer, ui_sprites, x, y, units.div_ceil(2), 0);
+    let text_x = x + 8 + i32::try_from(units % 2).unwrap_or(0) * 4;
+    let _ = draw_dialog_text(
         renderer,
-        x + 2,
-        y + 2,
-        width - 4,
-        height - 4,
-        [72, 88, 96, 255],
+        font,
+        ui_sprites,
+        line,
+        text_x,
+        y + 10,
+        DialogTextStyle {
+            color: dialog.font_color,
+            glyph_limit: dialog.revealed_glyphs,
+            mode: DialogTextMode::CenterWindow,
+        },
     );
-    let mut remaining_glyphs = dialog.revealed_glyphs.saturating_sub(
-        all_lines
-            .iter()
-            .take(dialog.page * 4)
-            .map(|line| dialog_glyph_count(line))
-            .sum::<usize>(),
-    );
-    let mut color = all_lines
-        .iter()
-        .take(dialog.page * 4)
-        .fold(dialog.font_color, |color, line| {
-            dialog_color_after(line, color)
-        });
-    for (line, bytes) in lines.iter().enumerate() {
-        let text_x = x + (width - dialog_text_width(bytes) as i32) / 2;
-        let text_y = y + 10 + line as i32 * 18;
-        let (_, drawn, next_color) = draw_dialog_text(
-            renderer,
-            font,
-            bytes,
-            text_x,
-            text_y,
-            color,
-            remaining_glyphs,
-        );
-        color = next_color;
-        remaining_glyphs = remaining_glyphs.saturating_sub(drawn);
-    }
 }

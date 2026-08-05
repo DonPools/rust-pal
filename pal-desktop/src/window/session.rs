@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use pal_assets::script::ScriptTable;
 use pal_core::battle::BattleEvent;
+use pal_core::script::ScriptEvent;
 
 use crate::audio::{BackgroundMusic, SoundEffects};
 
@@ -50,6 +51,7 @@ impl PendingSceneChange {
 pub(super) struct SessionState {
     pub(super) pending_scene_change: Option<PendingSceneChange>,
     pub(super) pending_dialog: Option<ActiveDialog>,
+    pub(super) pending_script_event: Option<ScriptEvent>,
     pub(super) field_menu: Option<FieldMenu>,
     pub(super) main_menu_selected: usize,
     pub(super) inventory_action_selected: usize,
@@ -92,6 +94,7 @@ impl SessionState {
         Self {
             pending_scene_change: None,
             pending_dialog: None,
+            pending_script_event: None,
             field_menu: None,
             main_menu_selected: 0,
             inventory_action_selected: 0,

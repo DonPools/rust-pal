@@ -80,6 +80,10 @@ where
                     environment.night_palette,
                     environment.screen_wave,
                 );
+                *self.dialog = None;
+                self.services.pending_dialog = None;
+                self.services.pending_script_event = None;
+                self.services.pending_scene_change = None;
                 self.sync_music();
             }),
         )
@@ -385,6 +389,10 @@ where
                             context.load_scene,
                         ) {
                             Ok(()) => {
+                                *context.dialog = None;
+                                context.services.pending_dialog = None;
+                                context.services.pending_script_event = None;
+                                context.services.pending_scene_change = None;
                                 context.sync_music();
                                 (context.set_title)("Rust-PAL [Loaded]");
                                 keep_menu = false;

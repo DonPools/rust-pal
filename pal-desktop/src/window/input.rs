@@ -12,10 +12,14 @@ pub(super) struct HeldInput {
     direction_pressed: Option<Direction>,
     confirm: bool,
     cancel: bool,
+    any_pressed: bool,
 }
 
 impl HeldInput {
     pub(super) fn set_key(&mut self, key: KeyCode, pressed: bool, repeat: bool) {
+        if pressed && !repeat {
+            self.any_pressed = true;
+        }
         let direction = match key {
             KeyCode::ArrowDown | KeyCode::KeyS => Some(Direction::South),
             KeyCode::ArrowLeft | KeyCode::KeyA => Some(Direction::West),
@@ -42,7 +46,7 @@ impl HeldInput {
         }
     }
 
-    pub(super) fn sample(&mut self) -> GameInput {
+    pub(super) fn sample(&mut self) -> (GameInput, bool) {
         let input = GameInput {
             direction: self.active_direction,
             direction_pressed: self.direction_pressed,
@@ -52,7 +56,8 @@ impl HeldInput {
         self.direction_pressed = None;
         self.confirm = false;
         self.cancel = false;
-        input
+        let any_pressed = std::mem::take(&mut self.any_pressed);
+        (input, any_pressed)
     }
 
     fn direction_held_mut(&mut self, direction: Direction) -> &mut bool {
@@ -85,11 +90,11 @@ mod tests {
         let mut input = HeldInput::default();
         input.set_key(KeyCode::ArrowDown, true, false);
 
-        let first = input.sample();
+        let (first, _) = input.sample();
         assert_eq!(first.direction, Some(Direction::South));
         assert_eq!(first.direction_pressed, Some(Direction::South));
 
-        let second = input.sample();
+        let (second, _) = input.sample();
         assert_eq!(second.direction, Some(Direction::South));
         assert_eq!(second.direction_pressed, None);
     }
@@ -101,6 +106,14 @@ mod tests {
         input.sample();
         input.set_key(KeyCode::ArrowDown, true, true);
 
-        assert_eq!(input.sample().direction_pressed, None);
+        assert_eq!(input.sample().0.direction_pressed, None);
+    }
+
+    #[test]
+    fn any_non_repeated_key_is_reported_once() {
+        let mut input = HeldInput::default();
+        input.set_key(KeyCode::KeyQ, true, false);
+        assert!(input.sample().1);
+        assert!(!input.sample().1);
     }
 }
