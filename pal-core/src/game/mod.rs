@@ -10,7 +10,11 @@ use pal_assets::save::OriginalSave;
 use pal_assets::script::ScriptTable;
 use pal_assets::store::Stores;
 
-use crate::battle::{BattlePhase, BattleRequest, BattleResult, BattleRewards, BattleState};
+use crate::battle::{
+    add_poison, cure_poison, cure_poison_by_level, BattlePhase, BattlePoison, BattleRequest,
+    BattleResult, BattleRewards, BattleState, BattleStatus, BattleStatuses, BATTLE_STATUS_COUNT,
+    MAX_BATTLE_POISONS,
+};
 use crate::map::tile_to_world;
 use crate::map::Map;
 use crate::party::{Party, MAX_PARTY_MEMBERS};
@@ -60,6 +64,9 @@ pub struct GameState<M = Map> {
     magics: Option<Magics>,
     battle_data: Option<BattleData>,
     active_battle: Option<BattleState>,
+    player_statuses: [BattleStatuses; PLAYER_ROLE_COUNT],
+    player_poisons: [[BattlePoison; MAX_BATTLE_POISONS]; PLAYER_ROLE_COUNT],
+    collect_value: u16,
     inventory: Vec<(u16, u16)>,
     item_use_scripts: BTreeMap<u16, u16>,
     item_equip_scripts: BTreeMap<u16, u16>,
@@ -113,6 +120,13 @@ impl<M: CollisionMap> GameState<M> {
             magics: None,
             battle_data: None,
             active_battle: None,
+            player_statuses: [BattleStatuses::from_durations([0; BATTLE_STATUS_COUNT]);
+                PLAYER_ROLE_COUNT],
+            player_poisons: [[BattlePoison {
+                object_id: 0,
+                script_entry: 0,
+            }; MAX_BATTLE_POISONS]; PLAYER_ROLE_COUNT],
+            collect_value: 0,
             inventory: Vec::new(),
             item_use_scripts: BTreeMap::new(),
             item_equip_scripts: BTreeMap::new(),
@@ -205,6 +219,216 @@ impl<M: CollisionMap> GameState<M> {
         self.role_experience.get(usize::from(role_id)).copied()
     }
 
+    pub fn player_status_duration(&self, role_id: u16, status: BattleStatus) -> Option<u16> {
+        Some(
+            self.player_statuses
+                .get(usize::from(role_id))?
+                .duration(status),
+        )
+    }
+
+    pub fn player_poisons(&self, role_id: u16) -> Option<&[BattlePoison; MAX_BATTLE_POISONS]> {
+        self.player_poisons.get(usize::from(role_id))
+    }
+
+    pub fn player_has_poison(&self, role_id: u16, poison_id: u16) -> bool {
+        poison_id != 0
+            && self
+                .player_poisons(role_id)
+                .is_some_and(|poisons| poisons.iter().any(|poison| poison.object_id == poison_id))
+    }
+
+    pub fn enemy_has_poison(&self, enemy_index: u16, poison_id: u16) -> bool {
+        poison_id != 0
+            && self
+                .active_battle
+                .as_ref()
+                .and_then(|battle| battle.enemies.get(usize::from(enemy_index)))
+                .is_some_and(|enemy| {
+                    enemy
+                        .poisons
+                        .iter()
+                        .any(|poison| poison.object_id == poison_id)
+                })
+    }
+
+    pub fn enemy_hp_above(&self, enemy_index: u16, percentage: u16) -> bool {
+        self.active_battle
+            .as_ref()
+            .and_then(|battle| battle.enemy_hp_above(usize::from(enemy_index), percentage))
+            .unwrap_or(false)
+    }
+
+    pub fn collect_value(&self) -> u16 {
+        self.collect_value
+    }
+
+    fn set_player_status(&mut self, role_id: u16, status: u16, rounds: u16) -> bool {
+        let Some(status) = BattleStatus::from_raw(status) else {
+            return false;
+        };
+        let Some(alive) = self.player_role(role_id).map(|role| role.hp != 0) else {
+            return false;
+        };
+        let Some(statuses) = self.player_statuses.get_mut(usize::from(role_id)) else {
+            return false;
+        };
+        if !statuses.set_for_player(status, rounds, alive) {
+            return false;
+        }
+        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+            battle
+                .players
+                .iter_mut()
+                .find(|player| player.role_id == role_id)
+        }) {
+            player.statuses = *statuses;
+        }
+        true
+    }
+
+    fn remove_player_status(&mut self, role_id: u16, status: u16) -> bool {
+        let Some(status) = BattleStatus::from_raw(status) else {
+            return false;
+        };
+        let Some(statuses) = self.player_statuses.get_mut(usize::from(role_id)) else {
+            return false;
+        };
+        statuses.remove_from_player(status);
+        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+            battle
+                .players
+                .iter_mut()
+                .find(|player| player.role_id == role_id)
+        }) {
+            player.statuses = *statuses;
+        }
+        true
+    }
+
+    fn poison_player(&mut self, role_id: u16, poison_id: u16, apply_to_all: bool) -> bool {
+        let Some(poison_object) = self
+            .global_objects
+            .as_ref()
+            .and_then(|objects| objects.get(poison_id))
+            .copied()
+        else {
+            return false;
+        };
+        let targets = if apply_to_all {
+            self.party
+                .members()
+                .iter()
+                .map(|member| member.role_id)
+                .collect::<Vec<_>>()
+        } else if self
+            .party
+            .members()
+            .iter()
+            .any(|member| member.role_id == role_id)
+        {
+            vec![role_id]
+        } else {
+            return false;
+        };
+        for target in targets {
+            let Some(resistance) = self
+                .effective_player_role(target)
+                .map(|role| role.poison_resistance.min(100))
+            else {
+                return false;
+            };
+            if self.growth_random(100) < u32::from(resistance) {
+                continue;
+            }
+            let target_index = usize::from(target);
+            add_poison(
+                &mut self.player_poisons[target_index],
+                poison_id,
+                poison_object.poison_player_script(),
+            );
+            if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+                battle
+                    .players
+                    .iter_mut()
+                    .find(|player| player.role_id == target)
+            }) {
+                player.poisons = self.player_poisons[target_index];
+            }
+        }
+        true
+    }
+
+    fn cure_player_poison(&mut self, role_id: u16, poison_id: u16, apply_to_all: bool) -> bool {
+        if poison_id == 0 {
+            return false;
+        }
+        let Some(targets) = self.poison_targets(role_id, apply_to_all) else {
+            return false;
+        };
+        for target in targets {
+            let target_index = usize::from(target);
+            cure_poison(&mut self.player_poisons[target_index], poison_id);
+            if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+                battle
+                    .players
+                    .iter_mut()
+                    .find(|player| player.role_id == target)
+            }) {
+                player.poisons = self.player_poisons[target_index];
+            }
+        }
+        true
+    }
+
+    fn cure_player_poison_by_level(
+        &mut self,
+        role_id: u16,
+        maximum_level: u16,
+        apply_to_all: bool,
+    ) -> bool {
+        let Some(targets) = self.poison_targets(role_id, apply_to_all) else {
+            return false;
+        };
+        let Some(objects) = self.global_objects.as_ref() else {
+            return false;
+        };
+        for target in targets {
+            let target_index = usize::from(target);
+            cure_poison_by_level(
+                &mut self.player_poisons[target_index],
+                maximum_level,
+                objects,
+            );
+            if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+                battle
+                    .players
+                    .iter_mut()
+                    .find(|player| player.role_id == target)
+            }) {
+                player.poisons = self.player_poisons[target_index];
+            }
+        }
+        true
+    }
+
+    fn poison_targets(&self, role_id: u16, apply_to_all: bool) -> Option<Vec<u16>> {
+        if apply_to_all {
+            return Some(
+                self.party
+                    .members()
+                    .iter()
+                    .map(|member| member.role_id)
+                    .collect(),
+            );
+        }
+        self.party
+            .members()
+            .iter()
+            .any(|member| member.role_id == role_id)
+            .then_some(vec![role_id])
+    }
+
     /// Create a battle from the current party and script-selected battle configuration.
     pub fn start_battle(&mut self, request: BattleRequest, scripts: &ScriptTable) -> bool {
         if self.active_battle.is_some() {
@@ -235,7 +459,7 @@ impl<M: CollisionMap> GameState<M> {
         let Some(magics) = self.magics.as_ref() else {
             return false;
         };
-        let Some(battle) = BattleState::new(
+        let Some(mut battle) = BattleState::new(
             request,
             self.current_battlefield,
             self.current_battle_music,
@@ -246,6 +470,18 @@ impl<M: CollisionMap> GameState<M> {
         ) else {
             return false;
         };
+        for player in &mut battle.players {
+            let role_index = usize::from(player.role_id);
+            let (Some(statuses), Some(poisons)) = (
+                self.player_statuses.get(role_index),
+                self.player_poisons.get(role_index),
+            ) else {
+                return false;
+            };
+            player.statuses = *statuses;
+            player.poisons = *poisons;
+        }
+        battle.refresh_player_effects();
         self.active_battle = Some(battle);
         true
     }
@@ -257,6 +493,11 @@ impl<M: CollisionMap> GameState<M> {
             BattlePhase::AwaitingCommand => return None,
         };
         let battle = self.active_battle.take()?;
+        for player in &battle.players {
+            let role_index = usize::from(player.role_id);
+            *self.player_statuses.get_mut(role_index)? = player.statuses;
+            *self.player_poisons.get_mut(role_index)? = player.poisons;
+        }
         if let Some(roles) = self.player_roles.as_mut() {
             for player in &battle.players {
                 let role = roles.role_mut(usize::from(player.role_id))?;
@@ -359,6 +600,7 @@ impl<M: CollisionMap> GameState<M> {
         let saved_effects = self.equipment_effects.clone();
         let saved_equip_scripts = self.item_equip_scripts.clone();
         let saved_current_slot = self.current_equipment_slot;
+        let saved_statuses = self.player_statuses;
         self.equipment_effects.clear();
         self.current_equipment_slot = None;
         for (role_id, slot, item_id, script_entry) in equipped {
@@ -436,9 +678,11 @@ impl<M: CollisionMap> GameState<M> {
                             absolute: opcode == SetPlayerAttribute,
                         })
                     }
-                    // Some initial accessories grant a battle status. M5 does not model
-                    // statuses yet, but their remaining equipment attributes still apply.
-                    SetPlayerStatus => true,
+                    SetPlayerStatus => self.set_player_status(
+                        role_id,
+                        instruction.operands[0],
+                        instruction.operands[1],
+                    ),
                     _ => false,
                 };
                 if !applied {
@@ -456,6 +700,7 @@ impl<M: CollisionMap> GameState<M> {
                 self.equipment_effects = saved_effects;
                 self.item_equip_scripts = saved_equip_scripts;
                 self.current_equipment_slot = saved_current_slot;
+                self.player_statuses = saved_statuses;
                 if let Some(roles) = self.player_roles.as_ref() {
                     self.party.sync_from_roles(roles);
                 }
@@ -1244,6 +1489,9 @@ impl<M: CollisionMap> GameState<M> {
             current_battlefield: self.current_battlefield,
             role_experience: self.role_experience,
             growth_random_state: self.growth_random_state,
+            player_statuses: self.player_statuses,
+            player_poisons: self.player_poisons,
+            collect_value: self.collect_value,
             cash: self.cash,
             inventory: self.inventory.clone(),
             item_use_scripts: self.item_use_scripts.clone(),
@@ -1288,6 +1536,11 @@ impl<M: CollisionMap> GameState<M> {
             current_battlefield: snapshot.current_battlefield,
             role_experience: snapshot.role_experience,
             growth_random_state: snapshot.growth_random_state,
+            player_statuses: snapshot.player_statuses.map(BattleStatuses::durations),
+            player_poisons: snapshot
+                .player_poisons
+                .map(|poisons| poisons.map(|poison| (poison.object_id, poison.script_entry))),
+            collect_value: snapshot.collect_value,
             cash: snapshot.cash,
             inventory: snapshot.inventory,
             item_use_scripts: snapshot.item_use_scripts.into_iter().collect(),
@@ -1371,6 +1624,27 @@ impl<M: CollisionMap> GameState<M> {
             .try_into()
             .ok()?;
         let player_roles = PlayerRoles::from_roles(saved_roles);
+        if data.player_poisons.iter().any(|poisons| {
+            poisons
+                .iter()
+                .enumerate()
+                .any(|(index, &(object_id, script_entry))| {
+                    (object_id == 0 && script_entry != 0)
+                        || (object_id != 0
+                            && poisons[..index]
+                                .iter()
+                                .any(|&(other_id, _)| other_id == object_id))
+                })
+        }) {
+            return None;
+        }
+        let player_statuses = data.player_statuses.map(BattleStatuses::from_durations);
+        let player_poisons = data.player_poisons.map(|poisons| {
+            poisons.map(|(object_id, script_entry)| BattlePoison {
+                object_id,
+                script_entry,
+            })
+        });
         let mut party = Party::default();
         if !party.replace(&data.party, &player_roles) {
             return None;
@@ -1485,6 +1759,9 @@ impl<M: CollisionMap> GameState<M> {
             current_battlefield: data.current_battlefield,
             role_experience: data.role_experience,
             growth_random_state: data.growth_random_state,
+            player_statuses,
+            player_poisons,
+            collect_value: data.collect_value,
             cash: data.cash,
             inventory,
             item_use_scripts,
@@ -1520,6 +1797,9 @@ impl<M: CollisionMap> GameState<M> {
         self.current_battlefield = snapshot.current_battlefield;
         self.role_experience = snapshot.role_experience;
         self.growth_random_state = snapshot.growth_random_state;
+        self.player_statuses = snapshot.player_statuses;
+        self.player_poisons = snapshot.player_poisons;
+        self.collect_value = snapshot.collect_value;
         self.active_battle = None;
         self.cash = snapshot.cash;
         self.inventory = snapshot.inventory;
@@ -1678,6 +1958,30 @@ impl<M: CollisionMap> GameState<M> {
             .collect();
         let role_experience =
             std::array::from_fn(|role| u32::from(save.experience[0][role].experience));
+        let mut player_poisons = [[BattlePoison::default(); MAX_BATTLE_POISONS]; PLAYER_ROLE_COUNT];
+        for (party_index, &role_id) in role_ids.iter().enumerate() {
+            let role_index = usize::from(role_id);
+            for poison_slot in 0..MAX_BATTLE_POISONS {
+                let poison = save.poisons[poison_slot][party_index];
+                if poison.poison_id == 0 {
+                    if poison.script != 0 {
+                        return false;
+                    }
+                    continue;
+                }
+                if save.objects.get(poison.poison_id).is_none()
+                    || player_poisons[role_index][..poison_slot]
+                        .iter()
+                        .any(|other| other.object_id == poison.poison_id)
+                {
+                    return false;
+                }
+                player_poisons[role_index][poison_slot] = BattlePoison {
+                    object_id: poison.poison_id,
+                    script_entry: poison.script,
+                };
+            }
+        }
 
         self.scene_number = save.scene_number;
         self.map = map;
@@ -1690,6 +1994,10 @@ impl<M: CollisionMap> GameState<M> {
         self.current_battlefield = save.battlefield_number;
         self.role_experience = role_experience;
         self.growth_random_state = 0xa341_316c;
+        self.player_statuses =
+            [BattleStatuses::from_durations([0; BATTLE_STATUS_COUNT]); PLAYER_ROLE_COUNT];
+        self.player_poisons = player_poisons;
+        self.collect_value = save.collect_value;
         self.player_roles = Some(save.player_roles);
         self.global_objects = Some(save.objects);
         self.active_battle = None;
@@ -1952,6 +2260,122 @@ impl<M: CollisionMap> GameState<M> {
                 hp_tenths,
                 apply_to_all,
             } => return self.revive_player(role_id, hp_tenths, apply_to_all),
+            ScriptAction::DamageEnemy {
+                enemy_index,
+                amount,
+                apply_to_all,
+            } => {
+                return self.active_battle.as_mut().is_some_and(|battle| {
+                    battle.damage_enemy(usize::from(enemy_index), amount, apply_to_all)
+                });
+            }
+            ScriptAction::PoisonEnemy {
+                enemy_index,
+                poison_id,
+                apply_to_all,
+            } => {
+                let Some(script_entry) = self
+                    .global_objects
+                    .as_ref()
+                    .and_then(|objects| objects.get(poison_id))
+                    .map(|object| object.poison_enemy_script())
+                else {
+                    return false;
+                };
+                return self.active_battle.as_mut().is_some_and(|battle| {
+                    battle.poison_enemy(
+                        usize::from(enemy_index),
+                        poison_id,
+                        script_entry,
+                        apply_to_all,
+                    )
+                });
+            }
+            ScriptAction::PoisonPlayer {
+                role_id,
+                poison_id,
+                apply_to_all,
+            } => return self.poison_player(role_id, poison_id, apply_to_all),
+            ScriptAction::CureEnemyPoison {
+                enemy_index,
+                poison_id,
+                apply_to_all,
+            } => {
+                return self.active_battle.as_mut().is_some_and(|battle| {
+                    battle.cure_enemy_poison(usize::from(enemy_index), poison_id, apply_to_all)
+                });
+            }
+            ScriptAction::CurePlayerPoison {
+                role_id,
+                poison_id,
+                apply_to_all,
+            } => return self.cure_player_poison(role_id, poison_id, apply_to_all),
+            ScriptAction::CurePlayerPoisonByLevel {
+                role_id,
+                maximum_level,
+                apply_to_all,
+            } => {
+                return self.cure_player_poison_by_level(role_id, maximum_level, apply_to_all);
+            }
+            ScriptAction::SetPlayerStatus {
+                role_id,
+                status,
+                rounds,
+            } => return self.set_player_status(role_id, status, rounds),
+            ScriptAction::SetEnemyStatus {
+                enemy_index,
+                status,
+                rounds,
+                ..
+            } => {
+                let Some(status) = BattleStatus::from_raw(status) else {
+                    return false;
+                };
+                return self
+                    .active_battle
+                    .as_mut()
+                    .and_then(|battle| {
+                        battle.set_enemy_status(usize::from(enemy_index), status, rounds)
+                    })
+                    .unwrap_or(false);
+            }
+            ScriptAction::RemovePlayerStatus { role_id, status } => {
+                return self.remove_player_status(role_id, status);
+            }
+            ScriptAction::DrainEnemyHp {
+                enemy_index,
+                amount,
+            } => {
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.drain_enemy_hp(usize::from(enemy_index), amount));
+            }
+            ScriptAction::FleeBattle { .. } => {
+                return self
+                    .active_battle
+                    .as_mut()
+                    .and_then(BattleState::flee)
+                    .is_some();
+            }
+            ScriptAction::HalvePlayerHp { role_id } => {
+                return self.set_player_hp(role_id, true);
+            }
+            ScriptAction::HalveEnemyHp {
+                enemy_index,
+                maximum_damage,
+            } => {
+                return self.active_battle.as_mut().is_some_and(|battle| {
+                    battle.halve_enemy_hp(usize::from(enemy_index), maximum_damage)
+                });
+            }
+            ScriptAction::KillPlayer { role_id } => return self.set_player_hp(role_id, false),
+            ScriptAction::KillEnemy { enemy_index } => {
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.kill_enemy(usize::from(enemy_index)));
+            }
             ScriptAction::SetEquipmentEffect {
                 role_id,
                 attribute,
@@ -2132,6 +2556,27 @@ impl<M: CollisionMap> GameState<M> {
         changed
     }
 
+    fn set_player_hp(&mut self, role_id: u16, halve: bool) -> bool {
+        let Some(roles) = self.player_roles.as_mut() else {
+            return false;
+        };
+        let Some(role) = roles.role_mut(usize::from(role_id)) else {
+            return false;
+        };
+        role.hp = if halve { role.hp / 2 } else { 0 };
+        let hp = role.hp;
+        self.party.sync_from_roles(roles);
+        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+            battle
+                .players
+                .iter_mut()
+                .find(|player| player.role_id == role_id)
+        }) {
+            player.hp = hp;
+        }
+        true
+    }
+
     fn revive_player(&mut self, role_id: u16, hp_tenths: u16, apply_to_all: bool) -> bool {
         let role_ids = if apply_to_all {
             self.party
@@ -2142,26 +2587,48 @@ impl<M: CollisionMap> GameState<M> {
         } else {
             vec![role_id]
         };
-        let Some(roles) = self.player_roles.as_mut() else {
-            return false;
-        };
-        let mut revived = false;
-        for role_id in role_ids {
-            let Some(role) = roles.role_mut(usize::from(role_id)) else {
-                continue;
+        let revived = {
+            let Some(roles) = self.player_roles.as_mut() else {
+                return false;
             };
-            if role.hp != 0 {
-                continue;
+            let mut revived = Vec::new();
+            for role_id in role_ids {
+                let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                    continue;
+                };
+                if role.hp != 0 {
+                    continue;
+                }
+                role.hp = u32::from(role.max_hp)
+                    .saturating_mul(u32::from(hp_tenths))
+                    .checked_div(10)
+                    .unwrap_or(0)
+                    .min(u32::from(u16::MAX)) as u16;
+                revived.push((role_id, role.hp));
             }
-            role.hp = u32::from(role.max_hp)
-                .saturating_mul(u32::from(hp_tenths))
-                .checked_div(10)
-                .unwrap_or(0)
-                .min(u32::from(u16::MAX)) as u16;
-            revived = true;
+            self.party.sync_from_roles(roles);
+            revived
+        };
+        for &(role_id, hp) in &revived {
+            let role_index = usize::from(role_id);
+            if let Some(objects) = self.global_objects.as_ref() {
+                cure_poison_by_level(&mut self.player_poisons[role_index], 3, objects);
+            }
+            for status in BattleStatus::ALL {
+                self.player_statuses[role_index].remove_from_player(status);
+            }
+            if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+                battle
+                    .players
+                    .iter_mut()
+                    .find(|player| player.role_id == role_id)
+            }) {
+                player.hp = hp;
+                player.statuses = self.player_statuses[role_index];
+                player.poisons = self.player_poisons[role_index];
+            }
         }
-        self.party.sync_from_roles(roles);
-        revived
+        !revived.is_empty()
     }
 
     /// Move an event object one script tick toward a PAL tile position.
@@ -4338,6 +4805,71 @@ mod tests {
     }
 
     #[test]
+    fn player_statuses_and_poisons_round_trip_and_follow_cure_rules() {
+        let mut role_data = vec![0; 900];
+        let hp_offset = 9 * PLAYER_ROLE_COUNT * 2;
+        role_data[hp_offset..hp_offset + 2].copy_from_slice(&100u16.to_le_bytes());
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let objects = GlobalObjects::parse(
+            &[[0u16; 6], [2, 4, 77, 0, 88, 0]]
+                .into_iter()
+                .flatten()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            pal_assets::objects::ObjectLayout::Dos,
+        )
+        .unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects);
+
+        assert!(state.apply_script_action(ScriptAction::SetPlayerStatus {
+            role_id: 0,
+            status: BattleStatus::Protect as u16,
+            rounds: 5,
+        }));
+        assert!(!state.apply_script_action(ScriptAction::SetPlayerStatus {
+            role_id: 0,
+            status: BattleStatus::Puppet as u16,
+            rounds: 3,
+        }));
+        assert!(state.apply_script_action(ScriptAction::PoisonPlayer {
+            role_id: 0,
+            poison_id: 1,
+            apply_to_all: false,
+        }));
+        assert_eq!(
+            state.player_status_duration(0, BattleStatus::Protect),
+            Some(5)
+        );
+        assert_eq!(state.player_poisons(0).unwrap()[0].object_id, 1);
+        assert_eq!(state.player_poisons(0).unwrap()[0].script_entry, 77);
+
+        let snapshot = state
+            .decode_snapshot(&state.encode_snapshot().unwrap())
+            .unwrap();
+        state.remove_player_status(0, BattleStatus::Protect as u16);
+        state.cure_player_poison(0, 1, false);
+        state.restore_snapshot(snapshot, test_map());
+        assert_eq!(
+            state.player_status_duration(0, BattleStatus::Protect),
+            Some(5)
+        );
+        assert_eq!(state.player_poisons(0).unwrap()[0].object_id, 1);
+        assert!(
+            state.apply_script_action(ScriptAction::CurePlayerPoisonByLevel {
+                role_id: 0,
+                maximum_level: 2,
+                apply_to_all: false,
+            })
+        );
+        assert_eq!(state.player_poisons(0).unwrap()[0], BattlePoison::default());
+    }
+
+    #[test]
     fn disk_snapshot_round_trips_and_rejects_invalid_data() {
         let player_roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
         let mut party = Party::single(0, &player_roles).unwrap();
@@ -4399,7 +4931,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":16", "\"version\":15");
+            .replace("\"version\":17", "\"version\":16");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 
@@ -4727,11 +5259,14 @@ mod tests {
         write_u16(&mut bytes, 14, 31);
         write_u16(&mut bytes, 16, 5);
         write_u16(&mut bytes, 18, 9);
+        write_u16(&mut bytes, 24, 17);
         bytes[40..44].copy_from_slice(&1234u32.to_le_bytes());
         write_u16(&mut bytes, 44, 0);
         write_i16(&mut bytes, 46, 160);
         write_i16(&mut bytes, 48, 112);
         write_u16(&mut bytes, 124, 42);
+        write_u16(&mut bytes, 1408, 1);
+        write_u16(&mut bytes, 1410, 77);
         write_u16(&mut bytes, 1728, 99);
         write_u16(&mut bytes, 1730, 3);
         write_u16(&mut bytes, 3264, 12);
@@ -4749,6 +5284,9 @@ mod tests {
         assert_eq!(state.current_battle_music, 5);
         assert_eq!(state.current_battlefield, 9);
         assert_eq!(state.cash, 1234);
+        assert_eq!(state.collect_value(), 17);
+        assert_eq!(state.player_poisons(0).unwrap()[0].object_id, 1);
+        assert_eq!(state.player_poisons(0).unwrap()[0].script_entry, 77);
         assert_eq!(state.inventory_count(99), 3);
         assert_eq!(state.player_experience(0), Some(42));
         assert_eq!(state.scene_enter_script(0), 123);

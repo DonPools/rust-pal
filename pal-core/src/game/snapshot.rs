@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use pal_assets::player_roles::{PlayerRole, PlayerRoles};
 use serde::{Deserialize, Serialize};
 
+use crate::battle::{BattlePoison, BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS};
+
 use super::{Direction, Party, Role, SceneObject, TrailPoint, TriggerRequest, MAX_PARTY_MEMBERS};
 
 /// In-memory development snapshot of platform-independent mutable game state.
@@ -18,6 +20,10 @@ pub struct GameSnapshot {
     pub(super) current_battlefield: u16,
     pub(super) role_experience: [u32; pal_assets::player_roles::PLAYER_ROLE_COUNT],
     pub(super) growth_random_state: u32,
+    pub(super) player_statuses: [BattleStatuses; pal_assets::player_roles::PLAYER_ROLE_COUNT],
+    pub(super) player_poisons:
+        [[BattlePoison; MAX_BATTLE_POISONS]; pal_assets::player_roles::PLAYER_ROLE_COUNT],
+    pub(super) collect_value: u16,
     pub(super) cash: u32,
     pub(super) inventory: Vec<(u16, u16)>,
     pub(super) item_use_scripts: BTreeMap<u16, u16>,
@@ -49,8 +55,8 @@ impl GameSnapshot {
     }
 }
 
-// Version 16 preserves mutable scene maps and script-configured extra followers.
-pub(super) const SNAPSHOT_VERSION: u16 = 16;
+// Version 17 preserves player battle statuses, poisons, and collected-enemy value.
+pub(super) const SNAPSHOT_VERSION: u16 = 17;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -64,6 +70,11 @@ pub(super) struct SnapshotData {
     pub(super) current_battlefield: u16,
     pub(super) role_experience: [u32; pal_assets::player_roles::PLAYER_ROLE_COUNT],
     pub(super) growth_random_state: u32,
+    pub(super) player_statuses:
+        [[u16; BATTLE_STATUS_COUNT]; pal_assets::player_roles::PLAYER_ROLE_COUNT],
+    pub(super) player_poisons:
+        [[(u16, u16); MAX_BATTLE_POISONS]; pal_assets::player_roles::PLAYER_ROLE_COUNT],
+    pub(super) collect_value: u16,
     pub(super) cash: u32,
     pub(super) inventory: Vec<(u16, u16)>,
     pub(super) item_use_scripts: Vec<(u16, u16)>,

@@ -227,11 +227,26 @@ pub(super) fn advance_script<L>(
         }
         Some(ScriptEvent::Action(
             action @ (pal_core::script::ScriptAction::AdjustPlayerHealth { .. }
-            | pal_core::script::ScriptAction::RevivePlayer { .. }),
+            | pal_core::script::ScriptAction::RevivePlayer { .. }
+            | pal_core::script::ScriptAction::SetPlayerStatus { .. }),
         )) => {
             let succeeded = game.apply_script_action(action);
             scripts.set_success(succeeded);
         }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::SetEnemyStatus { resisted_entry, .. },
+        )) if !game.apply_script_action(action) => {
+            scripts.branch_to(resisted_entry);
+        }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::FleeBattle { failure_entry },
+        )) if !game.apply_script_action(action) => {
+            scripts.branch_to(failure_entry);
+        }
+        Some(ScriptEvent::Action(
+            pal_core::script::ScriptAction::SetEnemyStatus { .. }
+            | pal_core::script::ScriptAction::FleeBattle { .. },
+        )) => {}
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::PlaceObjectInFront { blocked_entry, .. },
         )) if !game.apply_script_action(action) => {
@@ -329,6 +344,29 @@ pub(super) fn advance_script<L>(
                     amount,
                     target_entry,
                 } => (game.equipped_item_count(item_id) < amount, target_entry),
+                ScriptCondition::PlayerLacksPoison {
+                    role_id,
+                    poison_id,
+                    target_entry,
+                } => (!game.player_has_poison(role_id, poison_id), target_entry),
+                ScriptCondition::EnemyLacksPoison {
+                    enemy_index,
+                    poison_id,
+                    target_entry,
+                } => (!game.enemy_has_poison(enemy_index, poison_id), target_entry),
+                ScriptCondition::PlayerNotPoisoned {
+                    role_id,
+                    target_entry,
+                } => (
+                    game.player_poisons(role_id)
+                        .is_none_or(|poisons| poisons.iter().all(|poison| poison.object_id == 0)),
+                    target_entry,
+                ),
+                ScriptCondition::EnemyHpAbove {
+                    enemy_index,
+                    percentage,
+                    target_entry,
+                } => (game.enemy_hp_above(enemy_index, percentage), target_entry),
             };
             if matches {
                 scripts.branch_to(target_entry);

@@ -72,6 +72,22 @@ impl GlobalObject {
     pub fn enemy_ready_script(self) -> u16 {
         self.data[4]
     }
+
+    pub fn poison_level(self) -> u16 {
+        self.data[0]
+    }
+
+    pub fn poison_color(self) -> u16 {
+        self.data[1]
+    }
+
+    pub fn poison_player_script(self) -> u16 {
+        self.data[2]
+    }
+
+    pub fn poison_enemy_script(self) -> u16 {
+        self.data[4]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +167,10 @@ mod tests {
         assert_eq!(objects.get(0).unwrap().enemy_turn_start_script(), 30);
         assert_eq!(objects.get(0).unwrap().enemy_battle_end_script(), 40);
         assert_eq!(objects.get(0).unwrap().enemy_ready_script(), 50);
+        assert_eq!(objects.get(0).unwrap().poison_level(), 10);
+        assert_eq!(objects.get(0).unwrap().poison_color(), 20);
+        assert_eq!(objects.get(0).unwrap().poison_player_script(), 30);
+        assert_eq!(objects.get(0).unwrap().poison_enemy_script(), 50);
         assert_eq!(
             objects.get(0).unwrap().data,
             [10, 20, 30, 40, 50, 0, 0x1234]

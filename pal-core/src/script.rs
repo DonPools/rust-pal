@@ -138,21 +138,21 @@ define_script_opcodes! {
     AdjustCash = 0x001E, "CASH_ADD", "Increase or decrease party cash, with an insufficient-funds branch.", Implemented;
     AddItem = 0x001F, "ITEM_ADD", "Add an item to inventory.", Implemented;
     RemoveItem = 0x0020, "ITEM_REMOVE", "Remove an item from inventory or equipped party items.", Implemented;
-    DamageEnemy = 0x0021, "ENEMY_DAMAGE", "Inflict direct damage on one enemy or all enemies.", Unsupported;
+    DamageEnemy = 0x0021, "ENEMY_DAMAGE", "Inflict direct damage on one enemy or all enemies.", Implemented;
     RevivePlayer = 0x0022, "REVIVE", "Revive one player or all fallen party members.", Implemented;
     RemoveEquipment = 0x0023, "UNEQUIP", "Remove one or all equipment slots from a player.", Implemented;
     SetObjectAutoScript = 0x0024, "OBJ_AUTO", "Set an event object's automatic script entry.", Implemented;
     SetObjectTriggerScript = 0x0025, "OBJ_TRIGGER", "Set an event object's trigger script entry.", Implemented;
     OpenBuyMenu = 0x0026, "SHOP_BUY", "Open the specified store's buy menu.", Implemented;
     OpenSellMenu = 0x0027, "SHOP_SELL", "Open the inventory sell menu.", Implemented;
-    PoisonEnemy = 0x0028, "POISON_ENEMY", "Apply a poison object to an enemy.", Unsupported;
-    PoisonPlayer = 0x0029, "POISON_PLAYER", "Apply a poison object to a player.", Unsupported;
-    CureEnemyPoison = 0x002A, "CURE_ENEMY", "Remove a specific poison object from an enemy.", Unsupported;
-    CurePlayerPoison = 0x002B, "CURE_PLAYER", "Remove a specific poison object from a player.", Unsupported;
-    CurePoisonByLevel = 0x002C, "CURE_LEVEL", "Remove player poisons up to the specified level.", Unsupported;
-    SetPlayerStatus = 0x002D, "STATUS_PLAYER", "Apply a temporary status to a player.", Unsupported;
-    SetEnemyStatus = 0x002E, "STATUS_ENEMY", "Apply a temporary status to an enemy.", Unsupported;
-    RemovePlayerStatus = 0x002F, "STATUS_CLEAR", "Remove a temporary status from a player.", Unsupported;
+    PoisonEnemy = 0x0028, "POISON_ENEMY", "Apply a poison object to an enemy.", Implemented;
+    PoisonPlayer = 0x0029, "POISON_PLAYER", "Apply a poison object to a player.", Implemented;
+    CureEnemyPoison = 0x002A, "CURE_ENEMY", "Remove a specific poison object from an enemy.", Implemented;
+    CurePlayerPoison = 0x002B, "CURE_PLAYER", "Remove a specific poison object from a player.", Implemented;
+    CurePoisonByLevel = 0x002C, "CURE_LEVEL", "Remove player poisons up to the specified level.", Implemented;
+    SetPlayerStatus = 0x002D, "STATUS_PLAYER", "Apply a temporary status to a player.", Implemented;
+    SetEnemyStatus = 0x002E, "STATUS_ENEMY", "Apply a temporary status to an enemy.", Implemented;
+    RemovePlayerStatus = 0x002F, "STATUS_CLEAR", "Remove a temporary status from a player.", Implemented;
     AdjustTemporaryPlayerStat = 0x0030, "STAT_TEMP", "Temporarily increase a player stat by a percentage.", Unsupported;
     SetTemporaryBattleSprite = 0x0031, "SPRITE_TEMP", "Temporarily change a player's battle sprite.", Unsupported;
     CollectEnemy = 0x0033, "COLLECT_ENEMY", "Collect an enemy for later conversion into items.", Unsupported;
@@ -161,8 +161,8 @@ define_script_opcodes! {
     SelectRngAnimation = 0x0036, "RNG_SELECT", "Select the current RNG animation resource.", Implemented;
     PlayRngAnimation = 0x0037, "RNG_PLAY", "Play frames from the selected RNG animation.", Implemented;
     TeleportParty = 0x0038, "TELEPORT", "Run the current scene's teleport script or branch on failure.", Implemented;
-    DrainEnemyHp = 0x0039, "DRAIN_HP", "Drain HP from an enemy into the acting player.", Unsupported;
-    FleeBattle = 0x003A, "FLEE", "Attempt to flee from battle.", Unsupported;
+    DrainEnemyHp = 0x0039, "DRAIN_HP", "Drain HP from an enemy into the acting player.", Implemented;
+    FleeBattle = 0x003A, "FLEE", "Attempt to flee from battle.", Implemented;
     DialogCenter = 0x003B, "DIALOG_CENTER", "Place following dialog in the middle of the screen.", Implemented;
     DialogUpper = 0x003C, "DIALOG_UPPER", "Place following dialog in the upper part of the screen.", Implemented;
     DialogLower = 0x003D, "DIALOG_LOWER", "Place following dialog in the lower part of the screen.", Implemented;
@@ -193,17 +193,17 @@ define_script_opcodes! {
     ScaleMagicByMp = 0x0057, "MAGIC_SCALE_MP", "Set magic base damage from the consumed MP amount.", Unsupported;
     JumpIfItemCountLess = 0x0058, "JLT_ITEM", "Jump when fewer than the requested number of items are held.", Implemented;
     ChangeScene = 0x0059, "SCENE", "Change to the specified scene.", Implemented;
-    HalvePlayerHp = 0x005A, "HP_HALF", "Halve a player's HP.", Unsupported;
-    HalveEnemyHp = 0x005B, "ENEMY_HP_HALF", "Halve an enemy's HP.", Unsupported;
+    HalvePlayerHp = 0x005A, "HP_HALF", "Halve a player's HP.", Implemented;
+    HalveEnemyHp = 0x005B, "ENEMY_HP_HALF", "Halve an enemy's HP.", Implemented;
     HideBattleActor = 0x005C, "BATTLE_HIDE", "Hide a battle actor for a period.", Unsupported;
-    JumpIfPlayerLacksPoison = 0x005D, "JNO_POISON", "Jump when a player lacks a specific poison.", Unsupported;
-    JumpIfEnemyLacksPoison = 0x005E, "JNO_ENEMY_POISON", "Jump when an enemy lacks a specific poison.", Unsupported;
-    KillPlayer = 0x005F, "KILL_PLAYER", "Immediately knock out a player.", Unsupported;
-    KillEnemy = 0x0060, "KILL_ENEMY", "Immediately knock out an enemy.", Unsupported;
-    JumpIfPlayerNotPoisoned = 0x0061, "JNOT_POISONED", "Jump when a player has no poison.", Unsupported;
+    JumpIfPlayerLacksPoison = 0x005D, "JNO_POISON", "Jump when a player lacks a specific poison.", Implemented;
+    JumpIfEnemyLacksPoison = 0x005E, "JNO_ENEMY_POISON", "Jump when an enemy lacks a specific poison.", Implemented;
+    KillPlayer = 0x005F, "KILL_PLAYER", "Immediately knock out a player.", Implemented;
+    KillEnemy = 0x0060, "KILL_ENEMY", "Immediately knock out an enemy.", Implemented;
+    JumpIfPlayerNotPoisoned = 0x0061, "JNOT_POISONED", "Jump when a player has no poison.", Implemented;
     PauseEnemyChase = 0x0062, "CHASE_PAUSE", "Pause enemy chasing for a period.", Unsupported;
     SpeedUpEnemyChase = 0x0063, "CHASE_FAST", "Speed up enemy chasing for a period.", Unsupported;
-    JumpIfEnemyHpAbove = 0x0064, "JGT_ENEMY_HP", "Jump when enemy HP exceeds a percentage threshold.", Unsupported;
+    JumpIfEnemyHpAbove = 0x0064, "JGT_ENEMY_HP", "Jump when enemy HP exceeds a percentage threshold.", Implemented;
     SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite; only the leader slot is currently applied.", Stub;
     ThrowWeapon = 0x0066, "THROW_WEAPON", "Throw a weapon at an enemy.", Unsupported;
     EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Make an enemy cast magic.", Unsupported;
@@ -522,6 +522,71 @@ pub enum ScriptAction {
         hp_tenths: u16,
         apply_to_all: bool,
     },
+    DamageEnemy {
+        enemy_index: u16,
+        amount: u16,
+        apply_to_all: bool,
+    },
+    PoisonEnemy {
+        enemy_index: u16,
+        poison_id: u16,
+        apply_to_all: bool,
+    },
+    PoisonPlayer {
+        role_id: u16,
+        poison_id: u16,
+        apply_to_all: bool,
+    },
+    CureEnemyPoison {
+        enemy_index: u16,
+        poison_id: u16,
+        apply_to_all: bool,
+    },
+    CurePlayerPoison {
+        role_id: u16,
+        poison_id: u16,
+        apply_to_all: bool,
+    },
+    CurePlayerPoisonByLevel {
+        role_id: u16,
+        maximum_level: u16,
+        apply_to_all: bool,
+    },
+    SetPlayerStatus {
+        role_id: u16,
+        status: u16,
+        rounds: u16,
+    },
+    SetEnemyStatus {
+        enemy_index: u16,
+        status: u16,
+        rounds: u16,
+        resisted_entry: u16,
+    },
+    RemovePlayerStatus {
+        role_id: u16,
+        status: u16,
+    },
+    DrainEnemyHp {
+        enemy_index: u16,
+        amount: u16,
+    },
+    FleeBattle {
+        failure_entry: u16,
+    },
+    HalvePlayerHp {
+        role_id: u16,
+    },
+    HalveEnemyHp {
+        enemy_index: u16,
+        maximum_damage: u16,
+    },
+    KillPlayer {
+        role_id: u16,
+    },
+    KillEnemy {
+        enemy_index: u16,
+    },
     SetEquipmentEffect {
         role_id: u16,
         attribute: u16,
@@ -631,6 +696,25 @@ pub enum ScriptCondition {
     ItemNotEquipped {
         item_id: u16,
         amount: u16,
+        target_entry: u16,
+    },
+    PlayerLacksPoison {
+        role_id: u16,
+        poison_id: u16,
+        target_entry: u16,
+    },
+    EnemyLacksPoison {
+        enemy_index: u16,
+        poison_id: u16,
+        target_entry: u16,
+    },
+    PlayerNotPoisoned {
+        role_id: u16,
+        target_entry: u16,
+    },
+    EnemyHpAbove {
+        enemy_index: u16,
+        percentage: u16,
         target_entry: u16,
     },
 }
@@ -1252,6 +1336,131 @@ impl ScriptRuntime {
                         apply_to_all: entry.operands[0] != 0,
                     }));
                 }
+                DamageEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::DamageEnemy {
+                        enemy_index: execution.object_id,
+                        amount: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                PoisonEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PoisonEnemy {
+                        enemy_index: execution.object_id,
+                        poison_id: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                PoisonPlayer => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PoisonPlayer {
+                        role_id: execution.object_id,
+                        poison_id: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                CureEnemyPoison => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::CureEnemyPoison {
+                        enemy_index: execution.object_id,
+                        poison_id: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                CurePlayerPoison => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::CurePlayerPoison {
+                        role_id: execution.object_id,
+                        poison_id: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                CurePoisonByLevel => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::CurePlayerPoisonByLevel {
+                        role_id: execution.object_id,
+                        maximum_level: entry.operands[1],
+                        apply_to_all: entry.operands[0] != 0,
+                    }));
+                }
+                SetPlayerStatus => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetPlayerStatus {
+                        role_id: execution.object_id,
+                        status: entry.operands[0],
+                        rounds: entry.operands[1],
+                    }));
+                }
+                SetEnemyStatus => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetEnemyStatus {
+                        enemy_index: execution.object_id,
+                        status: entry.operands[0],
+                        rounds: entry.operands[1],
+                        resisted_entry: entry.operands[2],
+                    }));
+                }
+                RemovePlayerStatus => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::RemovePlayerStatus {
+                        role_id: execution.object_id,
+                        status: entry.operands[0],
+                    }));
+                }
+                DrainEnemyHp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::DrainEnemyHp {
+                        enemy_index: execution.object_id,
+                        amount: entry.operands[0],
+                    }));
+                }
+                FleeBattle => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::FleeBattle {
+                        failure_entry: entry.operands[0],
+                    }));
+                }
+                HalvePlayerHp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::HalvePlayerHp {
+                        role_id: execution.object_id,
+                    }));
+                }
+                HalveEnemyHp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::HalveEnemyHp {
+                        enemy_index: execution.object_id,
+                        maximum_damage: entry.operands[0],
+                    }));
+                }
+                KillPlayer => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::KillPlayer {
+                        role_id: execution.object_id,
+                    }));
+                }
+                KillEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::KillEnemy {
+                        enemy_index: execution.object_id,
+                    }));
+                }
                 RemoveEquipment => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -1369,6 +1578,41 @@ impl ScriptRuntime {
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Action(ScriptAction::ChangeScene {
                         scene_number: entry.operands[0],
+                    }));
+                }
+                JumpIfPlayerLacksPoison => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::PlayerLacksPoison {
+                        role_id: execution.object_id,
+                        poison_id: entry.operands[0],
+                        target_entry: entry.operands[1],
+                    }));
+                }
+                JumpIfEnemyLacksPoison => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::EnemyLacksPoison {
+                        enemy_index: execution.object_id,
+                        poison_id: entry.operands[0],
+                        target_entry: entry.operands[1],
+                    }));
+                }
+                JumpIfPlayerNotPoisoned => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::PlayerNotPoisoned {
+                        role_id: execution.object_id,
+                        target_entry: entry.operands[0],
+                    }));
+                }
+                JumpIfEnemyHpAbove => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::EnemyHpAbove {
+                        enemy_index: execution.object_id,
+                        percentage: entry.operands[0],
+                        target_entry: entry.operands[1],
                     }));
                 }
                 SetPlayerSprite if entry.operands[0] == 0 => {
@@ -1791,35 +2035,16 @@ impl ScriptRuntime {
                 // Known original instructions that the trigger runtime does not implement yet.
                 SetEquipmentEffect
                 | EquipItem
-                | DamageEnemy
-                | PoisonEnemy
-                | PoisonPlayer
-                | CureEnemyPoison
-                | CurePlayerPoison
-                | CurePoisonByLevel
-                | SetPlayerStatus
-                | SetEnemyStatus
-                | RemovePlayerStatus
                 | AdjustTemporaryPlayerStat
                 | SetTemporaryBattleSprite
                 | CollectEnemy
                 | TransmuteCollectedEnemies
-                | DrainEnemyHp
-                | FleeBattle
                 | SimulatePlayerMagic
                 | ChasePlayer
                 | ScaleMagicByMp
-                | HalvePlayerHp
-                | HalveEnemyHp
                 | HideBattleActor
-                | JumpIfPlayerLacksPoison
-                | JumpIfEnemyLacksPoison
-                | KillPlayer
-                | KillEnemy
-                | JumpIfPlayerNotPoisoned
                 | PauseEnemyChase
                 | SpeedUpEnemyChase
-                | JumpIfEnemyHpAbove
                 | ThrowWeapon
                 | EnemyCastMagic
                 | JumpIfEnemyTurn
@@ -1961,7 +2186,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [116, 1, 48]);
+        assert_eq!(support_counts, [135, 1, 29]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2452,6 +2677,131 @@ mod tests {
                 succeeded: false,
             })
         );
+    }
+
+    #[test]
+    fn yields_battle_status_and_poison_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::DamageEnemy.raw(), 1, 25, 0],
+            [ScriptOpcode::PoisonEnemy.raw(), 0, 40, 0],
+            [ScriptOpcode::PoisonPlayer.raw(), 1, 41, 0],
+            [ScriptOpcode::CureEnemyPoison.raw(), 0, 40, 0],
+            [ScriptOpcode::CurePlayerPoison.raw(), 1, 41, 0],
+            [ScriptOpcode::CurePoisonByLevel.raw(), 0, 3, 0],
+            [ScriptOpcode::SetPlayerStatus.raw(), 6, 4, 0],
+            [ScriptOpcode::SetEnemyStatus.raw(), 2, 5, 99],
+            [ScriptOpcode::RemovePlayerStatus.raw(), 6, 0, 0],
+            [ScriptOpcode::DrainEnemyHp.raw(), 12, 0, 0],
+            [ScriptOpcode::FleeBattle.raw(), 94, 0, 0],
+            [ScriptOpcode::HalvePlayerHp.raw(), 0, 0, 0],
+            [ScriptOpcode::HalveEnemyHp.raw(), 50, 0, 0],
+            [ScriptOpcode::KillPlayer.raw(), 0, 0, 0],
+            [ScriptOpcode::KillEnemy.raw(), 0, 0, 0],
+            [ScriptOpcode::JumpIfPlayerLacksPoison.raw(), 40, 91, 0],
+            [ScriptOpcode::JumpIfEnemyLacksPoison.raw(), 41, 92, 0],
+            [ScriptOpcode::JumpIfPlayerNotPoisoned.raw(), 93, 0, 0],
+            [ScriptOpcode::JumpIfEnemyHpAbove.raw(), 60, 95, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        let expected = [
+            ScriptAction::DamageEnemy {
+                enemy_index: 7,
+                amount: 25,
+                apply_to_all: true,
+            },
+            ScriptAction::PoisonEnemy {
+                enemy_index: 7,
+                poison_id: 40,
+                apply_to_all: false,
+            },
+            ScriptAction::PoisonPlayer {
+                role_id: 7,
+                poison_id: 41,
+                apply_to_all: true,
+            },
+            ScriptAction::CureEnemyPoison {
+                enemy_index: 7,
+                poison_id: 40,
+                apply_to_all: false,
+            },
+            ScriptAction::CurePlayerPoison {
+                role_id: 7,
+                poison_id: 41,
+                apply_to_all: true,
+            },
+            ScriptAction::CurePlayerPoisonByLevel {
+                role_id: 7,
+                maximum_level: 3,
+                apply_to_all: false,
+            },
+            ScriptAction::SetPlayerStatus {
+                role_id: 7,
+                status: 6,
+                rounds: 4,
+            },
+            ScriptAction::SetEnemyStatus {
+                enemy_index: 7,
+                status: 2,
+                rounds: 5,
+                resisted_entry: 99,
+            },
+            ScriptAction::RemovePlayerStatus {
+                role_id: 7,
+                status: 6,
+            },
+            ScriptAction::DrainEnemyHp {
+                enemy_index: 7,
+                amount: 12,
+            },
+            ScriptAction::FleeBattle { failure_entry: 94 },
+            ScriptAction::HalvePlayerHp { role_id: 7 },
+            ScriptAction::HalveEnemyHp {
+                enemy_index: 7,
+                maximum_damage: 50,
+            },
+            ScriptAction::KillPlayer { role_id: 7 },
+            ScriptAction::KillEnemy { enemy_index: 7 },
+        ];
+        for action in expected {
+            assert_eq!(runtime.advance(), Some(ScriptEvent::Action(action)));
+        }
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::PlayerLacksPoison {
+                role_id: 7,
+                poison_id: 40,
+                target_entry: 91,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::EnemyLacksPoison {
+                enemy_index: 7,
+                poison_id: 41,
+                target_entry: 92,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::PlayerNotPoisoned {
+                role_id: 7,
+                target_entry: 93,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::EnemyHpAbove {
+                enemy_index: 7,
+                percentage: 60,
+                target_entry: 95,
+            }))
+        );
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
     }
 
     #[test]

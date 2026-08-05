@@ -21,6 +21,20 @@ pub(super) fn update_battle(
     if advance_battle_events(game, services) {
         return None;
     }
+    let automatic_events = game
+        .battle_mut()
+        .map(|battle| battle.advance_automatic_turns())
+        .unwrap_or_default();
+    if !automatic_events.is_empty() {
+        services.battle_events.extend(automatic_events);
+        let event = *services
+            .battle_events
+            .front()
+            .expect("a newly queued automatic battle event is available");
+        services.battle_event_ticks = battle_event_duration(event);
+        play_battle_event_sounds(game, services, event);
+        return None;
+    }
     if let Some(BattlePhase::Finished(_)) = game.battle().map(|battle| battle.phase()) {
         if !input.confirm {
             return None;
