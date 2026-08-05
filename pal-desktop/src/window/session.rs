@@ -38,6 +38,7 @@ pub(super) struct SessionState {
     pub(super) sound_effects: SoundEffects,
     pub(super) music: BackgroundMusic,
     pub(super) visual: VisualState,
+    pub(super) dialog_delay_ms: u16,
     pub(super) waiting_for_key: bool,
     pub(super) load_last_save_requested: bool,
     pub(super) quit_requested: bool,
@@ -78,6 +79,7 @@ impl SessionState {
             music: BackgroundMusic::new(midi_mkf, sound_font)
                 .expect("failed to load MIDI music and SoundFont"),
             visual: VisualState::new(),
+            dialog_delay_ms: 24,
             waiting_for_key: false,
             load_last_save_requested: false,
             quit_requested: false,

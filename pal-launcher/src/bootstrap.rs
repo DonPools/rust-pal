@@ -19,10 +19,11 @@ use pal_desktop::renderer::Renderer;
 
 use crate::assets::{
     create_global_scene_objects, create_scene_objects, load_battle_backgrounds, load_battle_data,
-    load_dialog_faces, load_enemy_battle_sprites, load_fbp_archive, load_global_objects,
-    load_magics, load_map, load_music, load_palettes, load_player_battle_sprites,
-    load_player_roles, load_rng_archive, load_role_sprites, load_scene_data, load_script_table,
-    load_sound_effects, load_sound_font, load_stores, load_text_resources, load_ui_sprites,
+    load_dialog_faces, load_dialog_icons, load_enemy_battle_sprites, load_fbp_archive,
+    load_global_objects, load_magics, load_map, load_music, load_palettes,
+    load_player_battle_sprites, load_player_roles, load_rng_archive, load_role_sprites,
+    load_scene_data, load_script_table, load_sound_effects, load_sound_font, load_stores,
+    load_text_resources, load_ui_sprites,
 };
 use crate::{DEFAULT_PALETTE, DEFAULT_SCENE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -50,6 +51,7 @@ pub(super) struct BootstrappedGame {
     pub(super) battle_backgrounds: Vec<Option<Bitmap>>,
     pub(super) role_sprites: RoleSprites,
     pub(super) dialog_faces: Vec<Option<RleBitmap>>,
+    pub(super) dialog_icons: Vec<RleBitmap>,
     pub(super) ui_sprites: Vec<RleBitmap>,
     pub(super) item_sprites: Vec<Option<RleBitmap>>,
     pub(super) status_background: Bitmap,
@@ -92,6 +94,7 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
     let map = load_map(&data_dir, usize::from(scene.scene.map_num)).expect("failed to load map");
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
     let dialog_faces = load_dialog_faces(&data_dir).expect("failed to load RGM.MKF dialog faces");
+    let dialog_icons = load_dialog_icons(&data_dir).expect("failed to load DATA.MKF dialog icons");
     let ui_sprites = load_ui_sprites(&data_dir).expect("failed to load DATA.MKF UI sprites");
     let item_sprites =
         crate::assets::load_item_sprites(&data_dir).expect("failed to load BALL.MKF item sprites");
@@ -154,6 +157,7 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         battle_backgrounds,
         role_sprites,
         dialog_faces,
+        dialog_icons,
         ui_sprites,
         item_sprites,
         status_background,

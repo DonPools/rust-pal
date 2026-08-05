@@ -53,6 +53,7 @@ pub struct GameResources {
     pub text: TextLibrary,
     pub font: BitmapFont,
     pub dialog_faces: Vec<Option<RleBitmap>>,
+    pub dialog_icons: Vec<RleBitmap>,
     pub ui_sprites: Vec<RleBitmap>,
     pub item_sprites: Vec<Option<RleBitmap>>,
     pub enemy_battle_sprites: BattleSpriteArchive,

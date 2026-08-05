@@ -33,6 +33,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         battle_backgrounds,
         role_sprites,
         dialog_faces,
+        dialog_icons,
         mut game,
         mut renderer,
         ..
@@ -178,6 +179,19 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(
         dialog_faces.iter().any(Option::is_some),
         "RGM.MKF contains no valid dialog faces"
+    );
+    assert!(
+        dialog_icons.len() >= 3
+            && dialog_icons
+                .iter()
+                .take(3)
+                .all(|icon| icon.width > 0 && icon.height > 0),
+        "DATA.MKF contains invalid dialog wait icons"
+    );
+    let (speed_controls, terminal_controls, icon_controls) = text_control_counts(&text);
+    assert!(
+        speed_controls > 0 && terminal_controls > 0 && icon_controls > 0,
+        "M.MSG does not exercise all supported dialog timing and icon controls"
     );
     render_tile_map(
         &mut renderer,
@@ -1063,7 +1077,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         visible_object_id
     );
     println!(
-        "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels",
+        "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels, \
+         {speed_controls} speed, {terminal_controls} terminal and {icon_controls} icon controls",
         text.word_count(),
         text.message_count(),
         font.glyph_count(),
@@ -1121,4 +1136,36 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"
     );
+}
+
+fn text_control_counts(text: &pal_assets::text::TextLibrary) -> (usize, usize, usize) {
+    let mut speed = 0;
+    let mut terminal = 0;
+    let mut icon = 0;
+    for message_id in 0..text.message_count() {
+        let Some(message) = text.message(message_id) else {
+            continue;
+        };
+        let mut index = 0;
+        while index < message.len() {
+            match message[index] {
+                byte if byte >= 0x80 => index += (message.len() - index).min(2),
+                b'\\' => index += (message.len() - index).min(2),
+                b'$' => {
+                    speed += 1;
+                    index += (message.len() - index).min(3);
+                }
+                b'~' => {
+                    terminal += 1;
+                    index += (message.len() - index).min(3);
+                }
+                b'(' | b')' => {
+                    icon += 1;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+    }
+    (speed, terminal, icon)
 }

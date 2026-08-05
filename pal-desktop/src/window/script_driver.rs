@@ -2,9 +2,7 @@ use pal_assets::text::TextLibrary;
 use pal_core::game::{AutoScriptError, GameState};
 use pal_core::role::RoleSprites;
 use pal_core::scene::TriggerKind;
-use pal_core::script::{
-    DialogPosition, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual,
-};
+use pal_core::script::{ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
 
 use super::dialog::ActiveDialog;
 use super::dialog_text::dialog_body_lines;
@@ -38,15 +36,13 @@ pub(super) fn advance_script<L>(
             font_color,
             face_index,
         }) => {
-            let mut next = ActiveDialog {
-                message_ids: vec![message_id],
+            let mut next = ActiveDialog::new(
+                message_id,
                 position,
                 font_color,
                 face_index,
-                page: 0,
-                awaiting_input: position == DialogPosition::CenterWindow,
-                auto_wait_ticks: (position == DialogPosition::CenterWindow).then_some(28),
-            };
+                services.dialog_delay_ms,
+            );
             if let Some(active) = dialog.as_mut() {
                 if active.position == position
                     && active.font_color == font_color
@@ -54,14 +50,15 @@ pub(super) fn advance_script<L>(
                     && !active.awaiting_input
                 {
                     active.message_ids.push(message_id);
-                    active.awaiting_input = dialog_body_lines(resources.text, active).len() >= 4;
+                    active.wait_after_reveal =
+                        dialog_body_lines(resources.text, active).len() >= (active.page + 1) * 4;
                 } else {
                     active.awaiting_input = true;
-                    next.awaiting_input |= dialog_body_lines(resources.text, &next).len() >= 4;
+                    next.wait_after_reveal |= dialog_body_lines(resources.text, &next).len() >= 4;
                     services.pending_dialog = Some(next);
                 }
             } else {
-                next.awaiting_input |= dialog_body_lines(resources.text, &next).len() >= 4;
+                next.wait_after_reveal |= dialog_body_lines(resources.text, &next).len() >= 4;
                 *dialog = Some(next);
             }
             set_title("Rust-PAL [Dialog]");

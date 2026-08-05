@@ -12,6 +12,23 @@ pub(super) struct DialogLayout {
     pub(super) max_width: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DialogTokenKind {
+    Glyph,
+    Color,
+    Delay(u16),
+    Terminate(u16),
+    Icon(u8),
+    LineBreak,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DialogToken {
+    pub(super) bytes: usize,
+    pub(super) width: usize,
+    pub(super) kind: DialogTokenKind,
+}
+
 pub(super) fn dialog_layout(dialog: &ActiveDialog) -> DialogLayout {
     let has_face = dialog.face_index.is_some();
     match dialog.position {
@@ -81,12 +98,15 @@ pub(super) fn dialog_text_width(text: &[u8]) -> usize {
     let mut width = 0;
     let mut index = 0;
     while index < text.len() {
-        if text[index] == b'~' || matches!(text[index], b'\r' | b'\n') {
+        let token = dialog_token(text, index);
+        if matches!(
+            token.kind,
+            DialogTokenKind::Terminate(_) | DialogTokenKind::LineBreak
+        ) {
             break;
         }
-        let (bytes, token_width) = dialog_token(text, index);
-        width += token_width;
-        index += bytes;
+        width += token.width;
+        index += token.bytes;
     }
     width
 }
@@ -97,21 +117,26 @@ pub(super) fn wrap_big5_lines(text: &[u8], max_width: usize) -> Vec<&[u8]> {
     let mut index = 0;
     let mut width = 0;
     while index < text.len() {
-        if matches!(text[index], b'\r' | b'\n') {
+        let token = dialog_token(text, index);
+        if token.kind == DialogTokenKind::LineBreak {
             lines.push(&text[start..index]);
-            index += 1;
+            index += token.bytes;
             start = index;
             width = 0;
             continue;
         }
-        let (bytes, character_width) = dialog_token(text, index);
-        if width + character_width > max_width && index > start {
+        if matches!(token.kind, DialogTokenKind::Terminate(_)) {
+            index += token.bytes;
+            lines.push(&text[start..index]);
+            return lines;
+        }
+        if width + token.width > max_width && index > start {
             lines.push(&text[start..index]);
             start = index;
             width = 0;
         }
-        index += bytes;
-        width += character_width;
+        index += token.bytes;
+        width += token.width;
     }
     if start < text.len() {
         lines.push(&text[start..]);
@@ -119,11 +144,84 @@ pub(super) fn wrap_big5_lines(text: &[u8], max_width: usize) -> Vec<&[u8]> {
     lines
 }
 
-fn dialog_token(text: &[u8], index: usize) -> (usize, usize) {
-    match text[index] {
-        b'-' | b'\'' | b'@' | b'"' | b'(' | b')' | b'\\' => (1, 0),
-        b'$' | b'~' => ((text.len() - index).min(3), 0),
-        byte if byte >= 0x80 && index + 1 < text.len() => (2, 16),
-        _ => (1, 8),
+pub(super) fn dialog_glyph_count(text: &[u8]) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < text.len() {
+        let token = dialog_token(text, index);
+        if token.kind == DialogTokenKind::Glyph {
+            count += 1;
+        }
+        index += token.bytes;
+        if matches!(token.kind, DialogTokenKind::Terminate(_)) {
+            break;
+        }
     }
+    count
+}
+
+pub(super) fn dialog_page_glyph_target(text: &TextLibrary, dialog: &ActiveDialog) -> usize {
+    dialog_body_lines(text, dialog)
+        .iter()
+        .take((dialog.page + 1) * 4)
+        .map(|line| dialog_glyph_count(line))
+        .sum()
+}
+
+pub(super) fn dialog_token(text: &[u8], index: usize) -> DialogToken {
+    let remaining = text.len() - index;
+    let numeric_control = |kind: fn(u16) -> DialogTokenKind| DialogToken {
+        bytes: remaining.min(3),
+        width: 0,
+        kind: kind(parse_two_digits(text.get(index + 1..index + 3))),
+    };
+    match text[index] {
+        b'\\' if remaining >= 2 => DialogToken {
+            bytes: 2,
+            width: 8,
+            kind: DialogTokenKind::Glyph,
+        },
+        b'-' | b'\'' | b'@' | b'"' => DialogToken {
+            bytes: 1,
+            width: 0,
+            kind: DialogTokenKind::Color,
+        },
+        b'(' => DialogToken {
+            bytes: 1,
+            width: 0,
+            kind: DialogTokenKind::Icon(2),
+        },
+        b')' => DialogToken {
+            bytes: 1,
+            width: 0,
+            kind: DialogTokenKind::Icon(1),
+        },
+        b'$' => numeric_control(DialogTokenKind::Delay),
+        b'~' => numeric_control(DialogTokenKind::Terminate),
+        b'\r' | b'\n' => DialogToken {
+            bytes: 1,
+            width: 0,
+            kind: DialogTokenKind::LineBreak,
+        },
+        byte if byte >= 0x80 && remaining >= 2 => DialogToken {
+            bytes: 2,
+            width: 16,
+            kind: DialogTokenKind::Glyph,
+        },
+        _ => DialogToken {
+            bytes: 1,
+            width: 8,
+            kind: DialogTokenKind::Glyph,
+        },
+    }
+}
+
+fn parse_two_digits(bytes: Option<&[u8]>) -> u16 {
+    let Some([tens, ones]) = bytes else {
+        return 0;
+    };
+    if !tens.is_ascii_digit() || !ones.is_ascii_digit() {
+        return 0;
+    }
+    u16::from(tens - b'0') * 10 + u16::from(ones - b'0')
 }

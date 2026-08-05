@@ -1,6 +1,6 @@
 use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::bitmap::Bitmap;
-use pal_assets::palette::PaletteSet;
+use pal_assets::palette::{Palette, PaletteSet};
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::BattleEvent;
@@ -30,6 +30,7 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) text: &'a TextLibrary,
     pub(super) font: &'a BitmapFont,
     pub(super) dialog_faces: &'a [Option<RleBitmap>],
+    pub(super) dialog_icons: &'a [RleBitmap],
     pub(super) ui_sprites: &'a [RleBitmap],
     pub(super) item_sprites: &'a [Option<RleBitmap>],
     pub(super) enemy_battle_sprites: &'a BattleSpriteArchive,
@@ -55,7 +56,20 @@ pub(super) fn render_game(
     script: ScriptDebugSnapshot,
     ui: UiRenderContext<'_>,
 ) {
-    if let Ok(palette) = ui.visual.palette(ui.palettes) {
+    if let Ok(mut palette) = ui.visual.palette(ui.palettes) {
+        if ui.dialog.is_some_and(|dialog| {
+            dialog.awaiting_input
+                && !matches!(
+                    dialog.position,
+                    pal_core::script::DialogPosition::Center
+                        | pal_core::script::DialogPosition::CenterWindow
+                )
+        }) {
+            cycle_dialog_icon_palette(
+                &mut palette,
+                ui.dialog.map_or(0, |dialog| dialog.wait_palette_ticks),
+            );
+        }
         renderer.set_palette(&palette);
     }
     let override_rendered = ui.visual.render_override(renderer);
@@ -79,32 +93,38 @@ pub(super) fn render_game(
                     event_ticks: ui.battle_event_ticks,
                 },
             );
-            ui.visual.apply_post_effects(renderer, role_sprites);
-            return;
-        }
-        let viewport = Viewport::from(game.camera);
-        let roles = std::iter::once(&game.player)
-            .chain(game.party_followers())
-            .cloned()
-            .collect::<Vec<_>>();
-        render_tile_map(
-            renderer,
-            &game.map,
-            Some(role_sprites),
-            &roles,
-            &game.scene_objects,
-            viewport,
-        );
-        if show_collision {
-            render_collision_overlay(renderer, &game.map, &game.player, viewport);
-        }
-        if show_objects {
-            let focused_object_id = focused_debug_object(game, script).map(|object| object.id);
-            render_object_overlay(renderer, &game.scene_objects, viewport, focused_object_id);
+        } else {
+            let viewport = Viewport::from(game.camera);
+            let roles = std::iter::once(&game.player)
+                .chain(game.party_followers())
+                .cloned()
+                .collect::<Vec<_>>();
+            render_tile_map(
+                renderer,
+                &game.map,
+                Some(role_sprites),
+                &roles,
+                &game.scene_objects,
+                viewport,
+            );
+            if show_collision {
+                render_collision_overlay(renderer, &game.map, &game.player, viewport);
+            }
+            if show_objects {
+                let focused_object_id = focused_debug_object(game, script).map(|object| object.id);
+                render_object_overlay(renderer, &game.scene_objects, viewport, focused_object_id);
+            }
         }
     }
     if let Some(dialog) = ui.dialog {
-        render_dialog(renderer, ui.text, ui.font, ui.dialog_faces, dialog);
+        render_dialog(
+            renderer,
+            ui.text,
+            ui.font,
+            ui.dialog_faces,
+            ui.dialog_icons,
+            dialog,
+        );
     } else if let Some(menu) = ui.confirmation_menu {
         render_confirmation_menu(
             renderer,
@@ -152,4 +172,9 @@ pub(super) fn render_game(
         );
     }
     ui.visual.apply_post_effects(renderer, role_sprites);
+}
+
+pub(super) fn cycle_dialog_icon_palette(palette: &mut Palette, ticks: u64) {
+    let phase = usize::try_from((ticks / 2) % 6).unwrap_or(0);
+    palette.colors[0xf9..=0xfe].rotate_left(phase);
 }

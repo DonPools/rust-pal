@@ -52,6 +52,7 @@ use debug_render::{
 };
 #[cfg(test)]
 use dialog::ActiveDialog;
+use dialog::{advance_dialog_playback, DialogPlayback};
 #[cfg(test)]
 use dialog_text::dialog_body_lines;
 use dialog_text::dialog_page_count;
@@ -87,6 +88,7 @@ pub fn run_game_window<L>(
         text,
         font,
         dialog_faces,
+        dialog_icons,
         ui_sprites,
         item_sprites,
         enemy_battle_sprites,
@@ -161,6 +163,7 @@ pub fn run_game_window<L>(
             text: &text,
             font: &font,
             dialog_faces: &dialog_faces,
+            dialog_icons: &dialog_icons,
             ui_sprites: &ui_sprites,
             item_sprites: &item_sprites,
             enemy_battle_sprites: &enemy_battle_sprites,
@@ -287,6 +290,7 @@ pub fn run_game_window<L>(
                                     text: &text,
                                     font: &font,
                                     dialog_faces: &dialog_faces,
+                                    dialog_icons: &dialog_icons,
                                     ui_sprites: &ui_sprites,
                                     item_sprites: &item_sprites,
                                     enemy_battle_sprites: &enemy_battle_sprites,
@@ -483,6 +487,12 @@ pub fn run_game_window<L>(
                         let awaiting_input = dialog
                             .as_ref()
                             .is_some_and(|active_dialog| active_dialog.awaiting_input);
+                        if awaiting_input {
+                            let active_dialog = dialog.as_mut().expect("dialog was checked above");
+                            active_dialog.wait_palette_ticks =
+                                active_dialog.wait_palette_ticks.wrapping_add(1);
+                            changed = true;
+                        }
                         let timed_out = if awaiting_input {
                             dialog
                                 .as_mut()
@@ -500,6 +510,9 @@ pub fn run_game_window<L>(
                             let page_count = dialog_page_count(&text, active_dialog);
                             if active_dialog.page + 1 < page_count {
                                 active_dialog.page += 1;
+                                active_dialog.awaiting_input = false;
+                                active_dialog.auto_wait_ticks = None;
+                                active_dialog.wait_palette_ticks = 0;
                             } else if let Some(pending) = script_services.pending_dialog.take() {
                                 dialog = Some(pending);
                             } else {
@@ -523,24 +536,39 @@ pub fn run_game_window<L>(
                                 );
                             }
                         } else if !awaiting_input {
-                            let active_scripts = if battle_scripts.is_active() {
-                                &mut battle_scripts
-                            } else {
-                                &mut scripts
-                            };
-                            advance_script(
-                                active_scripts,
-                                &mut game,
-                                &mut dialog,
-                                ScriptRenderResources {
-                                    text: &text,
-                                    role_sprites: &role_sprites,
-                                },
-                                &mut load_scene,
-                                &mut script_services,
-                                &mut |title| window.set_title(title),
+                            let playback = advance_dialog_playback(
+                                &text,
+                                dialog.as_mut().expect("dialog was checked above"),
+                                &mut script_services.dialog_delay_ms,
+                                UPDATE_INTERVAL_MS as u32,
+                                sampled.confirm || sampled.cancel,
                             );
                             changed = true;
+                            if matches!(
+                                playback,
+                                DialogPlayback::ContinueScript | DialogPlayback::AutoClose
+                            ) {
+                                if playback == DialogPlayback::AutoClose {
+                                    dialog = None;
+                                }
+                                let active_scripts = if battle_scripts.is_active() {
+                                    &mut battle_scripts
+                                } else {
+                                    &mut scripts
+                                };
+                                advance_script(
+                                    active_scripts,
+                                    &mut game,
+                                    &mut dialog,
+                                    ScriptRenderResources {
+                                        text: &text,
+                                        role_sprites: &role_sprites,
+                                    },
+                                    &mut load_scene,
+                                    &mut script_services,
+                                    &mut |title| window.set_title(title),
+                                );
+                            }
                         }
                     } else if game.battle().is_some() {
                         if battle_scripts.is_active() {
@@ -697,6 +725,7 @@ pub fn run_game_window<L>(
                             text: &text,
                             font: &font,
                             dialog_faces: &dialog_faces,
+                            dialog_icons: &dialog_icons,
                             ui_sprites: &ui_sprites,
                             item_sprites: &item_sprites,
                             enemy_battle_sprites: &enemy_battle_sprites,
@@ -744,6 +773,8 @@ fn update_debug_title(
 mod tests {
     use super::*;
     use crate::window::dialog_text::{dialog_text_width, dialog_title};
+    use crate::window::presentation::cycle_dialog_icon_palette;
+    use crate::window::text_render::dialog_color_after;
 
     fn text_library(messages: &[&[u8]]) -> TextLibrary {
         let word_data = [b' '; 10];
@@ -828,15 +859,9 @@ mod tests {
     #[test]
     fn dialog_title_does_not_consume_one_of_four_body_lines() {
         let text = text_library(&[b"Name:", b"one", b"two", b"three", b"four"]);
-        let dialog = ActiveDialog {
-            message_ids: vec![0, 1, 2, 3, 4],
-            position: DialogPosition::Upper,
-            font_color: 0x4f,
-            face_index: None,
-            page: 0,
-            awaiting_input: true,
-            auto_wait_ticks: None,
-        };
+        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, 24);
+        dialog.message_ids = vec![0, 1, 2, 3, 4];
+        dialog.awaiting_input = true;
         assert_eq!(dialog_title(&text, &dialog), Some(b"Name:".as_slice()));
         assert_eq!(dialog_body_lines(&text, &dialog).len(), 4);
         assert_eq!(dialog_page_count(&text, &dialog), 1);
@@ -847,6 +872,73 @@ mod tests {
         assert_eq!(dialog_text_width(b"A-$03B"), 16);
         let lines = wrap_big5_lines(b"A-$03B", 8);
         assert_eq!(lines, [b"A-$03".as_slice(), b"B".as_slice()]);
+        assert_eq!(dialog_text_width(br"A\$B"), 24);
+        assert_eq!(wrap_big5_lines(b"A~70ignored", 80), [b"A~70".as_slice()]);
+        assert_eq!(dialog_color_after(b"-cyan", 0x4f), 0x8d);
+        assert_eq!(dialog_color_after(b"still cyan-", 0x8d), 0x4f);
+        assert_eq!(dialog_color_after(br#"\"literal"#, 0x4f), 0x4f);
+    }
+
+    #[test]
+    fn dialog_playback_applies_speed_terminal_delay_and_icon_controls() {
+        let text = text_library(&[b"A$07BC", b"A~70ignored", b"A)"]);
+        let mut persistent_delay = 24;
+        let mut dialog = ActiveDialog::new(0, DialogPosition::Upper, 0x4f, None, 24);
+        assert_eq!(
+            advance_dialog_playback(&text, &mut dialog, &mut persistent_delay, 24, false),
+            DialogPlayback::Revealing
+        );
+        assert_eq!(dialog.revealed_glyphs, 1);
+        assert_eq!(persistent_delay, 80);
+        assert_eq!(
+            advance_dialog_playback(&text, &mut dialog, &mut persistent_delay, 79, false),
+            DialogPlayback::Revealing
+        );
+        assert_eq!(dialog.revealed_glyphs, 1);
+        assert_eq!(
+            advance_dialog_playback(&text, &mut dialog, &mut persistent_delay, 1, false),
+            DialogPlayback::Revealing
+        );
+        assert_eq!(dialog.revealed_glyphs, 2);
+
+        let mut terminal = ActiveDialog::new(1, DialogPosition::Upper, 0x4f, None, 24);
+        assert_eq!(
+            advance_dialog_playback(&text, &mut terminal, &mut persistent_delay, 0, true),
+            DialogPlayback::Revealing
+        );
+        assert_eq!(terminal.terminal_wait_ms, Some(800));
+        assert_eq!(
+            advance_dialog_playback(&text, &mut terminal, &mut persistent_delay, 799, false),
+            DialogPlayback::Revealing
+        );
+        assert_eq!(
+            advance_dialog_playback(&text, &mut terminal, &mut persistent_delay, 1, false),
+            DialogPlayback::AutoClose
+        );
+
+        let mut icon = ActiveDialog::new(2, DialogPosition::Upper, 0x4f, None, 24);
+        icon.wait_after_reveal = true;
+        assert_eq!(
+            advance_dialog_playback(&text, &mut icon, &mut persistent_delay, 0, true),
+            DialogPlayback::AwaitingInput
+        );
+        assert_eq!(icon.wait_icon, 1);
+    }
+
+    #[test]
+    fn dialog_wait_palette_cycles_original_six_icon_colors() {
+        let mut palette = pal_assets::palette::Palette::default();
+        for (index, color) in palette.colors[0xf9..=0xfe].iter_mut().enumerate() {
+            color.r = index as u8;
+        }
+        cycle_dialog_icon_palette(&mut palette, 2);
+        assert_eq!(
+            palette.colors[0xf9..=0xfe]
+                .iter()
+                .map(|color| color.r)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 0]
+        );
     }
 
     #[test]

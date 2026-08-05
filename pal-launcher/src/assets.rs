@@ -104,6 +104,15 @@ pub(super) fn load_dialog_faces(data_dir: &Path) -> Option<Vec<Option<RleBitmap>
     )
 }
 
+pub(super) fn load_dialog_icons(data_dir: &Path) -> Option<Vec<RleBitmap>> {
+    let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
+    let archive = MkfArchive::new(&data)?;
+    let chunk = archive.read_chunk(12)?;
+    let sprite = Sprite::from_gop_chunk(chunk).or_else(|| sprite_from_yj1_chunk(chunk))?;
+    let frames = sprite.decode_frames()?;
+    (frames.len() >= 3).then_some(frames)
+}
+
 pub(super) fn load_ui_sprites(data_dir: &Path) -> Option<Vec<RleBitmap>> {
     let data = std::fs::read(data_dir.join("DATA.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
