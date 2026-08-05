@@ -12,8 +12,43 @@ use super::menu_state::{
 };
 use super::visual::VisualState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingSceneChange {
+    source_scene: u16,
+    target_scene: u16,
+}
+
+impl PendingSceneChange {
+    /// Update the logical scene immediately while keeping the loaded scene
+    /// available until the current trigger script returns to the frame loop.
+    pub(super) fn request(
+        pending: &mut Option<Self>,
+        logical_scene: &mut u16,
+        target_scene: u16,
+    ) -> bool {
+        if target_scene == 0 || target_scene == *logical_scene {
+            return false;
+        }
+        let source_scene = pending.map_or(*logical_scene, |change| change.source_scene);
+        *logical_scene = target_scene;
+        *pending = Some(Self {
+            source_scene,
+            target_scene,
+        });
+        true
+    }
+
+    pub(super) fn source_scene(self) -> u16 {
+        self.source_scene
+    }
+
+    pub(super) fn target_scene(self) -> u16 {
+        self.target_scene
+    }
+}
+
 pub(super) struct SessionState {
-    pub(super) pending_enter_script: Option<u16>,
+    pub(super) pending_scene_change: Option<PendingSceneChange>,
     pub(super) pending_dialog: Option<ActiveDialog>,
     pub(super) field_menu: Option<FieldMenu>,
     pub(super) main_menu_selected: usize,
@@ -54,7 +89,7 @@ impl SessionState {
         sound_font: &[u8],
     ) -> Self {
         Self {
-            pending_enter_script: None,
+            pending_scene_change: None,
             pending_dialog: None,
             field_menu: None,
             main_menu_selected: 0,
@@ -87,5 +122,39 @@ impl SessionState {
             quit_requested: false,
             current_save_slot: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PendingSceneChange;
+
+    #[test]
+    fn scene_change_keeps_the_loaded_source_while_updating_the_logical_target() {
+        let mut pending = None;
+        let mut logical_scene = 1;
+
+        assert!(PendingSceneChange::request(
+            &mut pending,
+            &mut logical_scene,
+            3
+        ));
+        assert_eq!(logical_scene, 3);
+        assert_eq!(pending.unwrap().source_scene(), 1);
+        assert_eq!(pending.unwrap().target_scene(), 3);
+
+        assert!(!PendingSceneChange::request(
+            &mut pending,
+            &mut logical_scene,
+            3
+        ));
+        assert!(PendingSceneChange::request(
+            &mut pending,
+            &mut logical_scene,
+            1
+        ));
+        assert_eq!(logical_scene, 1);
+        assert_eq!(pending.unwrap().source_scene(), 1);
+        assert_eq!(pending.unwrap().target_scene(), 1);
     }
 }

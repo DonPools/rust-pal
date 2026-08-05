@@ -261,7 +261,7 @@ pub fn run_game_window<L>(
                                             script_services.field_menu = None;
                                             script_services.shop_menu = None;
                                             script_services.confirmation_menu = None;
-                                            script_services.pending_enter_script = None;
+                                            script_services.pending_scene_change = None;
                                             input = HeldInput::default();
                                             window.set_title("Rust-PAL [Snapshot restored]");
                                         }
@@ -714,6 +714,18 @@ pub fn run_game_window<L>(
                         || script_services.shop_menu.is_some();
                     if script_is_paused && script_services.visual.queue_automatic_scene_fade_in() {
                         changed = true;
+                    }
+                    match script_services.visual.start_pending(
+                        renderer.screen(),
+                        &palettes,
+                        &fbp_archive,
+                        &rng_archive,
+                        &role_sprites,
+                    ) {
+                        Ok(visual_changed) => changed |= visual_changed,
+                        Err(error) => {
+                            window.set_title(&format!("Rust-PAL [visual error: {error}]"));
+                        }
                     }
                     accumulator -= tick;
                 }

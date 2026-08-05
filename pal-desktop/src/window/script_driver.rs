@@ -13,6 +13,8 @@ use super::menu_state::{
 use super::session::SessionState;
 use super::LoadedScene;
 
+const MAX_IMMEDIATE_SCENE_SETUP_EVENTS: usize = 8;
+
 #[derive(Clone, Copy)]
 pub(super) struct ScriptRenderResources<'a> {
     pub(super) text: &'a TextLibrary,
@@ -27,6 +29,34 @@ pub(super) fn advance_script<L>(
     load_scene: &mut L,
     services: &mut SessionState,
     set_title: &mut impl FnMut(&str),
+) where
+    L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
+{
+    // Original trigger scripts execute coordinate setup and scene selection
+    // synchronously. Keep those events in one desktop update so no intermediate
+    // scene frame is presented before a following fade-out.
+    advance_script_with_budget(
+        scripts,
+        game,
+        dialog,
+        resources,
+        load_scene,
+        services,
+        set_title,
+        MAX_IMMEDIATE_SCENE_SETUP_EVENTS,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_script_with_budget<L>(
+    scripts: &mut ScriptRuntime,
+    game: &mut GameState,
+    dialog: &mut Option<ActiveDialog>,
+    resources: ScriptRenderResources<'_>,
+    load_scene: &mut L,
+    services: &mut SessionState,
+    set_title: &mut impl FnMut(&str),
+    immediate_budget: usize,
 ) where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
@@ -144,22 +174,46 @@ pub(super) fn advance_script<L>(
         Some(ScriptEvent::WaitForKey) => services.waiting_for_key = true,
         Some(ScriptEvent::LoadLastSave) => services.load_last_save_requested = true,
         Some(ScriptEvent::QuitGame) => services.quit_requested = true,
-        Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
-            if scene_number == game.scene_number {
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::SetPlayerPosition { .. },
+        )) => {
+            if !game.apply_script_action(action) {
+                set_title("Rust-PAL [script target is unavailable]");
                 return;
             }
-            let Some(scene) = load_scene(
+            if immediate_budget > 1 {
+                advance_script_with_budget(
+                    scripts,
+                    game,
+                    dialog,
+                    resources,
+                    load_scene,
+                    services,
+                    set_title,
+                    immediate_budget - 1,
+                );
+            }
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
+            if super::session::PendingSceneChange::request(
+                &mut services.pending_scene_change,
+                &mut game.scene_number,
                 scene_number,
-                game.scene_map_override(scene_number),
-                resources.role_sprites,
-            ) else {
-                set_title("Rust-PAL [failed to load scene]");
-                return;
-            };
-            game.replace_scene(scene.number, scene.map, scene.objects);
-            let enter_script = game.scene_enter_script(scene.enter_script);
-            services.pending_enter_script = (enter_script != 0).then_some(enter_script);
-            set_title(&format!("Rust-PAL [scene {}]", scene.number));
+            ) {
+                set_title(&format!("Rust-PAL [scene {scene_number}]"));
+            }
+            if immediate_budget > 1 {
+                advance_script_with_budget(
+                    scripts,
+                    game,
+                    dialog,
+                    resources,
+                    load_scene,
+                    services,
+                    set_title,
+                    immediate_budget - 1,
+                );
+            }
         }
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SetSceneMap {
@@ -172,7 +226,7 @@ pub(super) fn advance_script<L>(
                 set_title("Rust-PAL [invalid scene map]");
                 return;
             }
-            if target_scene == game.scene_number {
+            if services.pending_scene_change.is_none() && target_scene == game.scene_number {
                 let Some(scene) = load_scene(
                     target_scene,
                     game.scene_map_override(target_scene),
@@ -536,7 +590,10 @@ pub(super) fn advance_script<L>(
                 }
                 return;
             } else if trigger.object_id == 0xffff {
-                game.update_scene_enter_script(next_entry);
+                let completed_scene = services
+                    .pending_scene_change
+                    .map_or(game.scene_number, |change| change.source_scene());
+                game.update_scene_enter_script_for(completed_scene, next_entry);
             } else if let Some(object) = game
                 .scene_objects
                 .iter_mut()
@@ -544,13 +601,14 @@ pub(super) fn advance_script<L>(
             {
                 object.trigger_script = next_entry;
             }
-            if let Some(entry) = services.pending_enter_script.take() {
-                scripts.start(pal_core::scene::TriggerRequest {
-                    object_id: 0xffff,
-                    script_entry: entry,
-                    kind: TriggerKind::Touch,
-                });
-            } else {
+            if !finish_pending_scene_change(
+                scripts,
+                game,
+                resources.role_sprites,
+                load_scene,
+                services,
+                set_title,
+            ) {
                 set_title("Rust-PAL");
             }
             if let Some(active) = dialog.as_mut() {
@@ -562,6 +620,7 @@ pub(super) fn advance_script<L>(
             entry,
             opcode,
         }) => {
+            cancel_pending_scene_change(game, services);
             if trigger.kind == TriggerKind::Battle {
                 game.finish_battle_script(trigger.script_entry, false);
             }
@@ -572,6 +631,7 @@ pub(super) fn advance_script<L>(
             ));
         }
         Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
+            cancel_pending_scene_change(game, services);
             if trigger.kind == TriggerKind::Battle {
                 game.finish_battle_script(trigger.script_entry, false);
             }
@@ -579,6 +639,7 @@ pub(super) fn advance_script<L>(
             set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
         }
         Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
+            cancel_pending_scene_change(game, services);
             if trigger.kind == TriggerKind::Battle {
                 game.finish_battle_script(trigger.script_entry, false);
             }
@@ -586,6 +647,49 @@ pub(super) fn advance_script<L>(
             set_title(&format!("Rust-PAL [script loop at {entry}]"));
         }
         None => {}
+    }
+}
+
+fn finish_pending_scene_change<L>(
+    scripts: &mut ScriptRuntime,
+    game: &mut GameState,
+    role_sprites: &RoleSprites,
+    load_scene: &mut L,
+    services: &mut SessionState,
+    set_title: &mut impl FnMut(&str),
+) -> bool
+where
+    L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
+{
+    let Some(change) = services.pending_scene_change.take() else {
+        return false;
+    };
+    let target_scene = change.target_scene();
+    let Some(scene) = load_scene(
+        target_scene,
+        game.scene_map_override(target_scene),
+        role_sprites,
+    ) else {
+        game.scene_number = change.source_scene();
+        set_title("Rust-PAL [failed to load scene]");
+        return true;
+    };
+    game.replace_scene(scene.number, scene.map, scene.objects);
+    let enter_script = game.scene_enter_script(scene.enter_script);
+    if enter_script != 0 {
+        scripts.start(pal_core::scene::TriggerRequest {
+            object_id: 0xffff,
+            script_entry: enter_script,
+            kind: TriggerKind::Touch,
+        });
+    }
+    set_title(&format!("Rust-PAL [scene {}]", scene.number));
+    true
+}
+
+fn cancel_pending_scene_change(game: &mut GameState, services: &mut SessionState) {
+    if let Some(change) = services.pending_scene_change.take() {
+        game.scene_number = change.source_scene();
     }
 }
 

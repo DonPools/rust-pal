@@ -5,7 +5,9 @@ use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
 use pal_assets::save::OriginalSave;
 use pal_assets::voc::VocClip;
 use pal_core::battle::{BattlePhase, BattleResult, BattleStatus};
-use pal_core::script::{ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime};
+use pal_core::script::{
+    ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual,
+};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
 use pal_desktop::window::{
     render_battle, render_tile_map, BattleRenderResources, BattleRenderState, Viewport,
@@ -915,20 +917,26 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert_eq!(exit_trigger.object_id, 4);
     assert_eq!(exit_trigger.script_entry, 4475);
     assert!(scripts.start(exit_trigger));
-    let mut switched_scene = None;
-    loop {
+    let source_map_number = game.map.map_num;
+    let mut pending_scene_change = None;
+    let mut faded_source_scene = false;
+    let switched_scene = loop {
         match scripts
             .advance()
             .expect("exit script stopped without an event")
         {
             ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number }) => {
-                let loaded =
-                    load_runtime_scene(&data_dir, &scene_data, scene_number, &role_sprites)
-                        .expect("exit script target scene could not be loaded");
-                game.replace_scene(loaded.number, loaded.map, loaded.objects);
-                switched_scene = Some(scene_number);
+                let source_scene = pending_scene_change
+                    .map_or(game.scene_number, |(source_scene, _)| source_scene);
+                game.scene_number = scene_number;
+                pending_scene_change = Some((source_scene, scene_number));
             }
             ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
+            ScriptEvent::Visual(ScriptVisual::FadeOut { .. }) => {
+                assert!(pending_scene_change.is_some());
+                assert_eq!(game.map.map_num, source_map_number);
+                faded_source_scene = true;
+            }
             ScriptEvent::Waiting => {}
             ScriptEvent::Delay
             | ScriptEvent::Confirm { .. }
@@ -937,11 +945,24 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::FadeScene { .. }
             | ScriptEvent::Visual(_)
             | ScriptEvent::WaitForKey => {}
-            ScriptEvent::Completed { .. } => break,
+            ScriptEvent::Completed { .. } => {
+                assert!(
+                    faded_source_scene,
+                    "scene 1 was replaced before its fade-out"
+                );
+                let (_, scene_number) = pending_scene_change
+                    .take()
+                    .expect("exit script completed without a pending scene change");
+                let loaded =
+                    load_runtime_scene(&data_dir, &scene_data, scene_number, &role_sprites)
+                        .expect("exit script target scene could not be loaded");
+                game.replace_scene(loaded.number, loaded.map, loaded.objects);
+                break scene_number;
+            }
             event => panic!("exit script did not complete: {event:?}"),
         }
-    }
-    assert_eq!(switched_scene, Some(3));
+    };
+    assert_eq!(switched_scene, 3);
     assert_eq!(game.scene_number, 3);
 
     let inn_trigger = pal_core::scene::TriggerRequest {
@@ -1046,16 +1067,15 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert_eq!(stairs_trigger.object_id, 46);
     assert_eq!(stairs_trigger.script_entry, 4659);
     assert!(scripts.start(stairs_trigger));
+    let mut pending_scene_change = None;
     loop {
         match scripts
             .advance()
             .expect("stairs script stopped without an event")
         {
             ScriptEvent::Action(ScriptAction::ChangeScene { scene_number }) => {
-                let loaded =
-                    load_runtime_scene(&data_dir, &scene_data, scene_number, &role_sprites)
-                        .expect("stairs target scene could not be loaded");
-                game.replace_scene(loaded.number, loaded.map, loaded.objects);
+                game.scene_number = scene_number;
+                pending_scene_change = Some(scene_number);
             }
             ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
             ScriptEvent::Delay
@@ -1066,7 +1086,16 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             | ScriptEvent::FadeScene { .. }
             | ScriptEvent::Visual(_)
             | ScriptEvent::WaitForKey => {}
-            ScriptEvent::Completed { .. } => break,
+            ScriptEvent::Completed { .. } => {
+                let scene_number = pending_scene_change
+                    .take()
+                    .expect("stairs script completed without a pending scene change");
+                let loaded =
+                    load_runtime_scene(&data_dir, &scene_data, scene_number, &role_sprites)
+                        .expect("stairs target scene could not be loaded");
+                game.replace_scene(loaded.number, loaded.map, loaded.objects);
+                break;
+            }
             event => panic!("stairs script did not complete: {event:?}"),
         }
     }

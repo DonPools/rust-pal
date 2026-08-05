@@ -1953,8 +1953,13 @@ impl<M: CollisionMap> GameState<M> {
     }
 
     pub fn update_scene_enter_script(&mut self, next_entry: u16) {
-        self.scene_enter_scripts
-            .insert(self.scene_number, next_entry);
+        self.update_scene_enter_script_for(self.scene_number, next_entry);
+    }
+
+    /// Persist an enter-script entry for a scene whose trigger is completing
+    /// while a later scene number is already logically selected.
+    pub fn update_scene_enter_script_for(&mut self, scene_number: u16, next_entry: u16) {
+        self.scene_enter_scripts.insert(scene_number, next_entry);
     }
 
     pub fn scene_teleport_script(&mut self, default_entry: u16) -> u16 {
@@ -6447,9 +6452,10 @@ mod tests {
         state.update_scene_enter_script(101);
         assert_eq!(state.scene_enter_script(999), 101);
 
+        state.update_scene_enter_script_for(5, 201);
+
         state.replace_scene(5, test_map(), Vec::new());
-        assert_eq!(state.scene_enter_script(200), 200);
-        state.update_scene_enter_script(201);
+        assert_eq!(state.scene_enter_script(200), 201);
         let snapshot = state.snapshot();
 
         state.update_scene_enter_script(202);

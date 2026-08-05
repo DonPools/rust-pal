@@ -21,6 +21,7 @@ pub(super) struct VisualState {
     tint_color: (u8, u8, u8),
     tint_amount: u8,
     needs_scene_fade_in: bool,
+    fade_screen_frozen: bool,
     screen_wave: i32,
     wave_progression: i16,
     wave_phase: i16,
@@ -95,6 +96,7 @@ impl VisualState {
             tint_color: (0, 0, 0),
             tint_amount: 0,
             needs_scene_fade_in: false,
+            fade_screen_frozen: false,
             screen_wave: 0,
             wave_progression: 0,
             wave_phase: 0,
@@ -143,6 +145,7 @@ impl VisualState {
         self.indexed_screen = None;
         self.rgba_screen = None;
         self.ending_effect_sprite = 0;
+        self.fade_screen_frozen = false;
         self.pending = Some(ScriptVisual::FadeIn { speed: 1 });
         true
     }
@@ -158,6 +161,7 @@ impl VisualState {
         self.brightness = 64;
         self.tint_amount = 0;
         self.needs_scene_fade_in = false;
+        self.fade_screen_frozen = false;
         self.screen_wave = i32::from(screen_wave);
         self.wave_progression = 0;
         self.wave_phase = 0;
@@ -174,11 +178,7 @@ impl VisualState {
         rng: &RngArchive,
         role_sprites: &RoleSprites,
     ) -> Result<bool, String> {
-        let mut changed = false;
-        if let Some(command) = self.pending.take() {
-            self.start(command, current_screen, palettes, fbp, rng, role_sprites)?;
-            changed = true;
-        }
+        let mut changed = self.start_pending(current_screen, palettes, fbp, rng, role_sprites)?;
 
         if let Some(effect) = self.effect.take() {
             self.effect = self.advance_effect(effect, rng)?;
@@ -200,6 +200,24 @@ impl VisualState {
         Ok(changed)
     }
 
+    /// Start a command queued during the current script tick before world state
+    /// is rendered again. Fade-out can therefore capture the frame that was
+    /// actually visible when the trigger began.
+    pub(super) fn start_pending(
+        &mut self,
+        current_screen: &[u8],
+        palettes: &[PaletteSet],
+        fbp: &FbpArchive,
+        rng: &RngArchive,
+        role_sprites: &RoleSprites,
+    ) -> Result<bool, String> {
+        let Some(command) = self.pending.take() else {
+            return Ok(false);
+        };
+        self.start(command, current_screen, palettes, fbp, rng, role_sprites)?;
+        Ok(true)
+    }
+
     fn start(
         &mut self,
         command: ScriptVisual,
@@ -209,6 +227,12 @@ impl VisualState {
         rng: &RngArchive,
         role_sprites: &RoleSprites,
     ) -> Result<(), String> {
+        if !matches!(
+            command,
+            ScriptVisual::FadeOut { .. } | ScriptVisual::FadeIn { .. }
+        ) {
+            self.fade_screen_frozen = false;
+        }
         match command {
             ScriptVisual::Shake { frames, level } => {
                 self.shake_remaining = frames;
@@ -253,6 +277,9 @@ impl VisualState {
             }
             ScriptVisual::FadeOut { speed } => {
                 self.needs_scene_fade_in = true;
+                self.indexed_screen = None;
+                self.rgba_screen = Some(current_screen.to_vec());
+                self.fade_screen_frozen = true;
                 self.effect = Some(VisualEffect::Fade {
                     start: self.brightness,
                     end: 0,
@@ -454,6 +481,10 @@ impl VisualState {
                 *progress = progress.saturating_add(1).min(*total);
                 self.brightness = interpolate(*start, *end, *progress, *total);
                 if progress == total {
+                    if *end == 64 && self.fade_screen_frozen {
+                        self.rgba_screen = None;
+                        self.fade_screen_frozen = false;
+                    }
                     return Ok(None);
                 }
             }
@@ -1100,6 +1131,7 @@ mod tests {
         assert_eq!(ticks, 12);
         assert_eq!(visual.brightness, 0);
         assert!(visual.needs_scene_fade_in);
+        assert_eq!(visual.rgba_screen.as_deref(), Some(current.as_slice()));
 
         assert!(visual.queue(ScriptVisual::FadeIn { speed: 1 }));
         while visual.is_blocking() {
@@ -1109,6 +1141,23 @@ mod tests {
         }
         assert_eq!(visual.brightness, 64);
         assert!(!visual.needs_scene_fade_in);
+        assert!(visual.rgba_screen.is_none());
+        assert!(!visual.fade_screen_frozen);
+    }
+
+    #[test]
+    fn fade_out_freezes_the_frame_visible_when_the_command_starts() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![17; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+        assert!(visual.queue(ScriptVisual::FadeOut { speed: 1 }));
+        assert!(visual
+            .start_pending(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap());
+
+        assert_eq!(visual.rgba_screen.as_deref(), Some(current.as_slice()));
+        assert_eq!(visual.brightness, 64);
+        assert!(visual.fade_screen_frozen);
     }
 
     #[test]
@@ -1128,9 +1177,11 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(visual.brightness, 0);
+        assert!(visual.rgba_screen.is_some());
 
         assert!(visual.queue_automatic_scene_fade_in());
         assert!(visual.indexed_screen.is_none());
+        assert!(visual.rgba_screen.is_none());
         while visual.is_blocking() {
             visual
                 .update(&current, &palettes, &fbp, &rng, &role_sprites)
