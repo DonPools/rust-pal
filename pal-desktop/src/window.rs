@@ -184,6 +184,7 @@ pub fn run_game_window<L>(
             battle_backgrounds: &battle_backgrounds,
             battle_selected_enemy: script_services.battle_selected_enemy,
             battle_command_selected: script_services.battle_command_selected,
+            battle_targeting_enemy: script_services.battle_targeting_enemy,
             battle_event: script_services.battle_events.front().copied(),
             battle_event_ticks: script_services.battle_event_ticks,
             status_background: &status_background,
@@ -327,6 +328,7 @@ pub fn run_game_window<L>(
                                     battle_selected_enemy: script_services.battle_selected_enemy,
                                     battle_command_selected: script_services
                                         .battle_command_selected,
+                                    battle_targeting_enemy: script_services.battle_targeting_enemy,
                                     battle_event: script_services.battle_events.front().copied(),
                                     battle_event_ticks: script_services.battle_event_ticks,
                                     status_background: &status_background,
@@ -945,6 +947,7 @@ pub fn run_game_window<L>(
                             battle_backgrounds: &battle_backgrounds,
                             battle_selected_enemy: script_services.battle_selected_enemy,
                             battle_command_selected: script_services.battle_command_selected,
+                            battle_targeting_enemy: script_services.battle_targeting_enemy,
                             battle_event: script_services.battle_events.front().copied(),
                             battle_event_ticks: script_services.battle_event_ticks,
                             status_background: &status_background,

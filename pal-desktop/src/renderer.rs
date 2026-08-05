@@ -237,6 +237,34 @@ impl Renderer {
         self.dirty = true;
     }
 
+    /// Draw an RLE bitmap using one palette bank while preserving each source
+    /// pixel's low-nibble brightness. PAL uses this for inactive battle icons.
+    pub fn blit_rle_mono(&mut self, rle: &RleBitmap, dx: i32, dy: i32, color_bank: u8, shift: i16) {
+        let color_bank = color_bank & 0xf0;
+        for sy in 0..i32::from(rle.height) {
+            let y = dy + sy;
+            if y < 0 || y >= self.height as i32 {
+                continue;
+            }
+            for sx in 0..i32::from(rle.width) {
+                let source = sy as usize * usize::from(rle.width) + sx as usize;
+                if !rle.opaque[source] {
+                    continue;
+                }
+                let x = dx + sx;
+                if x < 0 || x >= self.width as i32 {
+                    continue;
+                }
+                let brightness =
+                    (i16::from(rle.pixels[source] & 0x0f) + shift).clamp(0, 0x0f) as u8;
+                let (r, g, b) = self.palette.get_rgb(color_bank | brightness);
+                let destination = (y as usize * self.width + x as usize) * 4;
+                self.screen[destination..destination + 4].copy_from_slice(&[r, g, b, 255]);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Darken destination pixels under an RLE mask using PAL's palette-index rule.
     pub fn blit_rle_shadow(&mut self, rle: &RleBitmap, dx: i32, dy: i32) {
         for sy in 0..i32::from(rle.height) {
@@ -407,6 +435,18 @@ mod tests {
         assert_eq!(renderer.screen(), [252, 0, 0, 255]);
         renderer.blit_rle_color_shift(&low, 0, 0, -8);
         assert_eq!(renderer.screen(), [0, 252, 0, 255]);
+    }
+
+    #[test]
+    fn rle_mono_replaces_palette_bank_and_shifts_brightness() {
+        let mut palette = Palette::default();
+        palette.colors[0x0a] = PaletteColor { r: 63, g: 0, b: 0 };
+        let mut renderer = Renderer::new(palette, 1, 1);
+        let bitmap = RleBitmap::decode(&[1, 0, 1, 0, 1, 0x3e]).unwrap();
+
+        renderer.blit_rle_mono(&bitmap, 0, 0, 0, -4);
+
+        assert_eq!(renderer.screen(), [252, 0, 0, 255]);
     }
 
     #[test]

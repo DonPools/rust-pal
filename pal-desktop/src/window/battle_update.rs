@@ -92,75 +92,45 @@ pub(super) fn update_battle(
         .enumerate()
         .filter_map(|(index, enemy)| enemy.is_alive().then_some(index))
         .collect::<Vec<_>>();
-    if matches!(
-        input.direction_pressed,
-        Some(Direction::North | Direction::South)
-    ) {
-        services.battle_command_selected = (services.battle_command_selected + 1) % 4;
-    }
-    if !living.is_empty() {
-        services.battle_selected_enemy = select_enemy(
-            &living,
-            services.battle_selected_enemy,
-            input.direction_pressed,
-        );
+    if services.battle_targeting_enemy {
+        if !living.is_empty() {
+            services.battle_selected_enemy = select_enemy(
+                &living,
+                services.battle_selected_enemy,
+                input.direction_pressed,
+            );
+        }
+        if input.cancel {
+            services.battle_targeting_enemy = false;
+            return None;
+        }
+    } else {
+        services.battle_command_selected =
+            select_battle_command(services.battle_command_selected, input.direction_pressed);
+        if input.confirm
+            && command_requires_enemy_selection(
+                game,
+                services.battle_command_selected,
+                living.len(),
+            )
+        {
+            services.battle_targeting_enemy = true;
+            return None;
+        }
     }
 
-    let events = if input.confirm {
-        match services.battle_command_selected {
-            0 => game
-                .battle_mut()
-                .and_then(|battle| battle.attack(services.battle_selected_enemy))
-                .unwrap_or_default(),
-            1 => {
-                let magic = game.battle().and_then(|battle| {
-                    let player = battle.players.get(battle.active_player()?)?;
-                    player
-                        .magics
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, magic)| player.mp >= magic.mp_cost)
-                        .max_by_key(|(_, magic)| magic.base_damage)
-                        .map(|(index, _)| index)
-                });
-                magic
-                    .and_then(|magic| {
-                        game.battle_mut().and_then(|battle| {
-                            battle.cast_magic(magic, services.battle_selected_enemy)
-                        })
-                    })
-                    .unwrap_or_default()
-            }
-            2 => {
-                let count = game.battle_usable_inventory().len();
-                services.inventory_selected =
-                    services.inventory_selected.min(count.saturating_sub(1));
-                services.inventory_menu = Some(InventoryMenu {
-                    selected: services.inventory_selected,
-                    mode: InventoryMode::BattleUseItems,
-                });
-                Vec::new()
-            }
-            _ => {
-                let count = game.throwable_inventory().len();
-                services.inventory_selected =
-                    services.inventory_selected.min(count.saturating_sub(1));
-                services.inventory_menu = Some(InventoryMenu {
-                    selected: services.inventory_selected,
-                    mode: InventoryMode::BattleThrowItems,
-                });
-                Vec::new()
-            }
-        }
-    } else if input.cancel {
-        game.battle_mut()
-            .and_then(|battle| battle.attempt_flee())
-            .unwrap_or_default()
+    let committed = if input.confirm {
+        execute_battle_command(game, services)
+    } else if input.cancel && !services.battle_targeting_enemy {
+        game.battle_mut().and_then(|battle| battle.attempt_flee())
     } else {
-        Vec::new()
+        None
     };
-    if !events.is_empty() {
-        queue_battle_events(game, services, events);
+    if let Some(events) = committed {
+        services.battle_targeting_enemy = false;
+        if !events.is_empty() {
+            queue_battle_events(game, services, events);
+        }
     }
 
     if let Some(target) = game
@@ -531,15 +501,92 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
     }
 }
 
+fn select_battle_command(current: usize, direction: Option<Direction>) -> usize {
+    match direction {
+        Some(Direction::North) => 0,
+        Some(Direction::West) => 1,
+        Some(Direction::East) => 2,
+        Some(Direction::South) => 3,
+        None => current.min(3),
+    }
+}
+
+fn preferred_magic(game: &GameState) -> Option<(usize, bool)> {
+    let battle = game.battle()?;
+    let player = battle.players.get(battle.active_player()?)?;
+    player
+        .magics
+        .iter()
+        .enumerate()
+        .filter(|(_, magic)| player.mp >= magic.mp_cost)
+        .max_by_key(|(_, magic)| magic.base_damage)
+        .map(|(index, magic)| (index, magic.attacks_all))
+}
+
+fn command_requires_enemy_selection(
+    game: &GameState,
+    selected_command: usize,
+    living_enemies: usize,
+) -> bool {
+    if living_enemies <= 1 {
+        return false;
+    }
+    match selected_command {
+        0 => game
+            .battle()
+            .and_then(|battle| battle.players.get(battle.active_player()?))
+            .is_some_and(|player| !player.attacks_all),
+        1 => preferred_magic(game).is_some_and(|(_, attacks_all)| !attacks_all),
+        _ => false,
+    }
+}
+
+fn execute_battle_command(
+    game: &mut GameState,
+    services: &mut SessionState,
+) -> Option<Vec<BattleEvent>> {
+    // A committed Classic-mode command usually queues no immediate event: the
+    // whole party chooses first, then the round is resolved. Preserve `Some`
+    // so the desktop selection state can still leave target selection.
+    match services.battle_command_selected {
+        0 => game
+            .battle_mut()
+            .and_then(|battle| battle.attack(services.battle_selected_enemy)),
+        1 => preferred_magic(game).and_then(|(magic, _)| {
+            game.battle_mut()
+                .and_then(|battle| battle.cast_magic(magic, services.battle_selected_enemy))
+        }),
+        2 => {
+            let count = game.battle_usable_inventory().len();
+            services.inventory_selected = services.inventory_selected.min(count.saturating_sub(1));
+            services.inventory_menu = Some(InventoryMenu {
+                selected: services.inventory_selected,
+                mode: InventoryMode::BattleUseItems,
+            });
+            Some(Vec::new())
+        }
+        _ => {
+            let count = game.throwable_inventory().len();
+            services.inventory_selected = services.inventory_selected.min(count.saturating_sub(1));
+            services.inventory_menu = Some(InventoryMenu {
+                selected: services.inventory_selected,
+                mode: InventoryMode::BattleThrowItems,
+            });
+            Some(Vec::new())
+        }
+    }
+}
+
 fn select_enemy(living: &[usize], current: usize, direction: Option<Direction>) -> usize {
     let position = living
         .iter()
         .position(|&index| index == current)
         .unwrap_or(0);
     let next = match direction {
-        Some(Direction::West) => position.checked_sub(1).unwrap_or(living.len() - 1),
-        Some(Direction::East) => (position + 1) % living.len(),
-        Some(Direction::North | Direction::South) => position,
+        Some(Direction::West | Direction::South) => {
+            position.checked_sub(1).unwrap_or(living.len() - 1)
+        }
+        Some(Direction::East | Direction::North) => (position + 1) % living.len(),
         None => position,
     };
     living[next]
@@ -554,7 +601,18 @@ mod tests {
         let living = [1, 3, 4];
         assert_eq!(select_enemy(&living, 1, Some(Direction::West)), 4);
         assert_eq!(select_enemy(&living, 4, Some(Direction::East)), 1);
+        assert_eq!(select_enemy(&living, 1, Some(Direction::South)), 4);
+        assert_eq!(select_enemy(&living, 4, Some(Direction::North)), 1);
         assert_eq!(select_enemy(&living, 2, None), 1);
+    }
+
+    #[test]
+    fn battle_commands_follow_the_original_cross_directions() {
+        assert_eq!(select_battle_command(3, Some(Direction::North)), 0);
+        assert_eq!(select_battle_command(0, Some(Direction::West)), 1);
+        assert_eq!(select_battle_command(0, Some(Direction::East)), 2);
+        assert_eq!(select_battle_command(0, Some(Direction::South)), 3);
+        assert_eq!(select_battle_command(9, None), 3);
     }
 
     #[test]

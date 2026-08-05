@@ -138,6 +138,7 @@ fn advance_script_with_budget<L>(
                     .and_then(|battle| battle.first_living_enemy())
                     .unwrap_or(0);
                 services.battle_command_selected = 0;
+                services.battle_targeting_enemy = false;
                 services.battle_pending_throw_item = None;
                 services.battle_events.clear();
                 services.battle_event_ticks = 0;

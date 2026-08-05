@@ -1,5 +1,6 @@
 use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::bitmap::Bitmap;
+use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleState};
 
@@ -7,18 +8,23 @@ use super::battle_update::{ACTION_EVENT_TICKS, PLAYER_MAGIC_ANIMATION_EVENT_TICK
 use super::draw::{draw_debug_text, draw_number, fill_rect, stroke_rect};
 use crate::renderer::Renderer;
 
+const BATTLE_COMMAND_ICONS: [(usize, i32, i32); 4] =
+    [(40, 27, 140), (41, 0, 155), (42, 54, 155), (43, 27, 170)];
+
 pub struct BattleRenderResources<'a> {
     pub enemy_sprites: &'a BattleSpriteArchive,
     pub player_sprites: &'a BattleSpriteArchive,
     pub backgrounds: &'a [Option<Bitmap>],
     pub text: &'a TextLibrary,
     pub font: &'a BitmapFont,
+    pub ui_sprites: &'a [RleBitmap],
 }
 
 #[derive(Clone, Copy)]
 pub struct BattleRenderState {
     pub selected_enemy: usize,
     pub selected_command: usize,
+    pub targeting_enemy: bool,
     pub ticks: u64,
     pub event: Option<BattleEvent>,
     pub event_ticks: u16,
@@ -33,6 +39,7 @@ pub fn render_battle(
     let BattleRenderState {
         selected_enemy,
         selected_command,
+        targeting_enemy,
         ticks,
         event,
         event_ticks,
@@ -114,7 +121,16 @@ pub fn render_battle(
         let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2 + enemy_offset;
         let y = i32::from(enemy.position.y) + i32::from(enemy.y_offset) - i32::from(bitmap.height)
             + enemy_offset / 2;
-        renderer.blit_rle(&bitmap, x, y);
+        if event.is_none()
+            && targeting_enemy
+            && index == selected_enemy
+            && battle.phase() == BattlePhase::AwaitingCommand
+            && ticks & 1 != 0
+        {
+            renderer.blit_rle_color_shift(&bitmap, x, y, 7);
+        } else {
+            renderer.blit_rle(&bitmap, x, y);
+        }
         let is_hit = matches!(
             event,
             Some(
@@ -132,17 +148,6 @@ pub fn render_battle(
                 i32::from(bitmap.width) + 4,
                 i32::from(bitmap.height) + 4,
                 [255, 80, 72, 255],
-            );
-        }
-        if event.is_none()
-            && index == selected_enemy
-            && battle.phase() == BattlePhase::AwaitingCommand
-        {
-            draw_selector(
-                renderer,
-                i32::from(enemy.position.x),
-                y - 5,
-                [255, 248, 80, 255],
             );
         }
     }
@@ -223,13 +228,16 @@ pub fn render_battle(
         render_battle_event(renderer, battle, event);
     }
 
-    render_status(
-        renderer,
-        battle,
-        resources.text,
-        resources.font,
-        selected_command,
-    );
+    if event.is_none() && battle.phase() == BattlePhase::AwaitingCommand {
+        render_status(
+            renderer,
+            battle,
+            resources.ui_sprites,
+            selected_command,
+            targeting_enemy,
+            ticks,
+        );
+    }
     if event.is_none() {
         if let BattlePhase::Finished(result) = battle.phase() {
             render_settlement(renderer, battle, result);
@@ -373,70 +381,113 @@ fn render_settlement(renderer: &mut Renderer, battle: &BattleState, result: Batt
 fn render_status(
     renderer: &mut Renderer,
     battle: &BattleState,
-    text: &TextLibrary,
-    font: &BitmapFont,
+    ui_sprites: &[RleBitmap],
     selected_command: usize,
+    targeting_enemy: bool,
+    ticks: u64,
 ) {
-    let count = battle.players.len().max(1);
-    let width = (310 / i32::try_from(count).unwrap_or(1)).clamp(64, 100);
-    let active = battle.active_player();
     for (index, player) in battle.players.iter().enumerate() {
-        let x = 5 + i32::try_from(index).unwrap_or(0) * width;
-        let y = 164;
-        fill_rect(renderer, x, y, width - 3, 35, [8, 16, 32, 255]);
-        stroke_rect(
-            renderer,
-            x,
-            y,
-            width - 3,
-            35,
-            if active == Some(index) {
-                [255, 236, 80, 255]
-            } else {
-                [120, 160, 200, 255]
-            },
-        );
-        if let Some(name) = text.word(usize::from(player.name_word_id)) {
-            renderer.draw_big5_text(font, name, x + 3, y + 1, 0x2d);
+        let x = 91 + i32::try_from(index).unwrap_or(0) * 77;
+        let y = 165;
+        if let Some(info_box) = ui_sprites.get(18) {
+            renderer.blit_rle(info_box, x, y);
         }
-        draw_debug_text(renderer, x + 3, y + 18, "HP", [120, 220, 255, 255]);
-        draw_number(
+        if let Some(face) = ui_sprites.get(48 + usize::from(player.role_id)) {
+            renderer.blit_rle(face, x - 2, y - 4);
+        }
+        if let Some(slash) = ui_sprites.get(39) {
+            renderer.blit_rle(slash, x + 49, y + 6);
+            renderer.blit_rle(slash, x + 49, y + 22);
+        }
+        draw_ui_number(
             renderer,
+            ui_sprites,
             u32::from(player.hp),
-            x + width - 8,
-            y + 19,
-            [255, 236, 80, 255],
+            4,
+            x + 26,
+            y + 5,
+            19,
+            [240, 224, 96, 255],
         );
-        draw_debug_text(renderer, x + 3, y + 27, "MP", [120, 220, 255, 255]);
-        draw_number(
+        draw_ui_number(
             renderer,
+            ui_sprites,
+            u32::from(player.max_hp),
+            4,
+            x + 47,
+            y + 8,
+            19,
+            [240, 224, 96, 255],
+        );
+        draw_ui_number(
+            renderer,
+            ui_sprites,
             u32::from(player.mp),
-            x + width - 8,
-            y + 28,
-            [160, 220, 255, 255],
+            4,
+            x + 26,
+            y + 21,
+            56,
+            [96, 224, 240, 255],
+        );
+        draw_ui_number(
+            renderer,
+            ui_sprites,
+            u32::from(player.max_mp),
+            4,
+            x + 47,
+            y + 24,
+            56,
+            [96, 224, 240, 255],
         );
     }
-    draw_debug_text(
-        renderer,
-        278,
-        188,
-        battle_command_label(selected_command),
-        [255, 255, 255, 255],
-    );
-}
 
-fn battle_command_label(selected: usize) -> &'static str {
-    ["ATK", "MAG", "USE", "THR"]
-        .get(selected)
-        .copied()
-        .unwrap_or("ATK")
-}
-
-fn draw_selector(renderer: &mut Renderer, x: i32, y: i32, color: [u8; 4]) {
-    for row in 0..5 {
-        for column in -row..=row {
-            renderer.put_rgba(x + column, y + row, color);
+    if targeting_enemy {
+        return;
+    }
+    if let Some(active) = battle.active_player() {
+        let (x, y) = player_position(battle.players.len(), active);
+        let arrow = if ticks & 1 == 0 { 68 } else { 69 };
+        if let Some(sprite) = ui_sprites.get(arrow) {
+            renderer.blit_rle(sprite, x - 8, y - 74);
         }
+    }
+    for (index, (sprite_index, x, y)) in BATTLE_COMMAND_ICONS.into_iter().enumerate() {
+        let Some(sprite) = ui_sprites.get(sprite_index) else {
+            continue;
+        };
+        if index == selected_command {
+            renderer.blit_rle(sprite, x, y);
+        } else {
+            renderer.blit_rle_mono(sprite, x, y, 0, -4);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ui_number(
+    renderer: &mut Renderer,
+    ui_sprites: &[RleBitmap],
+    value: u32,
+    length: usize,
+    x: i32,
+    y: i32,
+    sprite_base: usize,
+    fallback: [u8; 4],
+) {
+    if ui_sprites.get(sprite_base + 9).is_none() {
+        draw_number(renderer, value, x + length as i32 * 6, y, fallback);
+        return;
+    }
+    let digits = value.to_string();
+    let visible = &digits[digits.len().saturating_sub(length)..];
+    let mut draw_x = x + (length.saturating_sub(visible.len())) as i32 * 6;
+    for digit in visible.bytes() {
+        renderer.blit_rle(
+            &ui_sprites[sprite_base + usize::from(digit - b'0')],
+            draw_x,
+            y,
+        );
+        draw_x += 6;
     }
 }
 
@@ -521,10 +572,10 @@ mod tests {
     }
 
     #[test]
-    fn battle_command_labels_cover_attack_magic_use_and_throw() {
+    fn battle_command_icons_match_the_original_cross_layout() {
         assert_eq!(
-            (0..4).map(battle_command_label).collect::<Vec<_>>(),
-            ["ATK", "MAG", "USE", "THR"]
+            BATTLE_COMMAND_ICONS,
+            [(40, 27, 140), (41, 0, 155), (42, 54, 155), (43, 27, 170)]
         );
     }
 }
