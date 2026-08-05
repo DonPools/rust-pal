@@ -204,7 +204,7 @@ define_script_opcodes! {
     PauseEnemyChase = 0x0062, "CHASE_PAUSE", "Pause enemy chasing for a period.", Implemented;
     SpeedUpEnemyChase = 0x0063, "CHASE_FAST", "Speed up enemy chasing for a period.", Implemented;
     JumpIfEnemyHpAbove = 0x0064, "JGT_ENEMY_HP", "Jump when enemy HP exceeds a percentage threshold.", Implemented;
-    SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite; only the leader slot is currently applied.", Stub;
+    SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite and optionally reload active party sprites.", Implemented;
     ThrowWeapon = 0x0066, "THROW_WEAPON", "Simulate a weapon-throw magic attack against an enemy.", Implemented;
     EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Set the magic and casting rate used by an enemy.", Implemented;
     JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Implemented;
@@ -233,7 +233,7 @@ define_script_opcodes! {
     ToggleDayNightPalette = 0x0080, "PALETTE_TOGGLE", "Toggle between the day and night palettes.", Implemented;
     JumpIfNotFacingObject = 0x0081, "JNOT_FACING", "Jump when the player is not facing the specified event object.", Implemented;
     WalkObjectFast = 0x0082, "OBJ_WALK_FAST", "Walk the current event object to a tile at high speed.", Implemented;
-    JumpIfObjectOutsideZone = 0x0083, "JOUTSIDE_ZONE", "Jump when an event object is outside another object's zone.", Unsupported;
+    JumpIfObjectOutsideZone = 0x0083, "JOUTSIDE_ZONE", "Jump when an event object is outside another object's zone.", Implemented;
     PlaceUsedItemObject = 0x0084, "ITEM_PLACE", "Place the currently used item as an event object in the scene.", Implemented;
     Delay = 0x0085, "DELAY", "Delay for operand 0 periods of 80 milliseconds.", Implemented;
     JumpIfItemNotEquipped = 0x0086, "JNOT_EQUIPPED", "Jump when fewer than the requested item count are equipped.", Implemented;
@@ -264,7 +264,7 @@ define_script_opcodes! {
     QuitGame = 0x00A0, "QUIT", "Run the ending path and terminate the game.", Implemented;
     CollapseParty = 0x00A1, "PARTY_COLLAPSE", "Move every party member and trail point onto the leader.", Implemented;
     RandomSelect = 0x00A2, "RANDOM_NEXT", "Select one of the following operand 0 instructions randomly.", Implemented;
-    PlayCdMusic = 0x00A3, "CD_MUSIC", "Play a CD track with normal music as fallback.", Unsupported;
+    PlayCdMusic = 0x00A3, "CD_MUSIC", "Play a CD track with normal music as fallback.", Implemented;
     ScrollFbp = 0x00A4, "FBP_SCROLL", "Scroll an FBP picture onto the screen.", Implemented;
     ShowFbpWithSprite = 0x00A5, "FBP_EFFECT", "Show an FBP picture with an ending sprite effect.", Implemented;
     BackupScreen = 0x00A6, "SCREEN_BACKUP", "Back up the current screen for a later transition.", Implemented;
@@ -509,7 +509,15 @@ pub enum ScriptAction {
         party_index: u16,
     },
     SetPlayerSprite {
+        role_id: u16,
         sprite_index: usize,
+        reload: bool,
+    },
+    CheckObjectZone {
+        object_id: u16,
+        target_id: u16,
+        range: u16,
+        failure_entry: u16,
     },
     AdjustPlayerHealth {
         role_id: u16,
@@ -1834,14 +1842,25 @@ impl ScriptRuntime {
                         target_entry: entry.operands[0],
                     }));
                 }
-                SetPlayerSprite if entry.operands[0] == 0 => {
+                SetPlayerSprite => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Action(ScriptAction::SetPlayerSprite {
+                        role_id: entry.operands[0],
                         sprite_index: usize::from(entry.operands[1]),
+                        reload: entry.operands[2] != 0,
                     }));
                 }
-                SetPlayerSprite => execution.entry = execution.entry.wrapping_add(1),
+                JumpIfObjectOutsideZone => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::CheckObjectZone {
+                        object_id: execution.object_id,
+                        target_id: entry.operands[0],
+                        range: entry.operands[1],
+                        failure_entry: entry.operands[2],
+                    }));
+                }
                 OffsetObjectAndAnimate => {
                     let object_id = selected_object(entry.operands[0], execution.object_id);
                     execution.entry = execution.entry.wrapping_add(1);
@@ -2175,6 +2194,15 @@ impl ScriptRuntime {
                     self.execution = Some(execution);
                     return Some(ScriptEvent::Visual(ScriptVisual::BackupScreen));
                 }
+                PlayCdMusic => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PlayMusic {
+                        music_id: entry.operands[1],
+                        looped: true,
+                        fade_seconds: 0,
+                    }));
+                }
                 AutoScriptNoOp => execution.entry = execution.entry.wrapping_add(1),
                 DialogCenter => {
                     execution.dialog_position = DialogPosition::Center;
@@ -2260,12 +2288,10 @@ impl ScriptRuntime {
                 | HideBattleActor
                 | StealEnemy
                 | BlowEnemiesAway
-                | JumpIfObjectOutsideZone
                 | EnableAutoBattle
                 | SetObjectScript
                 | PlayerMagicAnimation
-                | PlayEndingAnimation
-                | PlayCdMusic => {
+                | PlayEndingAnimation => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2387,7 +2413,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [153, 1, 11]);
+        assert_eq!(support_counts, [156, 0, 9]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -3117,6 +3143,47 @@ mod tests {
         ] {
             assert_eq!(runtime.advance(), Some(ScriptEvent::Action(expected)));
         }
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn yields_role_sprite_zone_check_and_cd_fallback_actions() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::SetPlayerSprite.raw(), 3, 42, 1],
+            [ScriptOpcode::JumpIfObjectOutsideZone.raw(), 9, 2, 77],
+            [ScriptOpcode::PlayCdMusic.raw(), 5, 31, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::SetPlayerSprite {
+                role_id: 3,
+                sprite_index: 42,
+                reload: true,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::CheckObjectZone {
+                object_id: 7,
+                target_id: 9,
+                range: 2,
+                failure_entry: 77,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlayMusic {
+                music_id: 31,
+                looped: true,
+                fade_seconds: 0,
+            }))
+        );
         assert!(matches!(
             runtime.advance(),
             Some(ScriptEvent::Completed { .. })

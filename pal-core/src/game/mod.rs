@@ -1813,6 +1813,26 @@ impl<M: CollisionMap> GameState<M> {
             .map(|object| object.state)
     }
 
+    pub fn objects_within_zone(&self, object_id: u16, target_id: u16, range: u16) -> bool {
+        let Some(object) = self
+            .scene_objects
+            .iter()
+            .find(|object| object.id == object_id)
+        else {
+            return false;
+        };
+        let Some(target) = self
+            .scene_objects
+            .iter()
+            .find(|object| object.id == target_id)
+        else {
+            return false;
+        };
+        let x = i64::from(target.world_x) - i64::from(object.world_x);
+        let y = i64::from(target.world_y) - i64::from(object.world_y);
+        x.abs() + y.abs() * 2 < i64::from(range) * 32 + 16
+    }
+
     pub fn player_faces_object(&mut self, object_id: u16, range: u16) -> bool {
         let Some(index) = self
             .scene_objects
@@ -2707,10 +2727,42 @@ impl<M: CollisionMap> GameState<M> {
                     follower.anim_frame = frame;
                 }
             }
-            ScriptAction::SetPlayerSprite { sprite_index } => {
-                self.player.sprite_index = sprite_index;
-                self.player.anim_frame = 0;
+            ScriptAction::SetPlayerSprite {
+                role_id,
+                sprite_index,
+                reload,
+            } => {
+                let Some(roles) = self.player_roles.as_mut() else {
+                    return false;
+                };
+                let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                    return false;
+                };
+                let Some(sprite_index) = u16::try_from(sprite_index).ok() else {
+                    return false;
+                };
+                role.scene_sprite_num = sprite_index;
+                let frames_per_direction = role.frames_per_direction();
+                self.party.sync_from_roles(roles);
+                if reload && self.active_battle.is_none() {
+                    if self
+                        .party
+                        .leader()
+                        .is_some_and(|member| member.role_id == role_id)
+                    {
+                        self.player.sprite_index = usize::from(sprite_index);
+                        self.player.frames_per_direction = frames_per_direction;
+                        self.player.anim_frame = 0;
+                    }
+                    self.rebuild_party_followers();
+                }
             }
+            ScriptAction::CheckObjectZone {
+                object_id,
+                target_id,
+                range,
+                ..
+            } => return self.objects_within_zone(object_id, target_id, range),
             ScriptAction::AdjustPlayerHealth {
                 role_id,
                 hp,
@@ -6381,6 +6433,55 @@ mod tests {
             party_index: 0,
         }));
         assert_eq!(state.player.anim_frame, 1);
+    }
+
+    #[test]
+    fn player_sprite_updates_roles_and_only_reloads_active_sprites_when_requested() {
+        let roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
+        let mut party = Party::single(0, &roles).unwrap();
+        assert!(party.add(1, &roles));
+        let mut state = state(&[]).with_party(party).with_player_roles(roles);
+
+        assert!(state.apply_script_action(ScriptAction::SetPlayerSprite {
+            role_id: 1,
+            sprite_index: 42,
+            reload: true,
+        }));
+        assert_eq!(state.player_role(1).unwrap().scene_sprite_num, 42);
+        assert_eq!(state.party_followers()[0].sprite_index, 42);
+
+        assert!(state.apply_script_action(ScriptAction::SetPlayerSprite {
+            role_id: 0,
+            sprite_index: 33,
+            reload: false,
+        }));
+        assert_eq!(state.player_role(0).unwrap().scene_sprite_num, 33);
+        assert_eq!(state.player.sprite_index, 0);
+        assert!(state.apply_script_action(ScriptAction::SetPlayerSprite {
+            role_id: 0,
+            sprite_index: 44,
+            reload: true,
+        }));
+        assert_eq!(state.player.sprite_index, 44);
+    }
+
+    #[test]
+    fn object_zone_checks_require_both_objects_in_the_current_scene() {
+        let mut owner = blocking_object(100, 100);
+        owner.id = 1;
+        let mut target = blocking_object(130, 100);
+        target.id = 2;
+        let mut state = state(&[]).with_scene_objects(vec![owner, target]);
+        assert!(state.objects_within_zone(1, 2, 1));
+        state.scene_objects[1].world_x = 148;
+        assert!(!state.objects_within_zone(1, 2, 1));
+        assert!(!state.objects_within_zone(1, 99, 1));
+        assert!(state.apply_script_action(ScriptAction::CheckObjectZone {
+            object_id: 1,
+            target_id: 2,
+            range: 2,
+            failure_entry: 77,
+        }));
     }
 
     #[test]

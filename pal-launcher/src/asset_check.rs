@@ -113,6 +113,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut speed_chase_scripts = 0usize;
     let mut level_up_scripts = 0usize;
     let mut halve_cash_scripts = 0usize;
+    let mut player_sprite_scripts = 0usize;
+    let mut outside_zone_scripts = 0usize;
+    let mut cd_music_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -176,6 +179,31 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         speed_chase_scripts += usize::from(entry.opcode == ScriptOpcode::SpeedUpEnemyChase.raw());
         level_up_scripts += usize::from(entry.opcode == ScriptOpcode::LevelUpPlayer.raw());
         halve_cash_scripts += usize::from(entry.opcode == ScriptOpcode::HalveCash.raw());
+        if entry.opcode == ScriptOpcode::SetPlayerSprite.raw() {
+            assert!(
+                usize::from(entry.operands[0]) < pal_assets::player_roles::PLAYER_ROLE_COUNT,
+                "player-sprite script {index} references unavailable role {}",
+                entry.operands[0]
+            );
+            assert!(
+                role_sprites
+                    .character_frame_count(usize::from(entry.operands[1]))
+                    .is_some(),
+                "player-sprite script {index} references unavailable MGO sprite {}",
+                entry.operands[1]
+            );
+            player_sprite_scripts += 1;
+        }
+        outside_zone_scripts +=
+            usize::from(entry.opcode == ScriptOpcode::JumpIfObjectOutsideZone.raw());
+        if entry.opcode == ScriptOpcode::PlayCdMusic.raw() {
+            assert!(
+                usize::from(entry.operands[1]) < music_count,
+                "CD fallback script {index} references unavailable MIDI slot {}",
+                entry.operands[1]
+            );
+            cd_music_scripts += 1;
+        }
         if entry.opcode == ScriptOpcode::TransformEnemy.raw()
             || (entry.opcode == ScriptOpcode::SummonEnemy.raw()
                 && !matches!(entry.operands[0], 0 | u16::MAX))
@@ -283,6 +311,15 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         ),
         (1, 1, 1, 1),
         "real scripts no longer match chase, level-up and cash coverage"
+    );
+    assert!(
+        player_sprite_scripts > 0,
+        "real scripts contain no player-sprite changes"
+    );
+    assert_eq!(
+        (outside_zone_scripts, cd_music_scripts),
+        (2, 6),
+        "real scripts no longer match object-zone and CD fallback coverage"
     );
     let (usable_item_definitions, throwable_item_definitions) = (0..global_objects.len())
         .filter_map(|index| global_objects.get(u16::try_from(index).ok()?))
@@ -1341,6 +1378,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "M6 world-state data passed: {pause_chase_scripts} chase pause, \
          {speed_chase_scripts} chase speed-up, {level_up_scripts} scripted level-up, \
          {halve_cash_scripts} cash-halving"
+    );
+    println!(
+        "M6 script fallback data passed: {player_sprite_scripts} player-sprite changes, \
+         {outside_zone_scripts} object-zone branches, {cd_music_scripts} CD-to-MIDI fallbacks"
     );
     println!(
         "asset check passed: {visible_pixels} visible pixels, \

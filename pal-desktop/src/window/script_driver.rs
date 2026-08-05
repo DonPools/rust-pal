@@ -279,6 +279,13 @@ pub(super) fn advance_script<L>(
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaceObjectInFront {
             ..
         })) => {}
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::CheckObjectZone { failure_entry, .. },
+        )) if !game.apply_script_action(action) => {
+            scripts.set_success(false);
+            scripts.branch_to(failure_entry);
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::CheckObjectZone { .. })) => {}
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::WalkObjectTo {
             object_id,
             tile_x,
