@@ -28,7 +28,7 @@ impl Sprite {
         }
 
         let offsets: Vec<usize> = (0..frame_count)
-            .map(|index| (read_u16(data, index * 2)? as usize).checked_mul(2))
+            .map(|index| sprite_frame_offset(data, index))
             .collect::<Option<_>>()?;
         if offsets[0] != table_len
             || offsets
@@ -70,6 +70,18 @@ impl Sprite {
     }
 }
 
+fn sprite_frame_offset(data: &[u8], frame: usize) -> Option<usize> {
+    let offset = usize::from(read_u16(data, frame.checked_mul(2)?)?).checked_mul(2)?;
+    // MGO 571 stores its second frame at word offset 0xC222. Doubling that
+    // overflows the original 16-bit byte offset; PAL explicitly wraps this
+    // one known broken value to 0x8444.
+    Some(if offset == 0x18444 {
+        offset & usize::from(u16::MAX)
+    } else {
+        offset
+    })
+}
+
 /// Parse a sprite from a YJ_1-compressed GOP chunk, as used by `MGO.MKF`.
 pub fn sprite_from_yj1_chunk(data: &[u8]) -> Option<Sprite> {
     let decompressed = yj1::decompress(data)?;
@@ -108,6 +120,19 @@ mod tests {
 
         let invalid = [3, 0, 2, 0, 0, 0, 0, 0, 0, 0];
         assert!(Sprite::from_gop_chunk(&invalid).is_none());
+    }
+
+    #[test]
+    fn wraps_the_known_mgo_571_second_frame_offset() {
+        let mut data = vec![0; 0x8444 + 6];
+        data[..6].copy_from_slice(&[3, 0, 0x22, 0xc2, 0, 0]);
+        data[6..12].copy_from_slice(&[1, 0, 1, 0, 1, 7]);
+        data[0x8444..0x844a].copy_from_slice(&[1, 0, 1, 0, 1, 8]);
+
+        let sprite = Sprite::from_gop_chunk(&data).unwrap();
+        assert_eq!(sprite.frame_count(), 2);
+        assert_eq!(sprite.decode_frame(0).unwrap().pixels, [7]);
+        assert_eq!(sprite.decode_frame(1).unwrap().pixels, [8]);
     }
 
     #[test]

@@ -124,6 +124,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut auto_battle_scripts = 0usize;
     let mut battle_blow_amounts = Vec::new();
     let mut player_magic_animation_players = Vec::new();
+    let mut ending_animation_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -237,6 +238,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         if entry.opcode == ScriptOpcode::PlayerMagicAnimation.raw() {
             player_magic_animation_players.push(entry.operands[0]);
         }
+        ending_animation_scripts +=
+            usize::from(entry.opcode == ScriptOpcode::PlayEndingAnimation.raw());
         if entry.opcode == ScriptOpcode::TransformEnemy.raw()
             || (entry.opcode == ScriptOpcode::SummonEnemy.raw()
                 && !matches!(entry.operands[0], 0 | u16::MAX))
@@ -295,6 +298,22 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         assert!(
             (0..frame_count).all(|frame| role_sprites.decode_frame(sprite_index, frame).is_some()),
             "ending effect MGO sprite {sprite} contains an invalid frame"
+        );
+    }
+    assert_eq!(
+        ending_animation_scripts, 1,
+        "real scripts no longer match DOS ending-animation coverage"
+    );
+    for picture in [61usize, 62] {
+        assert!(
+            fbp_archive.frame(picture).is_some(),
+            "ending animation references unavailable FBP picture {picture}"
+        );
+    }
+    for (sprite, required_frames) in [(571usize, 2usize), (572, 4)] {
+        assert!(
+            (0..required_frames).all(|frame| role_sprites.decode_frame(sprite, frame).is_some()),
+            "ending animation MGO sprite {sprite} lacks {required_frames} valid frames"
         );
     }
     assert!(
@@ -1492,7 +1511,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
         "cutscene data passed: {} RNG animations, {rng_frame_count} decoded frames, \
          {fbp_frame_count} FBP pictures, {fbp_script_references} script references, {} ending \
-         sprites, {fbp_black_fallbacks} black fallbacks",
+         sprites, {ending_animation_scripts} full ending animation, \
+         {fbp_black_fallbacks} black fallbacks",
         rng_archive.animation_count(),
         ending_sprite_references.len(),
     );

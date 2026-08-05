@@ -252,7 +252,7 @@ define_script_opcodes! {
     FadeSceneWithUpdate = 0x0093, "SCENE_FADE_UPDATE", "Fade the screen while rebuilding the scene.", Implemented;
     JumpIfObjectStateEquals = 0x0094, "JEQ_OBJ_STATE", "Jump when an event object's state equals operand 1.", Implemented;
     JumpIfSceneEquals = 0x0095, "JEQ_SCENE", "Jump when the current scene equals operand 0.", Implemented;
-    PlayEndingAnimation = 0x0096, "ENDING", "Play the DOS ending animation.", Unsupported;
+    PlayEndingAnimation = 0x0096, "ENDING", "Play the DOS ending animation.", Implemented;
     RideObjectFast = 0x0097, "RIDE_FAST", "Ride the current event object to a tile at high speed.", Implemented;
     SetPartyFollower = 0x0098, "FOLLOWER_SET", "Set or clear the party follower role.", Implemented;
     SetSceneMap = 0x0099, "SCENE_MAP", "Change the map number used by a scene.", Implemented;
@@ -388,6 +388,7 @@ pub enum ScriptVisual {
         sprite: Option<u16>,
         fade: u16,
     },
+    PlayEndingAnimation,
     BackupScreen,
 }
 
@@ -2270,6 +2271,11 @@ impl ScriptRuntime {
                         fade: entry.operands[2],
                     }));
                 }
+                PlayEndingAnimation => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Visual(ScriptVisual::PlayEndingAnimation));
+                }
                 BackupScreen => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2361,7 +2367,7 @@ impl ScriptRuntime {
                     });
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
-                SetEquipmentEffect | EquipItem | ChasePlayer | PlayEndingAnimation => {
+                SetEquipmentEffect | EquipItem | ChasePlayer => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2483,7 +2489,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [164, 0, 1]);
+        assert_eq!(support_counts, [165, 0, 0]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2558,6 +2564,7 @@ mod tests {
             [ScriptOpcode::FadeToCurrentScene.raw(), 0, 0, 0],
             [ScriptOpcode::ScrollFbp.raw(), 6, 0, 4],
             [ScriptOpcode::ShowFbpWithSprite.raw(), 8, 0xffff, 3],
+            [ScriptOpcode::PlayEndingAnimation.raw(), 0, 0, 0],
             [ScriptOpcode::BackupScreen.raw(), 0, 0, 0],
             [ScriptOpcode::AutoScriptNoOp.raw(), 0, 0, 0],
             [ScriptOpcode::WaitForKey.raw(), 0, 0, 0],
@@ -2656,6 +2663,10 @@ mod tests {
                 sprite: None,
                 fade: 3,
             }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Visual(ScriptVisual::PlayEndingAnimation))
         );
         assert_eq!(
             runtime.advance(),
@@ -3883,7 +3894,7 @@ mod tests {
     fn reports_unsupported_and_invalid_entries() {
         let mut runtime = ScriptRuntime::new(table(&[
             [0, 0, 0, 0],
-            [ScriptOpcode::PlayEndingAnimation.raw(), 0, 0, 0],
+            [ScriptOpcode::ChasePlayer.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
         assert_eq!(
@@ -3891,7 +3902,7 @@ mod tests {
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: ScriptOpcode::PlayEndingAnimation.raw(),
+                opcode: ScriptOpcode::ChasePlayer.raw(),
             })
         );
 

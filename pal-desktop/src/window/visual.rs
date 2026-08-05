@@ -1,5 +1,6 @@
-use pal_assets::fbp::{FbpArchive, FBP_HEIGHT, FBP_PIXELS};
+use pal_assets::fbp::{FbpArchive, FBP_HEIGHT, FBP_PIXELS, FBP_WIDTH};
 use pal_assets::palette::{Palette, PaletteColor, PaletteSet};
+use pal_assets::rle::RleBitmap;
 use pal_assets::rng::{RngArchive, RNG_FRAME_PIXELS};
 use pal_core::game::UPDATE_INTERVAL_MS;
 use pal_core::role::RoleSprites;
@@ -60,6 +61,7 @@ enum VisualEffect {
         total: u32,
     },
     Rng(RngPlayback),
+    Ending(EndingAnimation),
 }
 
 struct RngPlayback {
@@ -68,6 +70,14 @@ struct RngPlayback {
     end_frame: Option<usize>,
     ticks_per_frame: u16,
     ticks_until_frame: u16,
+}
+
+struct EndingAnimation {
+    upper: Vec<u8>,
+    lower: Vec<u8>,
+    beast: Vec<RleBitmap>,
+    girl: Vec<RleBitmap>,
+    frame: u16,
 }
 
 impl VisualState {
@@ -349,6 +359,29 @@ impl VisualState {
                 }
                 self.start_fbp(index, fade, current_screen, fbp)?;
             }
+            ScriptVisual::PlayEndingAnimation => {
+                let upper = fbp
+                    .frame(61)
+                    .ok_or_else(|| "ending FBP picture 61 is unavailable".to_owned())?;
+                let lower = fbp
+                    .frame(62)
+                    .ok_or_else(|| "ending FBP picture 62 is unavailable".to_owned())?;
+                let beast = load_ending_frames(role_sprites, 571, 2, "beast")?;
+                let girl = load_ending_frames(role_sprites, 572, 4, "girl")?;
+                self.rgba_screen = None;
+                self.indexed_screen = Some(vec![0; FBP_PIXELS]);
+                self.ending_effect_sprite = 0;
+                self.screen_wave = 0;
+                self.wave_progression = 0;
+                self.wave_phase = 0;
+                self.effect = Some(VisualEffect::Ending(EndingAnimation {
+                    upper,
+                    lower,
+                    beast,
+                    girl,
+                    frame: 0,
+                }));
+            }
             ScriptVisual::BackupScreen => self.backup_screen = Some(current_screen.to_vec()),
         }
         Ok(())
@@ -470,6 +503,20 @@ impl VisualState {
                     return Ok(None);
                 }
             }
+            VisualEffect::Ending(ending) => {
+                let screen = self
+                    .indexed_screen
+                    .as_mut()
+                    .ok_or_else(|| "ending canvas is unavailable".to_owned())?;
+                compose_ending_frame(ending, screen)?;
+                if ending.frame == 399 {
+                    self.screen_wave = 0;
+                    self.wave_progression = 0;
+                    self.wave_phase = 0;
+                    return Ok(None);
+                }
+                ending.frame += 1;
+            }
         }
         Ok(Some(effect))
     }
@@ -563,6 +610,146 @@ impl VisualState {
             }
         }
     }
+}
+
+fn load_ending_frames(
+    role_sprites: &RoleSprites,
+    sprite: usize,
+    required: usize,
+    name: &str,
+) -> Result<Vec<RleBitmap>, String> {
+    (0..required)
+        .map(|frame| {
+            role_sprites.decode_frame(sprite, frame).ok_or_else(|| {
+                format!("ending {name} MGO sprite {sprite} frame {frame} is unavailable")
+            })
+        })
+        .collect()
+}
+
+fn compose_ending_frame(ending: &EndingAnimation, screen: &mut [u8]) -> Result<(), String> {
+    if ending.frame >= 400
+        || ending.upper.len() != FBP_PIXELS
+        || ending.lower.len() != FBP_PIXELS
+        || ending.beast.len() < 2
+        || ending.girl.len() < 4
+        || screen.len() != FBP_PIXELS
+    {
+        return Err("ending animation has invalid frame data".to_owned());
+    }
+
+    let scroll = usize::from(ending.frame / 2);
+    let upper_rows = scroll * FBP_WIDTH;
+    let lower_rows = FBP_PIXELS - upper_rows;
+    screen[..upper_rows].copy_from_slice(&ending.upper[lower_rows..]);
+    screen[upper_rows..].copy_from_slice(&ending.lower[..lower_rows]);
+    if !apply_indexed_wave(screen, 2, ending.frame) {
+        return Err("ending animation could not apply its background wave".to_owned());
+    }
+
+    let frame = i32::from(ending.frame);
+    if !blit_indexed_rle(
+        screen,
+        FBP_WIDTH,
+        FBP_HEIGHT,
+        &ending.beast[0],
+        0,
+        -400 + frame,
+    ) || !blit_indexed_rle(
+        screen,
+        FBP_WIDTH,
+        FBP_HEIGHT,
+        &ending.beast[1],
+        0,
+        -200 + frame,
+    ) || !blit_indexed_rle(
+        screen,
+        FBP_WIDTH,
+        FBP_HEIGHT,
+        &ending.girl[usize::from(ending.frame % 4)],
+        220,
+        ending_girl_y(ending.frame),
+    ) {
+        return Err("ending animation contains invalid sprite data".to_owned());
+    }
+    Ok(())
+}
+
+fn ending_girl_y(frame: u16) -> i32 {
+    (180 - i32::from(frame.div_ceil(2))).max(80)
+}
+
+/// Apply the original 32-row PAL wave directly to an indexed framebuffer.
+/// Ending sprites are drawn afterwards so only the two FBP backgrounds move.
+fn apply_indexed_wave(screen: &mut [u8], level: u16, phase: u16) -> bool {
+    if screen.len() != FBP_PIXELS || level == 0 {
+        return screen.len() == FBP_PIXELS;
+    }
+    let mut offsets = [0usize; 32];
+    let mut accumulated = 0i32;
+    let mut step = 68i32;
+    for index in 0..16 {
+        step -= 8;
+        accumulated += step;
+        let offset = usize::try_from(accumulated * i32::from(level) / 256).unwrap_or(0);
+        offsets[index] = offset % FBP_WIDTH;
+        offsets[index + 16] = (FBP_WIDTH - offset) % FBP_WIDTH;
+    }
+    for (row, pixels) in screen.chunks_exact_mut(FBP_WIDTH).enumerate() {
+        let offset = offsets[(usize::from(phase) + row) % offsets.len()];
+        pixels.rotate_left(offset);
+    }
+    true
+}
+
+/// Blit an indexed RLE bitmap with clipping while preserving literal index 0.
+fn blit_indexed_rle(
+    target: &mut [u8],
+    target_width: usize,
+    target_height: usize,
+    rle: &RleBitmap,
+    dx: i32,
+    dy: i32,
+) -> bool {
+    if target_width.checked_mul(target_height) != Some(target.len()) {
+        return false;
+    }
+    let source_width = usize::from(rle.width);
+    let source_height = usize::from(rle.height);
+    let Some(source_pixels) = source_width.checked_mul(source_height) else {
+        return false;
+    };
+    if rle.pixels.len() != source_pixels || rle.opaque.len() != source_pixels {
+        return false;
+    }
+
+    for source_y in 0..source_height {
+        let Some(target_y) = dy.checked_add(source_y as i32) else {
+            continue;
+        };
+        let Ok(target_y) = usize::try_from(target_y) else {
+            continue;
+        };
+        if target_y >= target_height {
+            continue;
+        }
+        for source_x in 0..source_width {
+            let source = source_y * source_width + source_x;
+            if !rle.opaque[source] {
+                continue;
+            }
+            let Some(target_x) = dx.checked_add(source_x as i32) else {
+                continue;
+            };
+            let Ok(target_x) = usize::try_from(target_x) else {
+                continue;
+            };
+            if target_x < target_width {
+                target[target_y * target_width + target_x] = rle.pixels[source];
+            }
+        }
+    }
+    true
 }
 
 fn duration_ticks(milliseconds: u64) -> u32 {
@@ -710,6 +897,20 @@ mod tests {
         result
     }
 
+    fn indexed_sprite(colors: &[u8]) -> Vec<u8> {
+        let first_offset_words = u16::try_from(colors.len() + 1).unwrap();
+        let mut sprite = Vec::new();
+        for frame in 0..colors.len() {
+            let offset = usize::from(first_offset_words) + frame * 3;
+            sprite.extend_from_slice(&u16::try_from(offset).unwrap().to_le_bytes());
+        }
+        sprite.extend_from_slice(&0u16.to_le_bytes());
+        for &color in colors {
+            sprite.extend_from_slice(&[1, 0, 1, 0, 1, color]);
+        }
+        sprite
+    }
+
     fn resources() -> (Vec<PaletteSet>, FbpArchive, RngArchive, RoleSprites) {
         let mut palette = Palette::default();
         palette.colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
@@ -727,6 +928,104 @@ mod tests {
         sprite.extend_from_slice(&[1, 0, 1, 0, 1, 2]);
         let role_sprites = RoleSprites::load(&mkf(&[Vec::new(), raw_yj1(&sprite)])).unwrap();
         (palettes, fbp, rng, role_sprites)
+    }
+
+    fn ending_resources() -> (Vec<PaletteSet>, FbpArchive, RngArchive, RoleSprites) {
+        let mut palette = Palette::default();
+        for index in 1u8..=8 {
+            palette.colors[usize::from(index)] = PaletteColor {
+                r: index,
+                g: 0,
+                b: 0,
+            };
+        }
+        let palettes = vec![PaletteSet {
+            day: palette,
+            night: None,
+        }];
+        let mut pictures = vec![Vec::new(); 63];
+        pictures[61] = vec![1; FBP_PIXELS];
+        pictures[62] = vec![2; FBP_PIXELS];
+        let fbp = FbpArchive::new(&mkf(&pictures)).unwrap();
+        let animation = mkf(&[raw_yj1(&[0x00])]);
+        let rng = RngArchive::new(&mkf(&[animation])).unwrap();
+        let mut sprites = vec![Vec::new(); 573];
+        sprites[571] = raw_yj1(&indexed_sprite(&[3, 4]));
+        sprites[572] = raw_yj1(&indexed_sprite(&[5, 6, 7, 8]));
+        let role_sprites = RoleSprites::load(&mkf(&sprites)).unwrap();
+        (palettes, fbp, rng, role_sprites)
+    }
+
+    #[test]
+    fn ending_background_splices_upper_and_lower_pictures() {
+        let transparent = RleBitmap {
+            width: 1,
+            height: 1,
+            pixels: vec![0],
+            opaque: vec![false],
+        };
+        let ending = EndingAnimation {
+            upper: vec![1; FBP_PIXELS],
+            lower: vec![2; FBP_PIXELS],
+            beast: vec![transparent.clone(), transparent.clone()],
+            girl: vec![transparent; 4],
+            frame: 200,
+        };
+        let mut screen = vec![0; FBP_PIXELS];
+        compose_ending_frame(&ending, &mut screen).unwrap();
+        assert!(screen[..100 * FBP_WIDTH].iter().all(|&pixel| pixel == 1));
+        assert!(screen[100 * FBP_WIDTH..].iter().all(|&pixel| pixel == 2));
+    }
+
+    #[test]
+    fn ending_girl_rises_to_the_original_floor() {
+        assert_eq!(ending_girl_y(0), 180);
+        assert_eq!(ending_girl_y(199), 80);
+        assert_eq!(ending_girl_y(200), 80);
+        assert_eq!(ending_girl_y(399), 80);
+    }
+
+    #[test]
+    fn indexed_rle_blit_clips_and_preserves_opaque_zero() {
+        let bitmap = RleBitmap {
+            width: 2,
+            height: 2,
+            pixels: vec![9, 0, 0, 7],
+            opaque: vec![true, true, false, true],
+        };
+        let mut target = vec![5; 6];
+        assert!(blit_indexed_rle(&mut target, 3, 2, &bitmap, -1, 0));
+        assert_eq!(target, [0, 5, 5, 7, 5, 5]);
+    }
+
+    #[test]
+    fn ending_animation_composes_400_frames_and_keeps_the_last() {
+        let (palettes, fbp, rng, role_sprites) = ending_resources();
+        let current = vec![0; FBP_PIXELS * 4];
+        let mut visual = VisualState::new();
+        assert!(visual.queue(ScriptVisual::PlayEndingAnimation));
+        for tick in 0..400 {
+            assert!(visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap());
+            let screen = visual.indexed_screen.as_ref().unwrap();
+            match tick {
+                0 => assert_eq!(screen[180 * FBP_WIDTH + 220], 5),
+                199 => assert_eq!(screen[80 * FBP_WIDTH + 220], 8),
+                200 => {
+                    assert_eq!(screen[0], 4);
+                    assert_eq!(screen[80 * FBP_WIDTH + 220], 5);
+                }
+                399 => {
+                    assert_eq!(screen[199 * FBP_WIDTH], 4);
+                    assert_eq!(screen[80 * FBP_WIDTH + 220], 8);
+                }
+                _ => {}
+            }
+            assert_eq!(visual.is_blocking(), tick < 399);
+        }
+        assert_eq!(visual.screen_wave, 0);
+        assert_eq!(visual.indexed_screen.as_ref().unwrap()[199 * FBP_WIDTH], 4);
     }
 
     #[test]
