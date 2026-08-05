@@ -17,6 +17,14 @@ pub struct GlobalObject {
 }
 
 impl GlobalObject {
+    pub fn player_friend_death_script(self) -> u16 {
+        self.data[2]
+    }
+
+    pub fn player_dying_script(self) -> u16 {
+        self.data[3]
+    }
+
     pub fn item_bitmap(self) -> u16 {
         self.data[0]
     }
@@ -167,6 +175,8 @@ mod tests {
         assert_eq!(objects.layout(), ObjectLayout::Dos);
         assert_eq!(objects.len(), 1);
         assert_eq!(objects.get(0).unwrap().item_use_script(), 30);
+        assert_eq!(objects.get(0).unwrap().player_friend_death_script(), 30);
+        assert_eq!(objects.get(0).unwrap().player_dying_script(), 40);
         assert_eq!(objects.get(0).unwrap().item_equip_script(), 40);
         assert_eq!(objects.get(0).unwrap().item_throw_script(), 50);
         assert_eq!(objects.get(0).unwrap().magic_success_script(), 30);

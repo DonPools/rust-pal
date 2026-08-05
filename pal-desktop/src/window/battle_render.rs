@@ -1074,6 +1074,8 @@ fn render_battle_event(
         | BattleEvent::PlayerDefend { .. }
         | BattleEvent::PlayerDefensiveMagic { .. }
         | BattleEvent::PlayerMagicAnimation { .. }
+        | BattleEvent::PlayerFriendDeath { .. }
+        | BattleEvent::PlayerDying { .. }
         | BattleEvent::RoundCompleted
         | BattleEvent::Finished(_) => return,
     };

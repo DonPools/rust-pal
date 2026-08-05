@@ -287,10 +287,16 @@ impl<M: CollisionMap> GameState<M> {
     }
 
     pub fn advance_battle_resolution(&mut self) -> Vec<BattleEvent> {
+        let inventory = self.inventory.clone();
+        let auto_battle = self.auto_battle;
         let events = self
             .active_battle
             .as_mut()
-            .map(BattleState::advance_resolution)
+            .map(|battle| {
+                battle.set_auto_battle(auto_battle);
+                battle.set_inventory_amounts(&inventory);
+                battle.advance_resolution()
+            })
             .unwrap_or_default();
         for event in &events {
             match *event {
@@ -317,6 +323,8 @@ impl<M: CollisionMap> GameState<M> {
                 | BattleEvent::PlayerDefensiveMagic { .. }
                 | BattleEvent::PlayerCooperativeMagic { .. }
                 | BattleEvent::PlayerMagicAnimation { .. }
+                | BattleEvent::PlayerFriendDeath { .. }
+                | BattleEvent::PlayerDying { .. }
                 | BattleEvent::RoundCompleted
                 | BattleEvent::Finished(_) => {}
             }
@@ -374,6 +382,14 @@ impl<M: CollisionMap> GameState<M> {
             }
             BattleScriptSource::PlayerItemThrow { item_object, .. } => {
                 self.item_throw_scripts.insert(item_object, next_entry);
+            }
+            BattleScriptSource::PlayerFriendDeath { name_object, .. } => {
+                self.object_script_overrides
+                    .insert((name_object, 0), next_entry);
+            }
+            BattleScriptSource::PlayerDying { name_object, .. } => {
+                self.object_script_overrides
+                    .insert((name_object, 1), next_entry);
             }
             BattleScriptSource::EnemyTurnStart { .. }
             | BattleScriptSource::EnemyReady { .. }
@@ -849,6 +865,16 @@ impl<M: CollisionMap> GameState<M> {
         }
         battle.refresh_initial_enemy_scripts();
         for player in &mut battle.players {
+            player.friend_death_script = self
+                .object_script_overrides
+                .get(&(player.name_word_id, 0))
+                .copied()
+                .unwrap_or(player.friend_death_script);
+            player.dying_script = self
+                .object_script_overrides
+                .get(&(player.name_word_id, 1))
+                .copied()
+                .unwrap_or(player.dying_script);
             for magic in &mut player.magics {
                 magic.use_script = self
                     .magic_use_scripts
@@ -873,6 +899,7 @@ impl<M: CollisionMap> GameState<M> {
             player.poison_face_color = poison_face_color(poisons, objects);
         }
         battle.refresh_player_effects();
+        battle.set_auto_battle(self.auto_battle);
         self.active_battle = Some(battle);
         true
     }
@@ -3446,7 +3473,12 @@ impl<M: CollisionMap> GameState<M> {
                     .as_mut()
                     .is_some_and(|battle| battle.queue_player_magic_animation(player));
             }
-            ScriptAction::EnableAutoBattle => self.auto_battle = true,
+            ScriptAction::EnableAutoBattle => {
+                self.auto_battle = true;
+                if let Some(battle) = self.active_battle.as_mut() {
+                    battle.set_auto_battle(true);
+                }
+            }
             ScriptAction::DrainEnemyHp {
                 enemy_index,
                 amount,
@@ -6035,6 +6067,7 @@ mod tests {
         assert_eq!(state.battle().unwrap().enemies[1].slot, 1);
 
         assert!(state.apply_script_action(ScriptAction::KillEnemy { enemy_index: 1 }));
+        state.battle_mut().unwrap().queue_post_action_check(false);
         assert!(state.apply_script_action(ScriptAction::SummonEnemy {
             enemy_index: 0,
             object_id: 0,

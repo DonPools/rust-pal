@@ -233,6 +233,8 @@ pub enum BattleScriptSource {
     EnemyTurnStart { enemy: usize },
     EnemyReady { enemy: usize },
     EnemyBattleEnd { enemy: usize },
+    PlayerFriendDeath { player: usize, name_object: u16 },
+    PlayerDying { player: usize, name_object: u16 },
     PlayerPoison { role_id: u16, poison_id: u16 },
     EnemyPoison { enemy: usize, poison_id: u16 },
     EnemyMagicUse { enemy: usize, magic_object: u16 },
@@ -283,7 +285,10 @@ enum BattleFlow {
         target: Option<usize>,
         kind: PlayerItemKind,
     },
-    RoundScripts,
+    RoundScripts {
+        actor: usize,
+        scripts_queued: bool,
+    },
     TurnStartScripts,
     Outcome(BattleResult),
     BattleEndScripts(BattleResult),
@@ -381,12 +386,15 @@ pub struct BattlePlayer {
     pub cooperative_magic: Option<BattleMagic>,
     pub defending: bool,
     pub covered_by: u16,
+    pub friend_death_script: u16,
+    pub dying_script: u16,
     pub death_sound: u16,
     pub attack_sound: u16,
     pub weapon_sound: u16,
     pub critical_sound: u16,
     pub magic_sound: u16,
     pub cover_sound: u16,
+    pub dying_sound: u16,
     pub statuses: BattleStatuses,
     pub poisons: [BattlePoison; MAX_BATTLE_POISONS],
     pub poison_face_color: Option<u8>,
@@ -553,6 +561,7 @@ pub struct BattleEnemy {
     pub sorcery_resistance: u16,
     pub statuses: BattleStatuses,
     pub poisons: [BattlePoison; MAX_BATTLE_POISONS],
+    rewards_collected: bool,
 }
 
 impl BattleEnemy {
@@ -657,6 +666,12 @@ pub enum BattleEvent {
     PlayerMagicAnimation {
         player: Option<usize>,
     },
+    PlayerFriendDeath {
+        player: usize,
+    },
+    PlayerDying {
+        player: usize,
+    },
     RoundCompleted,
     Finished(BattleResult),
 }
@@ -696,6 +711,10 @@ pub struct BattleState {
     action_index: usize,
     temporary_player_stats: Vec<[u16; 6]>,
     base_player_battle_sprites: Vec<u16>,
+    inventory_amounts: Option<Vec<(u16, u16)>>,
+    previous_player_hp: Vec<u16>,
+    gained_rewards: BattleRewards,
+    auto_battle: bool,
     round: u32,
     random_state: u32,
     battlefield_magic_effect: [i16; pal_assets::battle::MAGIC_ELEMENT_COUNT],
@@ -759,6 +778,7 @@ impl BattleState {
             .iter()
             .map(|player| player.battle_sprite_num)
             .collect();
+        let previous_player_hp = players.iter().map(|player| player.hp).collect();
         let active_player = next_player(&players, &acted, 0);
         let phase = if active_player.is_some() {
             BattlePhase::AwaitingCommand
@@ -800,6 +820,10 @@ impl BattleState {
             action_index: 0,
             temporary_player_stats,
             base_player_battle_sprites,
+            inventory_amounts: None,
+            previous_player_hp,
+            gained_rewards: BattleRewards::default(),
+            auto_battle: false,
             round: 1,
             random_state: 0x6d2b_79f5,
             battlefield_magic_effect: battlefield_definition.magic_effect,
@@ -929,6 +953,32 @@ impl BattleState {
                     return false;
                 };
                 actor.battle_end_script = next_entry;
+            }
+            BattleScriptSource::PlayerFriendDeath {
+                player,
+                name_object,
+            } => {
+                let Some(actor) = self
+                    .players
+                    .get_mut(player)
+                    .filter(|actor| actor.name_word_id == name_object)
+                else {
+                    return false;
+                };
+                actor.friend_death_script = next_entry;
+            }
+            BattleScriptSource::PlayerDying {
+                player,
+                name_object,
+            } => {
+                let Some(actor) = self
+                    .players
+                    .get_mut(player)
+                    .filter(|actor| actor.name_word_id == name_object)
+                else {
+                    return false;
+                };
+                actor.dying_script = next_entry;
             }
             BattleScriptSource::PlayerPoison { role_id, poison_id } => {
                 if let Some(poison) = self
@@ -1112,14 +1162,17 @@ impl BattleState {
                         continue;
                     }
                     let Some(queued) = self.action_queue.get(self.action_index).copied() else {
-                        self.queue_round_poison_scripts();
-                        self.flow = BattleFlow::RoundScripts;
-                        if self.has_script_work() {
-                            return events;
+                        for player in &mut self.players {
+                            player.defending = false;
                         }
+                        self.flow = BattleFlow::RoundScripts {
+                            actor: 0,
+                            scripts_queued: false,
+                        };
                         continue;
                     };
                     self.action_index += 1;
+                    let queued = self.validate_queued_item(queued);
                     match queued.action {
                         BattleActorAction::Player { player, action } => {
                             match action {
@@ -1148,6 +1201,7 @@ impl BattleState {
                                 | PlayerAction::AttackMate => {}
                             }
                             events.extend(self.perform_player_action(player, action));
+                            self.queue_post_action_check(false);
                             if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
                                 self.flow = BattleFlow::Outcome(BattleResult::Won);
                             } else if self.players.iter().all(|actor| !actor.is_combat_active()) {
@@ -1195,18 +1249,21 @@ impl BattleState {
                         };
                         return events;
                     }
-                    self.magic_blow = 0;
-                    if actor.statuses.is_active(BattleStatus::Confused) {
-                        self.flow = BattleFlow::PerformActions;
-                        if let Some(event) = self.perform_confused_enemy_action(enemy) {
-                            events.push(event);
-                        }
-                        return events;
-                    }
+                    let confused = actor.statuses.is_active(BattleStatus::Confused);
                     let magic_object = actor.magic_object;
                     let magic_rate = actor.magic_rate;
                     let silenced = actor.statuses.is_active(BattleStatus::Silence);
                     let magic = actor.magic;
+                    self.backup_player_hp();
+                    self.magic_blow = 0;
+                    if confused {
+                        self.flow = BattleFlow::PerformActions;
+                        if let Some(event) = self.perform_confused_enemy_action(enemy) {
+                            events.push(event);
+                        }
+                        self.queue_post_action_check(false);
+                        return events;
+                    }
                     if magic_object != 0 && !silenced && self.random(10) < u32::from(magic_rate) {
                         if magic_object == u16::MAX {
                             self.flow = BattleFlow::PerformActions;
@@ -1274,6 +1331,7 @@ impl BattleState {
                             self.flow = BattleFlow::EnemyAttackItem { enemy };
                         } else {
                             self.flow = BattleFlow::PerformActions;
+                            self.queue_post_action_check(true);
                         }
                         events.push(event);
                     } else {
@@ -1332,7 +1390,10 @@ impl BattleState {
                     EnemyMagicPhase::Damage => {
                         events.extend(self.perform_enemy_magic(enemy, target, magic));
                         self.flow = BattleFlow::PerformActions;
-                        if self.players.iter().all(|player| !player.is_combat_active()) {
+                        self.queue_post_action_check(true);
+                        if !self.has_script_work()
+                            && self.players.iter().all(|player| !player.is_combat_active())
+                        {
                             self.flow = BattleFlow::Outcome(BattleResult::Lost);
                         }
                         return events;
@@ -1340,6 +1401,7 @@ impl BattleState {
                 },
                 BattleFlow::EnemyAttackItem { .. } => {
                     self.flow = BattleFlow::PerformActions;
+                    self.queue_post_action_check(true);
                     return events;
                 }
                 BattleFlow::PlayerMagic {
@@ -1394,6 +1456,7 @@ impl BattleState {
                         events.extend(self.perform_player_magic(player, target, magic));
                         self.record_magic_experience(player);
                         self.flow = BattleFlow::PerformActions;
+                        self.queue_post_action_check(false);
                         if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
                             self.flow = BattleFlow::Outcome(BattleResult::Won);
                         }
@@ -1406,13 +1469,37 @@ impl BattleState {
                     self.detect_script_outcome();
                     return events;
                 }
-                BattleFlow::RoundScripts => {
-                    for player in &mut self.players {
-                        player.statuses.decrement_round();
+                BattleFlow::RoundScripts {
+                    actor,
+                    scripts_queued,
+                } => {
+                    let player_count = self.players.len();
+                    let actor_count = player_count.saturating_add(self.enemies.len());
+                    if actor < actor_count {
+                        if !scripts_queued {
+                            self.queue_round_poison_scripts_for(actor);
+                            self.flow = BattleFlow::RoundScripts {
+                                actor,
+                                scripts_queued: true,
+                            };
+                            if self.has_script_work() {
+                                return events;
+                            }
+                        }
+                        if actor < player_count {
+                            self.players[actor].statuses.decrement_round();
+                        } else {
+                            self.enemies[actor - player_count]
+                                .statuses
+                                .decrement_round();
+                        }
+                        self.flow = BattleFlow::RoundScripts {
+                            actor: actor + 1,
+                            scripts_queued: false,
+                        };
+                        continue;
                     }
-                    for enemy in &mut self.enemies {
-                        enemy.statuses.decrement_round();
-                    }
+                    self.queue_post_action_check(false);
                     self.hiding_time = self.hiding_time.saturating_sub(1);
                     if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
                         self.flow = BattleFlow::Outcome(BattleResult::Won);
@@ -1432,9 +1519,6 @@ impl BattleState {
                 }
                 BattleFlow::TurnStartScripts => {
                     self.round = self.round.saturating_add(1);
-                    for player in &mut self.players {
-                        player.defending = false;
-                    }
                     self.acted.fill(false);
                     self.previous_player_actions
                         .clone_from(&self.player_actions);
@@ -1503,7 +1587,7 @@ impl BattleState {
                 !self
                     .enemies
                     .iter()
-                    .any(|enemy| enemy.slot == slot && enemy.is_alive())
+                    .any(|enemy| enemy.slot == slot && enemy.object_id != 0)
             })
             .take(requested)
             .collect::<Vec<_>>();
@@ -1588,7 +1672,7 @@ impl BattleState {
                 !self
                     .enemies
                     .iter()
-                    .any(|enemy| enemy.slot == slot && enemy.is_alive())
+                    .any(|enemy| enemy.slot == slot && enemy.object_id != 0)
             })
             .take(requested)
             .collect::<Vec<_>>();
@@ -1711,14 +1795,11 @@ impl BattleState {
     }
 
     pub fn rewards(&self) -> BattleRewards {
-        BattleRewards {
-            experience: self
-                .enemies
-                .iter()
-                .map(|enemy| u32::from(enemy.experience))
-                .sum(),
-            cash: self.enemies.iter().map(|enemy| u32::from(enemy.cash)).sum(),
-        }
+        self.gained_rewards
+    }
+
+    pub(crate) fn set_auto_battle(&mut self, enabled: bool) {
+        self.auto_battle = enabled;
     }
 
     pub fn hidden_experience_counts(
@@ -2364,7 +2445,11 @@ impl BattleState {
         }
         for player in 0..self.players.len() {
             if !self.acted[player]
-                && self.players[player].can_act()
+                && self.players[player].is_alive()
+                && !self.players[player].statuses.is_active(BattleStatus::Sleep)
+                && !self.players[player]
+                    .statuses
+                    .is_active(BattleStatus::Paralyzed)
                 && !self.players[player]
                     .statuses
                     .is_active(BattleStatus::Confused)
@@ -2640,10 +2725,16 @@ impl BattleState {
             }
         }
         for player in 0..self.players.len() {
-            if !self.players[player].can_act() {
-                continue;
-            }
-            let action = if self.players[player]
+            let disabled = !self.players[player].is_alive()
+                || self.players[player].statuses.is_active(BattleStatus::Sleep)
+                || self.players[player]
+                    .statuses
+                    .is_active(BattleStatus::Paralyzed);
+            let action = if disabled {
+                PlayerAction::Attack {
+                    target: self.first_living_enemy().unwrap_or_default(),
+                }
+            } else if self.players[player]
                 .statuses
                 .is_active(BattleStatus::Confused)
             {
@@ -2651,9 +2742,15 @@ impl BattleState {
             } else if let Some(action) = self.player_actions[player] {
                 action
             } else {
-                continue;
+                PlayerAction::Attack {
+                    target: self.first_living_enemy().unwrap_or_default(),
+                }
             };
-            let dexterity = self.player_action_dexterity(player, action);
+            let dexterity = if disabled {
+                0
+            } else {
+                self.player_action_dexterity(player, action)
+            };
             queue.push(QueuedBattleAction {
                 action: BattleActorAction::Player { player, action },
                 dexterity,
@@ -2664,6 +2761,44 @@ impl BattleState {
         self.action_index = 0;
         self.active_player = None;
         self.flow = BattleFlow::PerformActions;
+    }
+
+    /// Refresh the inventory view used by Classic's execution-time item validation.
+    pub(crate) fn set_inventory_amounts(&mut self, inventory: &[(u16, u16)]) {
+        self.inventory_amounts = Some(inventory.to_vec());
+    }
+
+    fn validate_queued_item(&mut self, mut queued: QueuedBattleAction) -> QueuedBattleAction {
+        let Some(inventory) = self.inventory_amounts.as_ref() else {
+            return queued;
+        };
+        let default_target = self.first_living_enemy().unwrap_or_default();
+        let BattleActorAction::Player { player, action } = queued.action else {
+            return queued;
+        };
+        let available = |item_object| {
+            inventory
+                .iter()
+                .find_map(|&(id, amount)| (id == item_object).then_some(amount))
+                .unwrap_or(0)
+                > 0
+        };
+        let fallback = match action {
+            PlayerAction::UseItem { item_object, .. } if !available(item_object) => {
+                Some(PlayerAction::Defend)
+            }
+            PlayerAction::ThrowItem { item_object, .. } if !available(item_object) => {
+                Some(PlayerAction::Attack {
+                    target: default_target,
+                })
+            }
+            _ => None,
+        };
+        if let Some(action) = fallback {
+            queued.action = BattleActorAction::Player { player, action };
+            self.player_actions[player] = Some(action);
+        }
+        queued
     }
 
     fn enemy_action_dexterity(&mut self, enemy: usize) -> i32 {
@@ -2876,6 +3011,7 @@ impl BattleState {
         };
         self.pending_events.push_front(event);
         self.flow = BattleFlow::PerformActions;
+        self.queue_post_action_check(false);
     }
 
     fn perform_player_action(&mut self, player: usize, action: PlayerAction) -> Vec<BattleEvent> {
@@ -3065,6 +3201,9 @@ impl BattleState {
                 target,
                 magic_object: magic.object_id,
             }];
+        }
+        if magic.base_damage as i16 <= 0 {
+            return Vec::new();
         }
         let mut blow = self.magic_blow;
         let targets = match target {
@@ -3357,22 +3496,134 @@ impl BattleState {
         )
     }
 
-    fn queue_round_poison_scripts(&mut self) {
-        let player_scripts = self.players.iter().flat_map(|player| {
-            player.poisons.iter().filter_map(|poison| {
-                (poison.object_id != 0 && poison.script_entry != 0).then_some(BattleScriptRequest {
-                    source: BattleScriptSource::PlayerPoison {
-                        role_id: player.role_id,
-                        poison_id: poison.object_id,
+    fn backup_player_hp(&mut self) {
+        self.previous_player_hp = self.players.iter().map(|player| player.hp).collect();
+    }
+
+    fn collect_defeated_enemy_rewards(&mut self) {
+        for enemy in &mut self.enemies {
+            if enemy.object_id != 0 && enemy.hp == 0 && !enemy.rewards_collected {
+                self.gained_rewards.experience = self
+                    .gained_rewards
+                    .experience
+                    .saturating_add(u32::from(enemy.experience));
+                self.gained_rewards.cash = self
+                    .gained_rewards
+                    .cash
+                    .saturating_add(u32::from(enemy.cash));
+                enemy.rewards_collected = true;
+                enemy.object_id = 0;
+            }
+        }
+    }
+
+    /// Mirror the player-sensitive half of `PAL_BattlePostActionCheck`.
+    /// Only the first eligible script is scheduled for one completed enemy action.
+    pub(crate) fn queue_post_action_check(&mut self, check_players: bool) {
+        self.collect_defeated_enemy_rewards();
+        if !check_players || self.auto_battle {
+            return;
+        }
+
+        for player in 0..self.players.len() {
+            let actor = &self.players[player];
+            if actor.hp >= self.previous_player_hp[player] || actor.hp != 0 {
+                continue;
+            }
+            let Some(cover) = self.players.iter().position(|candidate| {
+                candidate.role_id == actor.covered_by
+                    && candidate.is_alive()
+                    && !candidate.statuses.is_active(BattleStatus::Sleep)
+                    && !candidate.statuses.is_active(BattleStatus::Paralyzed)
+                    && !candidate.statuses.is_active(BattleStatus::Confused)
+            }) else {
+                continue;
+            };
+            let cover_actor = &self.players[cover];
+            if cover_actor.friend_death_script == 0 {
+                continue;
+            }
+            self.pending_events
+                .push_back(BattleEvent::PlayerFriendDeath { player: cover });
+            self.pending_scripts.push_back(BattleScriptRequest {
+                source: BattleScriptSource::PlayerFriendDeath {
+                    player: cover,
+                    name_object: cover_actor.name_word_id,
+                },
+                entry: cover_actor.friend_death_script,
+                object_id: cover_actor.role_id,
+            });
+            return;
+        }
+
+        for player in 0..self.players.len() {
+            let actor = &self.players[player];
+            if actor.statuses.is_active(BattleStatus::Sleep)
+                || actor.statuses.is_active(BattleStatus::Confused)
+                || actor.hp >= self.previous_player_hp[player]
+                || !actor.is_alive()
+                || !actor.is_dying()
+                || self.previous_player_hp[player] < actor.max_hp / 5
+            {
+                continue;
+            }
+            let cover = self
+                .players
+                .iter()
+                .position(|candidate| candidate.role_id == actor.covered_by);
+            if cover.is_some_and(|cover| {
+                let cover = &self.players[cover];
+                cover.statuses.is_active(BattleStatus::Sleep)
+                    || cover.statuses.is_active(BattleStatus::Paralyzed)
+                    || cover.statuses.is_active(BattleStatus::Confused)
+            }) {
+                continue;
+            }
+            self.pending_events
+                .push_back(BattleEvent::PlayerDying { player });
+            if cover.is_none_or(|cover| !self.players[cover].is_alive()) {
+                continue;
+            }
+            if actor.dying_script != 0 {
+                self.pending_scripts.push_back(BattleScriptRequest {
+                    source: BattleScriptSource::PlayerDying {
+                        player,
+                        name_object: actor.name_word_id,
                     },
-                    entry: poison.script_entry,
-                    object_id: player.role_id,
-                })
-            })
-        });
-        let enemy_scripts = self.enemies.iter().enumerate().flat_map(|(enemy, actor)| {
-            actor.poisons.iter().filter_map(move |poison| {
-                let object_id = u16::try_from(actor.slot).ok()?;
+                    entry: actor.dying_script,
+                    object_id: actor.role_id,
+                });
+            }
+            return;
+        }
+    }
+
+    fn queue_round_poison_scripts_for(&mut self, actor: usize) {
+        if let Some(player) = self.players.get(actor) {
+            self.pending_scripts
+                .extend(player.poisons.iter().filter_map(|poison| {
+                    (poison.object_id != 0 && poison.script_entry != 0).then_some(
+                        BattleScriptRequest {
+                            source: BattleScriptSource::PlayerPoison {
+                                role_id: player.role_id,
+                                poison_id: poison.object_id,
+                            },
+                            entry: poison.script_entry,
+                            object_id: player.role_id,
+                        },
+                    )
+                }));
+            return;
+        }
+        let enemy = actor.saturating_sub(self.players.len());
+        let Some(target) = self.enemies.get(enemy) else {
+            return;
+        };
+        let Some(object_id) = u16::try_from(target.slot).ok() else {
+            return;
+        };
+        self.pending_scripts
+            .extend(target.poisons.iter().filter_map(|poison| {
                 (poison.object_id != 0 && poison.script_entry != 0).then_some(BattleScriptRequest {
                     source: BattleScriptSource::EnemyPoison {
                         enemy,
@@ -3381,10 +3632,7 @@ impl BattleState {
                     entry: poison.script_entry,
                     object_id,
                 })
-            })
-        });
-        self.pending_scripts
-            .extend(player_scripts.chain(enemy_scripts));
+            }));
     }
 
     fn queue_turn_start_scripts(&mut self) {
@@ -3429,10 +3677,8 @@ impl BattleState {
 
     fn detect_script_outcome(&mut self) {
         if self.phase != BattlePhase::AwaitingCommand
-            || matches!(
-                self.flow,
-                BattleFlow::Outcome(_) | BattleFlow::BattleEndScripts(_) | BattleFlow::Finished
-            )
+            || self.has_script_work()
+            || self.flow != BattleFlow::PerformActions
         {
             return;
         }
@@ -3740,6 +3986,7 @@ fn battle_enemy(
         sorcery_resistance: object.enemy_sorcery_resistance(),
         statuses: BattleStatuses::default(),
         poisons: [BattlePoison::default(); MAX_BATTLE_POISONS],
+        rewards_collected: false,
     }
 }
 
@@ -3813,6 +4060,7 @@ fn battle_player(
     objects: &GlobalObjects,
     magics: &Magics,
 ) -> Option<BattlePlayer> {
+    let player_object = objects.get(role.name_word_id)?;
     let battle_magics = role
         .magic
         .iter()
@@ -3848,12 +4096,15 @@ fn battle_player(
         cooperative_magic,
         defending: false,
         covered_by: role.covered_by,
+        friend_death_script: player_object.player_friend_death_script(),
+        dying_script: player_object.player_dying_script(),
         death_sound: role.death_sound,
         attack_sound: role.attack_sound,
         weapon_sound: role.weapon_sound,
         critical_sound: role.critical_sound,
         magic_sound: role.magic_sound,
         cover_sound: role.cover_sound,
+        dying_sound: role.dying_sound,
         statuses: BattleStatuses::default(),
         poisons: [BattlePoison::default(); MAX_BATTLE_POISONS],
         poison_face_color: None,
@@ -3874,7 +4125,9 @@ fn battle_player_stat_mut(player: &mut BattlePlayer, attribute: u16) -> Option<&
 
 fn next_player(players: &[BattlePlayer], acted: &[bool], start: usize) -> Option<usize> {
     (start..players.len()).find(|&index| {
-        players[index].can_act()
+        players[index].is_alive()
+            && !players[index].statuses.is_active(BattleStatus::Sleep)
+            && !players[index].statuses.is_active(BattleStatus::Paralyzed)
             && !players[index].statuses.is_active(BattleStatus::Confused)
             && !acted[index]
     })
@@ -4092,13 +4345,7 @@ mod tests {
         assert_eq!(battle.players[0].attack_sound, 22);
         assert_eq!(battle.players[0].weapon_sound, 23);
         assert_eq!(battle.players[0].magic_sound, 24);
-        assert_eq!(
-            battle.rewards(),
-            BattleRewards {
-                experience: 52,
-                cash: 96
-            }
-        );
+        assert_eq!(battle.rewards(), BattleRewards::default());
     }
 
     #[test]
@@ -4112,6 +4359,7 @@ mod tests {
             .statuses
             .set_for_enemy(BattleStatus::Protect, 4);
         assert!(battle.kill_enemy(1));
+        battle.queue_post_action_check(false);
         let added = battle
             .divide_enemy(0, 2, &data.enemy_positions)
             .expect("sole living enemy should divide");
@@ -4140,6 +4388,7 @@ mod tests {
             .summon_enemy(0, 3, 1, &data, &objects, &magics)
             .is_none());
         assert!(battle.kill_enemy(1));
+        battle.queue_post_action_check(false);
         assert!(battle
             .summon_enemy(0, 3, 2, &data, &objects, &magics)
             .is_none());
@@ -4527,6 +4776,243 @@ mod tests {
         complete_pending_scripts(&mut non_consuming);
         assert!(non_consuming.use_item(22, Some(0), 50, false).is_some());
         assert_eq!(non_consuming.reserved_item_count(22), 0);
+    }
+
+    #[test]
+    fn unavailable_items_fall_back_when_the_queued_action_executes() {
+        let (data, objects, magics, role) = fixture(1_000, 0, 500);
+        let mut used =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut used);
+        for enemy in &mut used.enemies {
+            enemy.statuses.set_for_enemy(BattleStatus::Paralyzed, 2);
+        }
+        assert!(used.use_item(20, Some(0), 30, true).is_some());
+        used.set_inventory_amounts(&[]);
+        let used_events = resolve_until_input_or_finish(&mut used);
+        assert!(used_events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PlayerDefend { player: 0 })));
+        assert!(!used_events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PlayerUseItem { .. })));
+
+        let mut thrown =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut thrown);
+        for enemy in &mut thrown.enemies {
+            enemy.statuses.set_for_enemy(BattleStatus::Paralyzed, 2);
+        }
+        assert!(thrown.throw_item(20, Some(0), 30).is_some());
+        thrown.set_inventory_amounts(&[]);
+        let thrown_events = resolve_until_input_or_finish(&mut thrown);
+        assert!(thrown_events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PlayerAttack { player: 0, .. })));
+        assert!(!thrown_events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PlayerThrowItem { .. })));
+
+        let mut replenished = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &role), (1, &role)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut replenished);
+        for enemy in &mut replenished.enemies {
+            enemy.statuses.set_for_enemy(BattleStatus::Paralyzed, 2);
+        }
+        assert!(replenished.defend().is_some());
+        assert!(replenished.use_item(20, Some(0), 0, true).is_some());
+        replenished.set_inventory_amounts(&[]);
+        assert_eq!(
+            replenished.advance_resolution(),
+            vec![BattleEvent::PlayerDefend { player: 0 }]
+        );
+        replenished.set_inventory_amounts(&[(20, 1)]);
+        assert!(matches!(
+            replenished.advance_resolution().as_slice(),
+            [BattleEvent::PlayerUseItem {
+                player: 1,
+                item_object: 20,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn disabled_players_keep_a_zero_dexterity_recovery_action() {
+        let (data, objects, magics, role) = fixture(1_000, 0, 500);
+        let mut disabled = role.clone();
+        disabled.hp = 0;
+        let mut battle = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &role), (1, &disabled)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut battle);
+        for enemy in &mut battle.enemies {
+            enemy.statuses.set_for_enemy(BattleStatus::Paralyzed, 2);
+        }
+
+        assert_eq!(battle.active_player(), Some(0));
+        assert!(battle.attack(0).is_some());
+        assert_eq!(battle.active_player(), None);
+        assert!(battle.action_queue.iter().any(|queued| {
+            matches!(
+                queued,
+                QueuedBattleAction {
+                    action: BattleActorAction::Player {
+                        player: 1,
+                        action: PlayerAction::Attack { .. }
+                    },
+                    dexterity: 0,
+                }
+            )
+        }));
+
+        battle.players[1].hp = 500;
+        let events = resolve_until_input_or_finish(&mut battle);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PlayerAttack { player: 1, .. })));
+
+        let mut puppet = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &role), (1, &disabled)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut puppet);
+        assert!(puppet.players[1]
+            .statuses
+            .set_for_player(BattleStatus::Puppet, 2, false,));
+        for enemy in &mut puppet.enemies {
+            enemy.statuses.set_for_enemy(BattleStatus::Paralyzed, 2);
+        }
+        assert!(puppet.attack(0).is_some());
+        assert_eq!(puppet.active_player(), None);
+        let events = resolve_until_input_or_finish(&mut puppet);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, BattleEvent::PlayerAttack { player: 1, .. })));
+    }
+
+    #[test]
+    fn post_action_checks_queue_friend_death_and_dying_scripts() {
+        let (data, mut objects, magics, mut victim) = fixture(1_000, 0, 100);
+        objects.get_mut(0).unwrap().data[2] = 70;
+        objects.get_mut(0).unwrap().data[3] = 80;
+        victim.covered_by = 1;
+        victim.dying_sound = 77;
+        let cover = victim.clone();
+
+        let mut death = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &victim), (1, &cover)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut death);
+        death.backup_player_hp();
+        death.players[0].hp = 0;
+        death.queue_post_action_check(true);
+        assert_eq!(
+            death.advance_resolution(),
+            vec![BattleEvent::PlayerFriendDeath { player: 1 }]
+        );
+        let script_request = death.take_script_request().unwrap();
+        assert_eq!(
+            script_request.source,
+            BattleScriptSource::PlayerFriendDeath {
+                player: 1,
+                name_object: 0,
+            }
+        );
+        assert_eq!(script_request.object_id, 1);
+        assert!(death.complete_script(71));
+        assert_eq!(death.players[1].friend_death_script, 71);
+
+        let mut dying = BattleState::new(
+            request(true),
+            0,
+            7,
+            [(0, &victim), (1, &cover)],
+            &data,
+            &objects,
+            &magics,
+        )
+        .unwrap();
+        complete_pending_scripts(&mut dying);
+        dying.backup_player_hp();
+        dying.players[0].hp = 10;
+        dying.queue_post_action_check(true);
+        assert_eq!(
+            dying.advance_resolution(),
+            vec![BattleEvent::PlayerDying { player: 0 }]
+        );
+        let script_request = dying.take_script_request().unwrap();
+        assert_eq!(
+            script_request.source,
+            BattleScriptSource::PlayerDying {
+                player: 0,
+                name_object: 0,
+            }
+        );
+        assert_eq!(script_request.object_id, 0);
+        assert!(dying.complete_script(81));
+        assert_eq!(dying.players[0].dying_script, 81);
+        assert_eq!(dying.players[0].dying_sound, 77);
+    }
+
+    #[test]
+    fn scripted_victory_rewards_only_enemies_already_defeated() {
+        let (data, objects, magics, role) = fixture(100, 0, 500);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        battle.enemies[0].hp = 0;
+        battle.queue_post_action_check(false);
+        assert_eq!(
+            battle.rewards(),
+            BattleRewards {
+                experience: 26,
+                cash: 48,
+            }
+        );
+
+        assert!(battle.set_script_result(3));
+        assert!(battle.advance_resolution().is_empty());
+        complete_pending_scripts(&mut battle);
+        assert_eq!(
+            battle.advance_resolution(),
+            vec![BattleEvent::Finished(BattleResult::Won)]
+        );
+        assert_eq!(
+            battle.settled_rewards(),
+            Some(BattleRewards {
+                experience: 26,
+                cash: 48,
+            })
+        );
     }
 
     #[test]
@@ -5500,6 +5986,13 @@ mod tests {
             object_id: 41,
             script_entry: 32,
         };
+        battle.players[0]
+            .statuses
+            .set_for_player(BattleStatus::Protect, 2, true);
+        battle.enemies[0]
+            .statuses
+            .set_for_enemy(BattleStatus::Protect, 2);
+        battle.players[0].defending = true;
         assert!(battle.attack(0).is_some());
 
         let mut ready_entries = [13, 13];
@@ -5527,6 +6020,7 @@ mod tests {
             battle.advance_resolution();
         }
         let player_poison = battle.take_script_request().unwrap();
+        assert!(!battle.players[0].defending);
         assert_eq!(
             player_poison.source,
             BattleScriptSource::PlayerPoison {
@@ -5535,6 +6029,19 @@ mod tests {
             }
         );
         assert!(battle.complete_script(33));
+        assert_eq!(
+            battle.players[0].statuses.duration(BattleStatus::Protect),
+            2
+        );
+        assert!(battle.advance_resolution().is_empty());
+        assert_eq!(
+            battle.players[0].statuses.duration(BattleStatus::Protect),
+            1
+        );
+        assert_eq!(
+            battle.enemies[0].statuses.duration(BattleStatus::Protect),
+            2
+        );
         let enemy_poison = battle.take_script_request().unwrap();
         assert_eq!(
             enemy_poison.source,
@@ -5546,6 +6053,10 @@ mod tests {
         assert!(battle.complete_script(34));
 
         assert!(battle.advance_resolution().is_empty());
+        assert_eq!(
+            battle.enemies[0].statuses.duration(BattleStatus::Protect),
+            1
+        );
         for (enemy, entry, next_entry) in [(0, 21, 23), (1, 22, 24)] {
             let request = battle.take_script_request().unwrap();
             assert_eq!(

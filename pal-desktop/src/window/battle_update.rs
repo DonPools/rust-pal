@@ -611,6 +611,9 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         BattleEvent::PlayerUseItem { .. } => original_frames_to_ticks(25),
         BattleEvent::PlayerThrowItem { .. } => original_frames_to_ticks(24),
         BattleEvent::PlayerMagicAnimation { .. } => PLAYER_MAGIC_ANIMATION_EVENT_TICKS,
+        BattleEvent::PlayerFriendDeath { .. } | BattleEvent::PlayerDying { .. } => {
+            original_frames_to_ticks(10)
+        }
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -903,6 +906,11 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
             Some(vec![Some(player.magic_sound), None, None])
         }),
         BattleEvent::PlayerMagicAnimation { player: None } => None,
+        BattleEvent::PlayerDying { player } => game.battle().and_then(|battle| {
+            let player = battle.players.get(player)?;
+            Some(vec![Some(player.dying_sound), None, None])
+        }),
+        BattleEvent::PlayerFriendDeath { .. } => None,
         BattleEvent::PlayerFlee {
             succeeded: true, ..
         } => Some(vec![Some(45), None, None]),

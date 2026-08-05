@@ -27,7 +27,7 @@ fn main() {
         std::process::exit(2);
     });
 
-    println!("Rust-PAL M6 complete");
+    println!("Rust-PAL M6 in progress");
     println!("data: {}", data_dir.display());
 
     let boot = bootstrap(data_dir);
