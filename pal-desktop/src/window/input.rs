@@ -12,6 +12,14 @@ pub(super) struct HeldInput {
     direction_pressed: Option<Direction>,
     confirm: bool,
     cancel: bool,
+    battle_repeat: bool,
+    battle_auto: bool,
+    battle_defend: bool,
+    battle_use_item: bool,
+    battle_throw_item: bool,
+    battle_flee: bool,
+    battle_status: bool,
+    battle_force: bool,
     any_pressed: bool,
 }
 
@@ -42,6 +50,14 @@ impl HeldInput {
         match key {
             KeyCode::Enter | KeyCode::Space if pressed && !repeat => self.confirm = true,
             KeyCode::Escape | KeyCode::Backspace if pressed && !repeat => self.cancel = true,
+            KeyCode::KeyR if pressed && !repeat => self.battle_repeat = true,
+            KeyCode::KeyA if pressed && !repeat => self.battle_auto = true,
+            KeyCode::KeyD if pressed && !repeat => self.battle_defend = true,
+            KeyCode::KeyE if pressed && !repeat => self.battle_use_item = true,
+            KeyCode::KeyW if pressed && !repeat => self.battle_throw_item = true,
+            KeyCode::KeyQ if pressed && !repeat => self.battle_flee = true,
+            KeyCode::KeyS if pressed && !repeat => self.battle_status = true,
+            KeyCode::KeyF if pressed && !repeat => self.battle_force = true,
             _ => {}
         }
     }
@@ -52,10 +68,26 @@ impl HeldInput {
             direction_pressed: self.direction_pressed,
             confirm: self.confirm,
             cancel: self.cancel,
+            battle_repeat: self.battle_repeat,
+            battle_auto: self.battle_auto,
+            battle_defend: self.battle_defend,
+            battle_use_item: self.battle_use_item,
+            battle_throw_item: self.battle_throw_item,
+            battle_flee: self.battle_flee,
+            battle_status: self.battle_status,
+            battle_force: self.battle_force,
         };
         self.direction_pressed = None;
         self.confirm = false;
         self.cancel = false;
+        self.battle_repeat = false;
+        self.battle_auto = false;
+        self.battle_defend = false;
+        self.battle_use_item = false;
+        self.battle_throw_item = false;
+        self.battle_flee = false;
+        self.battle_status = false;
+        self.battle_force = false;
         let any_pressed = std::mem::take(&mut self.any_pressed);
         (input, any_pressed)
     }
@@ -115,5 +147,41 @@ mod tests {
         input.set_key(KeyCode::KeyQ, true, false);
         assert!(input.sample().1);
         assert!(!input.sample().1);
+    }
+
+    #[test]
+    fn original_battle_shortcuts_are_edge_triggered() {
+        let mut input = HeldInput::default();
+        for key in [
+            KeyCode::KeyR,
+            KeyCode::KeyA,
+            KeyCode::KeyD,
+            KeyCode::KeyE,
+            KeyCode::KeyW,
+            KeyCode::KeyQ,
+            KeyCode::KeyS,
+            KeyCode::KeyF,
+        ] {
+            input.set_key(key, true, false);
+        }
+        let shortcuts = input.sample().0;
+        assert!(shortcuts.battle_repeat);
+        assert!(shortcuts.battle_auto);
+        assert!(shortcuts.battle_defend);
+        assert!(shortcuts.battle_use_item);
+        assert!(shortcuts.battle_throw_item);
+        assert!(shortcuts.battle_flee);
+        assert!(shortcuts.battle_status);
+        assert!(shortcuts.battle_force);
+
+        let cleared = input.sample().0;
+        assert!(!cleared.battle_repeat);
+        assert!(!cleared.battle_auto);
+        assert!(!cleared.battle_defend);
+        assert!(!cleared.battle_use_item);
+        assert!(!cleared.battle_throw_item);
+        assert!(!cleared.battle_flee);
+        assert!(!cleared.battle_status);
+        assert!(!cleared.battle_force);
     }
 }

@@ -12,6 +12,7 @@ use super::menu_state::{
     ConfirmationMenu, FieldMenu, InventoryMenu, InventoryMode, OpeningMenu, OpeningMenuPage,
     ShopMenu, ShopMode, INVENTORY_COLUMNS, INVENTORY_VISIBLE_ROWS,
 };
+use super::original_save::OriginalSaveSlot;
 use crate::renderer::Renderer;
 
 fn draw_ui_box(
@@ -307,28 +308,48 @@ pub(super) fn render_opening_menu(
             }
         }
         OpeningMenuPage::SaveSlots => {
-            for (index, slot) in menu.slots.into_iter().enumerate() {
-                let y = 7 + index as i32 * 38;
-                draw_single_line_box(renderer, sprites, 195, y, 6);
-                if let Some(label) = text.word(43 + index) {
-                    let color = if index == menu.slot_selected {
-                        selected_color(ui_ticks)
-                    } else {
-                        0x4f
-                    };
-                    renderer.draw_big5_text_shadowed(font, label, 210, y + 10, color);
-                }
-                draw_ui_number(
-                    renderer,
-                    sprites,
-                    u32::from(slot.saved_times),
-                    4,
-                    246,
-                    y + 14,
-                    NumberColor::Yellow,
-                );
-            }
+            render_save_slot_menu(
+                renderer,
+                text,
+                font,
+                sprites,
+                menu.slots,
+                menu.slot_selected,
+                ui_ticks,
+            );
         }
+    }
+}
+
+fn render_save_slot_menu(
+    renderer: &mut Renderer,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    slots: [OriginalSaveSlot; 5],
+    selected: usize,
+    ui_ticks: u64,
+) {
+    for (index, slot) in slots.into_iter().enumerate() {
+        let y = 7 + index as i32 * 38;
+        draw_single_line_box(renderer, sprites, 195, y, 6);
+        if let Some(label) = text.word(43 + index) {
+            let color = if index == selected {
+                selected_color(ui_ticks)
+            } else {
+                0x4f
+            };
+            renderer.draw_big5_text_shadowed(font, label, 210, y + 10, color);
+        }
+        draw_ui_number(
+            renderer,
+            sprites,
+            u32::from(slot.saved_times),
+            4,
+            246,
+            y + 14,
+            NumberColor::Yellow,
+        );
     }
 }
 
@@ -498,6 +519,9 @@ pub(super) fn render_field_menu(
                 }
             }
         }
+        FieldMenu::SaveSlots {
+            selected, slots, ..
+        } => render_save_slot_menu(renderer, text, font, sprites, slots, selected, ui_ticks),
     }
 }
 
@@ -957,8 +981,7 @@ pub(super) fn render_inventory_menu(
     ui_ticks: u64,
 ) {
     match menu.mode {
-        InventoryMode::Target { item_id, selected }
-        | InventoryMode::BattleUseTarget { item_id, selected } => {
+        InventoryMode::Target { item_id, selected } => {
             render_item_target_menu(
                 renderer,
                 game,
@@ -1014,9 +1037,9 @@ pub(super) fn render_inventory_menu(
             .map(|item| (item.item_id, item.amount))
             .collect(),
         InventoryMode::Items => game.inventory().collect(),
-        InventoryMode::EquipTarget { .. }
-        | InventoryMode::Target { .. }
-        | InventoryMode::BattleUseTarget { .. } => unreachable!("target menus returned above"),
+        InventoryMode::EquipTarget { .. } | InventoryMode::Target { .. } => {
+            unreachable!("target menus returned above")
+        }
     };
     let first = menu.first_visible(inventory.len());
     draw_ui_box_with_shadow(renderer, sprites, PANEL_X, PANEL_Y, 6, 17, 1, 0);

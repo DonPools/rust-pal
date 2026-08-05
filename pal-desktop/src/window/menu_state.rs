@@ -27,6 +27,12 @@ pub(super) enum OpeningMenuAction {
     LoadSlot(u8),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SaveSlotMode {
+    Save,
+    Load,
+}
+
 impl OpeningMenu {
     pub(super) fn new(slots: [OriginalSaveSlot; 5]) -> Self {
         Self {
@@ -92,6 +98,11 @@ pub(super) enum FieldMenu {
     System {
         selected: usize,
     },
+    SaveSlots {
+        mode: SaveSlotMode,
+        selected: usize,
+        slots: [OriginalSaveSlot; 5],
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +119,6 @@ pub(super) enum InventoryMode {
     Target { item_id: u16, selected: usize },
     BattleUseItems,
     BattleThrowItems,
-    BattleUseTarget { item_id: u16, selected: usize },
 }
 
 impl Default for InventoryMenu {
@@ -232,6 +242,7 @@ mod tests {
             direction_pressed: direction,
             confirm,
             cancel,
+            ..GameInput::default()
         }
     }
 

@@ -183,6 +183,14 @@ impl VisualState {
         self.ending_effect_sprite = 0;
     }
 
+    pub(super) fn night_palette(&self) -> bool {
+        self.night_palette
+    }
+
+    pub(super) fn screen_wave(&self) -> u16 {
+        u16::try_from(self.screen_wave.max(0)).unwrap_or(u16::MAX)
+    }
+
     pub(super) fn update(
         &mut self,
         current_screen: &[u8],

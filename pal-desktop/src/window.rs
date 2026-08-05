@@ -1,6 +1,7 @@
 //! Native window and map framebuffer presentation.
 
 mod battle_render;
+mod battle_timing;
 mod battle_update;
 mod debug_render;
 mod dialog;
@@ -43,8 +44,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
 
-pub use battle_render::{render_battle, BattleRenderResources, BattleRenderState};
-use battle_update::update_battle;
+pub use battle_render::{render_battle, BattleMenuState, BattleRenderResources, BattleRenderState};
+use battle_update::{advance_post_battle, update_battle};
 use debug_render::{debug_object_snapshot, focused_debug_object};
 #[cfg(test)]
 use debug_render::{
@@ -99,6 +100,8 @@ pub fn run_game_window<L>(
         item_sprites,
         enemy_battle_sprites,
         player_battle_sprites,
+        magic_effect_sprites,
+        battle_effects,
         battle_backgrounds,
         status_background,
         equip_background,
@@ -144,7 +147,14 @@ pub fn run_game_window<L>(
     let mut battle_scripts = ScriptRuntime::new(script_table.clone());
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
-    let mut script_services = SessionState::new(auto_scripts, &voc_mkf, &midi_mkf, &sound_font);
+    let mut script_services = SessionState::new(
+        auto_scripts,
+        &voc_mkf,
+        &midi_mkf,
+        &sound_font,
+        &magic_effect_sprites,
+        &player_battle_sprites,
+    );
     let mut opening_intro = Some(
         OpeningIntro::from_resources(&fbp_archive, &rng_archive, &role_sprites)
             .expect("failed to load original opening animation resources"),
@@ -179,12 +189,18 @@ pub fn run_game_window<L>(
             item_sprites: &item_sprites,
             enemy_battle_sprites: &enemy_battle_sprites,
             player_battle_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             battle_backgrounds: &battle_backgrounds,
             battle_selected_enemy: script_services.battle_selected_enemy,
             battle_command_selected: script_services.battle_command_selected,
             battle_targeting_enemy: script_services.battle_targeting_enemy,
+            battle_menu: script_services.battle_menu,
+            battle_auto_attack: script_services.battle_auto_attack,
             battle_event: script_services.battle_events.front().copied(),
             battle_event_ticks: script_services.battle_event_ticks,
+            battle_kept_effects: &script_services.battle_kept_effects,
+            post_battle: script_services.post_battle.as_ref(),
             status_background: &status_background,
             equip_background: &equip_background,
             ui_ticks: 0,
@@ -280,6 +296,7 @@ pub fn run_game_window<L>(
                                             script_services.pending_scene_change = None;
                                             script_services.pending_dialog = None;
                                             script_services.pending_script_event = None;
+                                            script_services.pending_load_slot = None;
                                             input = HeldInput::default();
                                             window.set_title("Rust-PAL [Snapshot restored]");
                                         }
@@ -324,13 +341,19 @@ pub fn run_game_window<L>(
                                     item_sprites: &item_sprites,
                                     enemy_battle_sprites: &enemy_battle_sprites,
                                     player_battle_sprites: &player_battle_sprites,
+                                    magic_effect_sprites: &magic_effect_sprites,
+                                    battle_effects: &battle_effects,
                                     battle_backgrounds: &battle_backgrounds,
                                     battle_selected_enemy: script_services.battle_selected_enemy,
                                     battle_command_selected: script_services
                                         .battle_command_selected,
                                     battle_targeting_enemy: script_services.battle_targeting_enemy,
+                                    battle_menu: script_services.battle_menu,
+                                    battle_auto_attack: script_services.battle_auto_attack,
                                     battle_event: script_services.battle_events.front().copied(),
                                     battle_event_ticks: script_services.battle_event_ticks,
+                                    battle_kept_effects: &script_services.battle_kept_effects,
+                                    post_battle: script_services.post_battle.as_ref(),
                                     status_background: &status_background,
                                     equip_background: &equip_background,
                                     ui_ticks,
@@ -488,6 +511,65 @@ pub fn run_game_window<L>(
                     if script_services.quit_requested {
                         target.exit();
                     }
+                    let selected_load_slot = (!script_services.visual.is_blocking())
+                        .then(|| script_services.pending_load_slot.take())
+                        .flatten();
+                    if let Some(slot) = selected_load_slot {
+                        match restore_original_save(
+                            &original_save_dir,
+                            slot,
+                            &mut game,
+                            &role_sprites,
+                            &mut load_scene,
+                        ) {
+                            Ok(environment) => {
+                                script_services.current_save_slot = Some(environment.slot);
+                                script_services.visual.restore_original_environment(
+                                    environment.night_palette,
+                                    environment.screen_wave,
+                                );
+                                script_services.visual.prepare_scene_fade_in();
+                                dialog = None;
+                                script_services.pending_dialog = None;
+                                script_services.pending_script_event = None;
+                                script_services.pending_scene_change = None;
+                                script_services.pending_load_slot = None;
+                                script_services.field_menu = None;
+                                script_services.inventory_menu = None;
+                                script_services.shop_menu = None;
+                                script_services.confirmation_menu = None;
+                                if let Some(music_id) = game.current_music {
+                                    script_services.music.play(music_id, true, 0);
+                                } else {
+                                    script_services.music.stop();
+                                }
+                                input = HeldInput::default();
+                                window.set_title(&format!("Rust-PAL [save slot {slot} loaded]"));
+                            }
+                            Err(RestoreOriginalSaveError::SceneUnavailable) => {
+                                script_services
+                                    .visual
+                                    .queue(ScriptVisual::FadeIn { speed: 1 });
+                                if let Some(music_id) = game.current_music {
+                                    script_services.music.play(music_id, true, 0);
+                                }
+                                window.set_title("Rust-PAL [save scene unavailable]");
+                            }
+                            Err(
+                                RestoreOriginalSaveError::Unavailable
+                                | RestoreOriginalSaveError::Invalid,
+                            ) => {
+                                script_services
+                                    .visual
+                                    .queue(ScriptVisual::FadeIn { speed: 1 });
+                                if let Some(music_id) = game.current_music {
+                                    script_services.music.play(music_id, true, 0);
+                                }
+                                window.set_title("Rust-PAL [invalid save slot]");
+                            }
+                        }
+                        changed = true;
+                    }
                     let load_last_save_requested =
                         std::mem::take(&mut script_services.load_last_save_requested);
                     if load_last_save_requested {
@@ -535,14 +617,17 @@ pub fn run_game_window<L>(
                         }
                         changed = true;
                     }
-                    if visual_was_blocking || load_last_save_requested {
+                    if visual_was_blocking
+                        || selected_load_slot.is_some()
+                        || load_last_save_requested
+                    {
                         // Blocking script visuals advance independently until completion.
                         if visual_scene_update_due {
-                            match game.update_auto_scripts(&script_services.auto_scripts) {
-                                Ok(auto_changed) => changed |= auto_changed,
-                                Err(error) => {
-                                    window.set_title(&auto_script_error_title(error));
-                                }
+                            let update =
+                                game.update_auto_scripts_report(&script_services.auto_scripts);
+                            changed |= update.changed;
+                            if let Some(error) = update.error {
+                                window.set_title(&auto_script_error_title(error));
                             }
                             for sound_id in game.take_auto_script_sounds() {
                                 if !script_services.sound_effects.play(sound_id) {
@@ -561,6 +646,7 @@ pub fn run_game_window<L>(
                                     script_services.pending_dialog = None;
                                     script_services.pending_script_event = None;
                                     script_services.pending_scene_change = None;
+                                    script_services.pending_load_slot = None;
                                     script_services.music.stop();
                                     script_services.visual.prepare_scene_fade_in();
                                     let enter_script =
@@ -594,6 +680,7 @@ pub fn run_game_window<L>(
                                             script_services.pending_dialog = None;
                                             script_services.pending_script_event = None;
                                             script_services.pending_scene_change = None;
+                                            script_services.pending_load_slot = None;
                                             script_services.field_menu = None;
                                             script_services.inventory_menu = None;
                                             script_services.shop_menu = None;
@@ -757,6 +844,32 @@ pub fn run_game_window<L>(
                                 );
                             }
                         }
+                    } else if script_services.post_battle.is_some() {
+                        let outcome = advance_post_battle(sampled, &mut script_services);
+                        changed = true;
+                        if let Some(outcome) = outcome {
+                            if !scripts.resolve_battle(outcome.result) {
+                                window.set_title("Rust-PAL [battle script resume failed]");
+                            } else {
+                                if let Some(music_id) = game.current_music {
+                                    script_services.music.play(music_id, true, 0);
+                                } else {
+                                    script_services.music.stop();
+                                }
+                                advance_script(
+                                    &mut scripts,
+                                    &mut game,
+                                    &mut dialog,
+                                    ScriptRenderResources {
+                                        text: &text,
+                                        role_sprites: &role_sprites,
+                                    },
+                                    &mut load_scene,
+                                    &mut script_services,
+                                    &mut |title| window.set_title(title),
+                                );
+                            }
+                        }
                     } else if game.battle().is_some() {
                         if battle_scripts.is_active() && script_services.battle_events.is_empty() {
                             advance_script(
@@ -791,12 +904,7 @@ pub fn run_game_window<L>(
                                 } else {
                                     script_services.music.stop();
                                 }
-                                window.set_title(&format!(
-                                    "Rust-PAL [Battle {:?}: +{} EXP +{} cash]",
-                                    outcome.result,
-                                    outcome.rewards.experience,
-                                    outcome.rewards.cash
-                                ));
+                                window.set_title("Rust-PAL");
                                 advance_script(
                                     &mut scripts,
                                     &mut game,
@@ -820,7 +928,6 @@ pub fn run_game_window<L>(
                         role_sprites: &role_sprites,
                         load_scene: &mut load_scene,
                         services: &mut script_services,
-                        snapshot_path: &snapshot_path,
                         original_save_dir: &original_save_dir,
                         set_title: &mut |title: &str| window.set_title(title),
                         exit: &mut || target.exit(),
@@ -871,9 +978,11 @@ pub fn run_game_window<L>(
                             }
                         }
                         if !scripts.is_active() {
-                            match game.update_auto_scripts(&script_services.auto_scripts) {
-                                Ok(auto_changed) => changed |= auto_changed,
-                                Err(error) => window.set_title(&auto_script_error_title(error)),
+                            let update =
+                                game.update_auto_scripts_report(&script_services.auto_scripts);
+                            changed |= update.changed;
+                            if let Some(error) = update.error {
+                                window.set_title(&auto_script_error_title(error));
                             }
                             for sound_id in game.take_auto_script_sounds() {
                                 if !script_services.sound_effects.play(sound_id) {
@@ -950,12 +1059,18 @@ pub fn run_game_window<L>(
                             item_sprites: &item_sprites,
                             enemy_battle_sprites: &enemy_battle_sprites,
                             player_battle_sprites: &player_battle_sprites,
+                            magic_effect_sprites: &magic_effect_sprites,
+                            battle_effects: &battle_effects,
                             battle_backgrounds: &battle_backgrounds,
                             battle_selected_enemy: script_services.battle_selected_enemy,
                             battle_command_selected: script_services.battle_command_selected,
                             battle_targeting_enemy: script_services.battle_targeting_enemy,
+                            battle_menu: script_services.battle_menu,
+                            battle_auto_attack: script_services.battle_auto_attack,
                             battle_event: script_services.battle_events.front().copied(),
                             battle_event_ticks: script_services.battle_event_ticks,
+                            battle_kept_effects: &script_services.battle_kept_effects,
+                            post_battle: script_services.post_battle.as_ref(),
                             status_background: &status_background,
                             equip_background: &equip_background,
                             ui_ticks,

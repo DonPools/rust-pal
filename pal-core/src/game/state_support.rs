@@ -107,3 +107,20 @@ pub enum AutoScriptError {
         entry: u16,
     },
 }
+
+/// Result of advancing every active scene object's automatic script once.
+///
+/// An error from one object does not roll back mutations already made by other
+/// objects, so callers that render the scene must preserve `changed` even when
+/// `error` is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoScriptUpdate {
+    pub changed: bool,
+    pub error: Option<AutoScriptError>,
+}
+
+impl AutoScriptUpdate {
+    pub fn into_result(self) -> Result<bool, AutoScriptError> {
+        self.error.map_or(Ok(self.changed), Err)
+    }
+}

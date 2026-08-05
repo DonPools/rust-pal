@@ -1,4 +1,4 @@
-use pal_assets::battle::BattleSpriteArchive;
+use pal_assets::battle::{BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::palette::{Palette, PaletteSet};
 use pal_assets::rle::RleBitmap;
@@ -8,7 +8,11 @@ use pal_core::game::GameState;
 use pal_core::role::RoleSprites;
 use pal_core::script::ScriptDebugSnapshot;
 
-use super::battle_render::{render_battle, BattleRenderResources, BattleRenderState};
+use super::battle_render::BattleMenuState;
+use super::battle_render::{
+    render_battle, render_post_battle_page, BattleRenderResources, BattleRenderState,
+    PostBattlePresentation,
+};
 use super::debug_render::{focused_debug_object, render_collision_overlay, render_object_overlay};
 use super::dialog::{render_dialog, ActiveDialog};
 use super::menu_render::{
@@ -44,12 +48,18 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) item_sprites: &'a [Option<RleBitmap>],
     pub(super) enemy_battle_sprites: &'a BattleSpriteArchive,
     pub(super) player_battle_sprites: &'a BattleSpriteArchive,
+    pub(super) magic_effect_sprites: &'a BattleSpriteArchive,
+    pub(super) battle_effects: &'a BattleEffects,
     pub(super) battle_backgrounds: &'a [Option<Bitmap>],
     pub(super) battle_selected_enemy: usize,
     pub(super) battle_command_selected: usize,
     pub(super) battle_targeting_enemy: bool,
+    pub(super) battle_menu: BattleMenuState,
+    pub(super) battle_auto_attack: bool,
     pub(super) battle_event: Option<BattleEvent>,
     pub(super) battle_event_ticks: u16,
+    pub(super) battle_kept_effects: &'a [BattleEvent],
+    pub(super) post_battle: Option<&'a PostBattlePresentation>,
     pub(super) status_background: &'a Bitmap,
     pub(super) equip_background: &'a Bitmap,
     pub(super) ui_ticks: u64,
@@ -105,13 +115,19 @@ pub(super) fn render_game(
         return;
     }
     if !override_rendered {
-        if let Some(battle) = game.battle() {
+        if let Some(battle) = ui
+            .post_battle
+            .map(|presentation| &presentation.battle)
+            .or_else(|| game.battle())
+        {
             render_battle(
                 renderer,
                 battle,
                 BattleRenderResources {
                     enemy_sprites: ui.enemy_battle_sprites,
                     player_sprites: ui.player_battle_sprites,
+                    magic_effect_sprites: ui.magic_effect_sprites,
+                    battle_effects: ui.battle_effects,
                     backgrounds: ui.battle_backgrounds,
                     text: ui.text,
                     font: ui.font,
@@ -121,11 +137,25 @@ pub(super) fn render_game(
                     selected_enemy: ui.battle_selected_enemy,
                     selected_command: ui.battle_command_selected,
                     targeting_enemy: ui.battle_targeting_enemy,
+                    menu: ui.battle_menu,
+                    auto_attack: ui.battle_auto_attack,
                     ticks: ui.ui_ticks,
-                    event: ui.battle_event,
-                    event_ticks: ui.battle_event_ticks,
+                    event: ui
+                        .post_battle
+                        .is_none()
+                        .then_some(ui.battle_event)
+                        .flatten(),
+                    event_ticks: if ui.post_battle.is_some() {
+                        0
+                    } else {
+                        ui.battle_event_ticks
+                    },
+                    kept_effects: ui.battle_kept_effects,
                 },
             );
+            if let Some(presentation) = ui.post_battle {
+                render_post_battle_page(renderer, presentation, ui.ui_sprites, ui.text, ui.font);
+            }
         } else {
             let viewport = Viewport::from(game.camera);
             let roles = std::iter::once(&game.player)

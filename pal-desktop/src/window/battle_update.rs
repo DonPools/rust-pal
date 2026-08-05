@@ -1,8 +1,16 @@
-use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleRewards};
+use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleTarget};
 use pal_core::game::{GameInput, GameState};
 use pal_core::role::Direction;
 use pal_core::script::ScriptRuntime;
 
+use super::battle_render::{
+    BattleMenuState, BattlePendingCommand, BattleSettlementPage, PostBattlePresentation,
+};
+use super::battle_timing::{
+    battle_magic_for_event, effect_sound_elapsed_tick, event_has_full_magic_visual,
+    magic_event_timeline, offensive_effect_frame_count, original_frames_to_ticks,
+    MagicEventTimeline,
+};
 use super::menu_state::{update_wrapping_selection, InventoryMenu, InventoryMode};
 use super::session::SessionState;
 
@@ -13,7 +21,6 @@ const FINISHED_EVENT_TICKS: u16 = 4;
 
 pub(super) struct FinishedBattle {
     pub(super) result: BattleResult,
-    pub(super) rewards: BattleRewards,
 }
 
 pub(super) fn update_battle(
@@ -49,35 +56,28 @@ pub(super) fn update_battle(
             return None;
         }
         services.inventory_menu = None;
-        services.battle_pending_throw_item = None;
-        let (result, rewards) = game.settle_battle()?;
-        return Some(FinishedBattle { result, rewards });
+        let battle = game.battle()?.clone();
+        let before = battle
+            .players
+            .iter()
+            .filter_map(|player| Some((player.role_id, game.player_role(player.role_id)?.clone())))
+            .collect::<Vec<_>>();
+        let (result, _) = game.settle_battle()?;
+        let pages = settlement_pages(game, &before);
+        if !pages.is_empty() {
+            services.post_battle = Some(PostBattlePresentation {
+                battle,
+                result,
+                pages,
+                page: 0,
+            });
+            return None;
+        }
+        return Some(FinishedBattle { result });
     }
 
     if game.auto_battle() {
-        let target = game.battle()?.first_living_enemy()?;
-        let magic = game.battle().and_then(|battle| {
-            let player = battle.players.get(battle.active_player()?)?;
-            player
-                .magics
-                .iter()
-                .enumerate()
-                .filter(|(_, magic)| player.mp >= magic.mp_cost)
-                .max_by_key(|(_, magic)| magic.base_damage)
-                .map(|(index, _)| index)
-        });
-        let events = if let Some(magic) = magic {
-            game.battle_mut()
-                .and_then(|battle| battle.cast_magic(magic, target))
-                .unwrap_or_default()
-        } else {
-            game.battle_mut()
-                .and_then(|battle| battle.attack(target))
-                .unwrap_or_default()
-        };
-        if !events.is_empty() {
-            queue_battle_events(game, services, events);
-        }
+        commit_forced_magic_or_attack(game, services, 9999);
         return None;
     }
 
@@ -92,46 +92,65 @@ pub(super) fn update_battle(
         .enumerate()
         .filter_map(|(index, enemy)| enemy.is_alive().then_some(index))
         .collect::<Vec<_>>();
-    if services.battle_targeting_enemy {
-        if !living.is_empty() {
-            services.battle_selected_enemy = select_enemy(
-                &living,
-                services.battle_selected_enemy,
-                input.direction_pressed,
-            );
-        }
-        if input.cancel {
-            services.battle_targeting_enemy = false;
-            return None;
-        }
-    } else {
-        services.battle_command_selected =
-            select_battle_command(services.battle_command_selected, input.direction_pressed);
-        if input.confirm
-            && command_requires_enemy_selection(
-                game,
-                services.battle_command_selected,
-                living.len(),
-            )
+    if input.battle_auto {
+        services.battle_auto_attack = !services.battle_auto_attack;
+        services.battle_menu = BattleMenuState::Main;
+    }
+    if services.battle_auto_attack && input.cancel {
+        services.battle_auto_attack = false;
+        return None;
+    }
+    if input.battle_status {
+        services.battle_menu = BattleMenuState::Status {
+            selected: game.battle()?.active_player().unwrap_or_default(),
+        };
+    }
+    if input.battle_flee {
+        let committed = game
+            .battle_mut()
+            .and_then(|battle| battle.attempt_flee_all());
+        commit_battle_action(game, services, committed);
+        return None;
+    }
+    if input.battle_defend {
+        let committed = game.battle_mut().and_then(|battle| battle.defend());
+        commit_battle_action(game, services, committed);
+        return None;
+    }
+    if input.battle_use_item {
+        open_battle_inventory(game, services, InventoryMode::BattleUseItems);
+        return None;
+    }
+    if input.battle_throw_item {
+        open_battle_inventory(game, services, InventoryMode::BattleThrowItems);
+        return None;
+    }
+    if input.battle_repeat {
+        services.battle_repeat_all = true;
+    }
+    if services.battle_repeat_all {
+        let committed = game.repeat_battle_action();
+        commit_battle_action(game, services, committed);
+        if game
+            .battle()
+            .and_then(|battle| battle.active_player())
+            .is_none()
         {
-            services.battle_targeting_enemy = true;
-            return None;
+            services.battle_repeat_all = false;
         }
+        return None;
+    }
+    if input.battle_force || services.battle_force_all {
+        services.battle_force_all = true;
+        commit_forced_magic_or_attack(game, services, 60);
+        return None;
+    }
+    if services.battle_auto_attack {
+        commit_normal_attack(game, services);
+        return None;
     }
 
-    let committed = if input.confirm {
-        execute_battle_command(game, services)
-    } else if input.cancel && !services.battle_targeting_enemy {
-        game.battle_mut().and_then(|battle| battle.attempt_flee())
-    } else {
-        None
-    };
-    if let Some(events) = committed {
-        services.battle_targeting_enemy = false;
-        if !events.is_empty() {
-            queue_battle_events(game, services, events);
-        }
-    }
+    update_battle_menu(input, game, services, &living);
 
     if let Some(target) = game
         .battle()
@@ -148,6 +167,281 @@ pub(super) fn update_battle(
     None
 }
 
+pub(super) fn advance_post_battle(
+    input: GameInput,
+    services: &mut SessionState,
+) -> Option<FinishedBattle> {
+    if !input.confirm && !input.cancel {
+        return None;
+    }
+    let presentation = services.post_battle.as_mut()?;
+    presentation.page += 1;
+    if presentation.page < presentation.pages.len() {
+        return None;
+    }
+    let presentation = services.post_battle.take()?;
+    Some(FinishedBattle {
+        result: presentation.result,
+    })
+}
+
+fn settlement_pages(
+    game: &GameState,
+    before: &[(u16, pal_assets::player_roles::PlayerRole)],
+) -> Vec<BattleSettlementPage> {
+    let mut pages = Vec::new();
+    for (role_id, previous) in before {
+        let Some(current) = game.player_role(*role_id).cloned() else {
+            continue;
+        };
+        if current.level > previous.level {
+            pages.push(BattleSettlementPage::LevelUp {
+                role_id: *role_id,
+                before: Box::new(previous.clone()),
+                after: Box::new(current.clone()),
+            });
+        } else {
+            for (label, old, new) in [
+                (49usize, previous.max_hp, current.max_hp),
+                (50, previous.max_mp, current.max_mp),
+                (51, previous.attack_strength, current.attack_strength),
+                (52, previous.magic_strength, current.magic_strength),
+                (53, previous.defense, current.defense),
+                (54, previous.dexterity, current.dexterity),
+                (55, previous.flee_rate, current.flee_rate),
+            ] {
+                if new > old {
+                    pages.push(BattleSettlementPage::AttributeGrowth {
+                        role_id: *role_id,
+                        label,
+                        amount: new - old,
+                    });
+                }
+            }
+        }
+        for magic_object in current
+            .magic
+            .iter()
+            .copied()
+            .filter(|magic| *magic != 0 && !previous.magic.contains(magic))
+        {
+            pages.push(BattleSettlementPage::LearnedMagic {
+                role_id: *role_id,
+                magic_object,
+            });
+        }
+    }
+    pages
+}
+
+fn commit_battle_action(
+    game: &GameState,
+    services: &mut SessionState,
+    committed: Option<Vec<BattleEvent>>,
+) {
+    if let Some(events) = committed {
+        services.battle_menu = BattleMenuState::Main;
+        services.battle_targeting_enemy = false;
+        if !events.is_empty() {
+            queue_battle_events(game, services, events);
+        }
+    }
+}
+
+fn commit_normal_attack(game: &mut GameState, services: &mut SessionState) {
+    let Some(target) = game.battle().and_then(|battle| battle.first_living_enemy()) else {
+        return;
+    };
+    let committed = game.battle_mut().and_then(|battle| battle.attack(target));
+    commit_battle_action(game, services, committed);
+}
+
+fn commit_forced_magic_or_attack(
+    game: &mut GameState,
+    services: &mut SessionState,
+    random_range: u16,
+) {
+    let committed = game
+        .battle_mut()
+        .and_then(|battle| battle.commit_auto_action(random_range));
+    commit_battle_action(game, services, committed);
+    if game
+        .battle()
+        .and_then(|battle| battle.active_player())
+        .is_none()
+    {
+        services.battle_force_all = false;
+    }
+}
+
+fn open_battle_inventory(game: &GameState, services: &mut SessionState, mode: InventoryMode) {
+    let count = match mode {
+        InventoryMode::BattleUseItems => game.battle_usable_inventory().len(),
+        InventoryMode::BattleThrowItems => game.throwable_inventory().len(),
+        _ => return,
+    };
+    services.inventory_selected = services.inventory_selected.min(count.saturating_sub(1));
+    services.inventory_menu = Some(InventoryMenu {
+        selected: services.inventory_selected,
+        mode,
+    });
+}
+
+fn update_battle_menu(
+    input: GameInput,
+    game: &mut GameState,
+    services: &mut SessionState,
+    living: &[usize],
+) {
+    match services.battle_menu {
+        BattleMenuState::Main => update_battle_main_menu(input, game, services, living),
+        BattleMenuState::Magic { mut selected } => {
+            let magic_count = game
+                .battle()
+                .and_then(|battle| battle.players.get(battle.active_player()?))
+                .map_or(0, |player| player.magics.len());
+            update_grid_selection(&mut selected, input.direction_pressed, magic_count);
+            services.battle_menu = BattleMenuState::Magic { selected };
+            if input.cancel {
+                services.battle_menu = BattleMenuState::Main;
+            } else if input.confirm {
+                begin_magic_selection(game, services, selected, living);
+            }
+        }
+        BattleMenuState::Misc { mut selected } => {
+            update_wrapping_selection(&mut selected, input.direction_pressed, 5);
+            services.battle_menu = BattleMenuState::Misc { selected };
+            if input.cancel {
+                services.battle_menu = BattleMenuState::Main;
+            } else if input.confirm {
+                match selected {
+                    0 => {
+                        services.battle_auto_attack = true;
+                        services.battle_menu = BattleMenuState::Main;
+                    }
+                    1 => services.battle_menu = BattleMenuState::ItemSubmenu { selected: 0 },
+                    2 => {
+                        let committed = game.battle_mut().and_then(|battle| battle.defend());
+                        commit_battle_action(game, services, committed);
+                    }
+                    3 => {
+                        let committed = game
+                            .battle_mut()
+                            .and_then(|battle| battle.attempt_flee_all());
+                        commit_battle_action(game, services, committed);
+                    }
+                    _ => {
+                        services.battle_menu = BattleMenuState::Status {
+                            selected: game
+                                .battle()
+                                .and_then(|battle| battle.active_player())
+                                .unwrap_or_default(),
+                        }
+                    }
+                }
+            }
+        }
+        BattleMenuState::ItemSubmenu { mut selected } => {
+            update_wrapping_selection(&mut selected, input.direction_pressed, 2);
+            services.battle_menu = BattleMenuState::ItemSubmenu { selected };
+            if input.cancel {
+                services.battle_menu = BattleMenuState::Misc { selected: 1 };
+            } else if input.confirm {
+                open_battle_inventory(
+                    game,
+                    services,
+                    if selected == 0 {
+                        InventoryMode::BattleUseItems
+                    } else {
+                        InventoryMode::BattleThrowItems
+                    },
+                );
+            }
+        }
+        BattleMenuState::TargetEnemy { command } => {
+            if !living.is_empty() {
+                services.battle_selected_enemy = select_enemy(
+                    living,
+                    services.battle_selected_enemy,
+                    input.direction_pressed,
+                );
+            }
+            services.battle_targeting_enemy = true;
+            if input.cancel {
+                services.battle_targeting_enemy = false;
+                services.battle_menu = match command {
+                    BattlePendingCommand::Magic(selected) => BattleMenuState::Magic { selected },
+                    BattlePendingCommand::Attack
+                    | BattlePendingCommand::CooperativeMagic
+                    | BattlePendingCommand::UseItem(_)
+                    | BattlePendingCommand::ThrowItem(_) => BattleMenuState::Main,
+                };
+            } else if input.confirm {
+                let committed = match command {
+                    BattlePendingCommand::Attack => game
+                        .battle_mut()
+                        .and_then(|battle| battle.attack(services.battle_selected_enemy)),
+                    BattlePendingCommand::Magic(magic) => game.battle_mut().and_then(|battle| {
+                        battle.cast_magic_at(
+                            magic,
+                            BattleTarget::Enemy(services.battle_selected_enemy),
+                        )
+                    }),
+                    BattlePendingCommand::CooperativeMagic => {
+                        game.battle_mut().and_then(|battle| {
+                            battle.cast_cooperative_magic(BattleTarget::Enemy(
+                                services.battle_selected_enemy,
+                            ))
+                        })
+                    }
+                    BattlePendingCommand::ThrowItem(item) => {
+                        game.battle_throw_item(item, Some(services.battle_selected_enemy))
+                    }
+                    BattlePendingCommand::UseItem(_) => None,
+                };
+                commit_battle_action(game, services, committed);
+            }
+        }
+        BattleMenuState::TargetPlayer {
+            command,
+            mut selected,
+        } => {
+            let player_count = game.battle().map_or(0, |battle| battle.players.len());
+            update_wrapping_selection(&mut selected, input.direction_pressed, player_count);
+            services.battle_menu = BattleMenuState::TargetPlayer { command, selected };
+            if input.cancel {
+                services.battle_menu = match command {
+                    BattlePendingCommand::Magic(magic) => {
+                        BattleMenuState::Magic { selected: magic }
+                    }
+                    _ => BattleMenuState::Main,
+                };
+            } else if input.confirm {
+                let committed = match command {
+                    BattlePendingCommand::Magic(magic) => game.battle_mut().and_then(|battle| {
+                        battle.cast_magic_at(magic, BattleTarget::Player(selected))
+                    }),
+                    BattlePendingCommand::UseItem(item) => {
+                        game.battle_use_item(item, Some(selected))
+                    }
+                    BattlePendingCommand::Attack
+                    | BattlePendingCommand::CooperativeMagic
+                    | BattlePendingCommand::ThrowItem(_) => None,
+                };
+                commit_battle_action(game, services, committed);
+            }
+        }
+        BattleMenuState::Status { mut selected } => {
+            let player_count = game.battle().map_or(0, |battle| battle.players.len());
+            update_wrapping_selection(&mut selected, input.direction_pressed, player_count);
+            services.battle_menu = BattleMenuState::Status { selected };
+            if input.cancel || input.confirm {
+                services.battle_menu = BattleMenuState::Main;
+            }
+        }
+    }
+}
+
 pub(super) fn queue_battle_events(
     game: &GameState,
     services: &mut SessionState,
@@ -161,8 +455,11 @@ pub(super) fn queue_battle_events(
     let Some(&event) = services.battle_events.front() else {
         return;
     };
-    services.battle_event_ticks = battle_event_duration(event);
+    services.battle_event_ticks = dynamic_battle_event_duration(game, services, event);
+    services.battle_effect_sound_count = 0;
+    services.battle_feedback_sound_played = false;
     play_battle_event_sounds(game, services, event);
+    play_due_magic_sounds(game, services);
 }
 
 fn update_battle_item_menu(
@@ -170,48 +467,6 @@ fn update_battle_item_menu(
     game: &mut GameState,
     services: &mut SessionState,
 ) -> bool {
-    if let Some(item_id) = services.battle_pending_throw_item {
-        let living = game
-            .battle()
-            .map(|battle| {
-                battle
-                    .enemies
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, enemy)| enemy.is_alive().then_some(index))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if living.is_empty() {
-            services.battle_pending_throw_item = None;
-            return true;
-        }
-        services.battle_selected_enemy = select_enemy(
-            &living,
-            services.battle_selected_enemy,
-            input.direction_pressed,
-        );
-        if input.cancel {
-            services.battle_pending_throw_item = None;
-            services.inventory_menu = Some(InventoryMenu {
-                selected: services.inventory_selected,
-                mode: InventoryMode::BattleThrowItems,
-            });
-        } else if input.confirm {
-            services.battle_pending_throw_item = None;
-            if game
-                .battle_throw_item(item_id, Some(services.battle_selected_enemy))
-                .is_none()
-            {
-                services.inventory_menu = Some(InventoryMenu {
-                    selected: services.inventory_selected,
-                    mode: InventoryMode::BattleThrowItems,
-                });
-            }
-        }
-        return true;
-    }
-
     let Some(mut menu) = services.inventory_menu.take() else {
         return false;
     };
@@ -222,12 +477,14 @@ fn update_battle_item_menu(
             menu.update(input.direction_pressed, inventory.len());
             services.inventory_selected = menu.selected;
             if input.cancel {
+                services.battle_menu = BattleMenuState::Main;
                 return true;
             }
             if input.confirm {
                 if let Some(item) = inventory.get(menu.selected).copied() {
                     if item.apply_to_all {
                         if game.battle_use_item(item.item_id, None).is_some() {
+                            services.battle_menu = BattleMenuState::Main;
                             return true;
                         }
                     } else {
@@ -235,26 +492,13 @@ fn update_battle_item_menu(
                             game.battle()
                                 .map_or(0, |battle| battle.players.len().saturating_sub(1)),
                         );
-                        menu.mode = InventoryMode::BattleUseTarget {
-                            item_id: item.item_id,
+                        services.battle_menu = BattleMenuState::TargetPlayer {
+                            command: BattlePendingCommand::UseItem(item.item_id),
                             selected,
                         };
+                        return true;
                     }
                 }
-            }
-        }
-        InventoryMode::BattleUseTarget {
-            item_id,
-            mut selected,
-        } => {
-            let player_count = game.battle().map_or(0, |battle| battle.players.len());
-            update_wrapping_selection(&mut selected, input.direction_pressed, player_count);
-            services.item_target_selected = selected;
-            menu.mode = InventoryMode::BattleUseTarget { item_id, selected };
-            if input.cancel {
-                menu.mode = InventoryMode::BattleUseItems;
-            } else if input.confirm && game.battle_use_item(item_id, Some(selected)).is_some() {
-                return true;
             }
         }
         InventoryMode::BattleThrowItems => {
@@ -263,16 +507,21 @@ fn update_battle_item_menu(
             menu.update(input.direction_pressed, inventory.len());
             services.inventory_selected = menu.selected;
             if input.cancel {
+                services.battle_menu = BattleMenuState::Main;
                 return true;
             }
             if input.confirm {
                 if let Some(item) = inventory.get(menu.selected).copied() {
                     if item.apply_to_all {
                         if game.battle_throw_item(item.item_id, None).is_some() {
+                            services.battle_menu = BattleMenuState::Main;
                             return true;
                         }
                     } else {
-                        services.battle_pending_throw_item = Some(item.item_id);
+                        services.battle_menu = BattleMenuState::TargetEnemy {
+                            command: BattlePendingCommand::ThrowItem(item.item_id),
+                        };
+                        services.battle_targeting_enemy = true;
                         return true;
                     }
                 }
@@ -288,16 +537,31 @@ fn update_battle_item_menu(
 }
 
 fn advance_battle_events(game: &GameState, services: &mut SessionState) -> bool {
+    let completed = services.battle_events.front().copied();
     match tick_battle_event_queue(
         &mut services.battle_events,
         &mut services.battle_event_ticks,
     ) {
         BattleEventTick::Idle => false,
         BattleEventTick::Started(event) => {
+            retain_completed_magic_effect(game, services, completed);
+            services.battle_event_ticks = dynamic_battle_event_duration(game, services, event);
+            services.battle_effect_sound_count = 0;
+            services.battle_feedback_sound_played = false;
             play_battle_event_sounds(game, services, event);
+            play_due_magic_sounds(game, services);
             true
         }
-        BattleEventTick::Active | BattleEventTick::Drained => true,
+        BattleEventTick::Active => {
+            play_due_magic_sounds(game, services);
+            true
+        }
+        BattleEventTick::Drained => {
+            retain_completed_magic_effect(game, services, completed);
+            services.battle_effect_sound_count = 0;
+            services.battle_feedback_sound_played = false;
+            true
+        }
     }
 }
 
@@ -340,27 +604,205 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         | BattleEvent::EnemyConfusedAttack { .. }
         | BattleEvent::PlayerConfusedAttack { .. }
         | BattleEvent::SimulatedMagic { .. }
-        | BattleEvent::PlayerUseItem { .. }
-        | BattleEvent::PlayerThrowItem { .. }
-        | BattleEvent::PlayerFlee { .. } => ACTION_EVENT_TICKS,
+        | BattleEvent::PlayerFlee { .. }
+        | BattleEvent::PlayerDefend { .. }
+        | BattleEvent::PlayerDefensiveMagic { .. }
+        | BattleEvent::PlayerCooperativeMagic { .. } => ACTION_EVENT_TICKS,
+        BattleEvent::PlayerUseItem { .. } => original_frames_to_ticks(25),
+        BattleEvent::PlayerThrowItem { .. } => original_frames_to_ticks(24),
         BattleEvent::PlayerMagicAnimation { .. } => PLAYER_MAGIC_ANIMATION_EVENT_TICKS,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
 }
 
+fn dynamic_battle_event_duration(
+    game: &GameState,
+    services: &SessionState,
+    event: BattleEvent,
+) -> u16 {
+    session_magic_timing(game, services, event).map_or_else(
+        || battle_event_duration(event),
+        |(_, timing)| timing.total_ticks,
+    )
+}
+
+fn session_magic_timing(
+    game: &GameState,
+    services: &SessionState,
+    event: BattleEvent,
+) -> Option<(pal_core::battle::BattleMagic, MagicEventTimeline)> {
+    let battle = game.battle()?;
+    let magic = battle_magic_for_event(battle, event)?;
+    let visual = magic.effect_visual();
+    let effect_frame_count = services
+        .magic_effect_frame_counts
+        .get(usize::from(visual.effect))
+        .copied()
+        .flatten();
+    let summon_frame_count = (magic.magic_type == 9)
+        .then(|| {
+            usize::try_from(magic.specific)
+                .ok()?
+                .checked_add(10)
+                .and_then(|sprite| {
+                    services
+                        .player_battle_frame_counts
+                        .get(sprite)
+                        .copied()
+                        .flatten()
+                })
+        })
+        .flatten();
+    Some((
+        magic,
+        magic_event_timeline(event, magic, effect_frame_count, summon_frame_count),
+    ))
+}
+
+fn retain_completed_magic_effect(
+    game: &GameState,
+    services: &mut SessionState,
+    completed: Option<BattleEvent>,
+) {
+    if completed.is_some_and(|event| matches!(event, BattleEvent::Finished(_))) {
+        services.battle_kept_effects.clear();
+        return;
+    }
+    let Some(event) = completed.filter(|event| event_has_full_magic_visual(*event)) else {
+        return;
+    };
+    let Some(magic) = game
+        .battle()
+        .and_then(|battle| battle_magic_for_event(battle, event))
+    else {
+        return;
+    };
+    if magic.effect_visual().keep_effect == u16::MAX {
+        services.battle_kept_effects.push(event);
+    }
+}
+
+fn play_due_magic_sounds(game: &GameState, services: &mut SessionState) {
+    let Some(event) = services.battle_events.front().copied() else {
+        return;
+    };
+    let Some((magic, timeline)) = session_magic_timing(game, services, event) else {
+        return;
+    };
+    let elapsed = timeline
+        .total_ticks
+        .saturating_sub(services.battle_event_ticks.min(timeline.total_ticks));
+    if !event_has_full_magic_visual(event) {
+        services.battle_effect_sound_count = u16::MAX;
+    } else {
+        let visual = magic.effect_visual();
+        let frame_count = services
+            .magic_effect_frame_counts
+            .get(usize::from(visual.effect))
+            .copied()
+            .flatten()
+            .unwrap_or(0);
+        let is_defensive = matches!(event, BattleEvent::PlayerDefensiveMagic { .. });
+        let non_shake_frames = if is_defensive {
+            frame_count
+        } else {
+            offensive_effect_frame_count(frame_count, visual)
+                .saturating_sub(usize::from(visual.shake))
+        };
+        let repeats_sound = matches!(
+            event,
+            BattleEvent::PlayerMagic { .. }
+                | BattleEvent::PlayerCooperativeMagic { .. }
+                | BattleEvent::SimulatedMagic { .. }
+        );
+        if frame_count != 0 {
+            loop {
+                let cycle = usize::from(services.battle_effect_sound_count);
+                if !repeats_sound && cycle > 0 {
+                    break;
+                }
+                let cycle_frames = if repeats_sound {
+                    cycle.saturating_mul(frame_count)
+                } else {
+                    0
+                };
+                let sound_frame = usize::from(visual.fire_delay).saturating_add(cycle_frames);
+                if sound_frame >= non_shake_frames
+                    || elapsed < effect_sound_elapsed_tick(timeline, visual, cycle_frames)
+                {
+                    break;
+                }
+                if let Ok(sound) = u16::try_from(visual.sound) {
+                    if sound != 0 {
+                        services.sound_effects.play(sound);
+                    }
+                }
+                services.battle_effect_sound_count =
+                    services.battle_effect_sound_count.saturating_add(1);
+            }
+        }
+    }
+    if !services.battle_feedback_sound_played && elapsed >= timeline.tail_start() {
+        if let Some(sound) = magic_feedback_sound(game, event).filter(|sound| *sound != 0) {
+            services.sound_effects.play(sound);
+        }
+        services.battle_feedback_sound_played = true;
+    }
+}
+
+fn magic_feedback_sound(game: &GameState, event: BattleEvent) -> Option<u16> {
+    let battle = game.battle()?;
+    match event {
+        BattleEvent::PlayerMagic {
+            enemy, defeated, ..
+        }
+        | BattleEvent::PlayerCooperativeMagic {
+            enemy, defeated, ..
+        }
+        | BattleEvent::SimulatedMagic {
+            enemy, defeated, ..
+        } => {
+            let enemy = battle.enemies.get(enemy)?;
+            u16::try_from(if defeated {
+                enemy.death_sound
+            } else {
+                enemy.action_sound
+            })
+            .ok()
+        }
+        BattleEvent::EnemyMagic {
+            player, defeated, ..
+        } => defeated.then(|| battle.players.get(player).map(|player| player.death_sound))?,
+        BattleEvent::PlayerDefensiveMagic { .. } => None,
+        _ => None,
+    }
+}
+
 fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event: BattleEvent) {
+    if event == BattleEvent::Finished(BattleResult::Won) {
+        if let Some(battle) = game.battle() {
+            let _ = services
+                .music
+                .play(if battle.is_boss { 2 } else { 3 }, false, 0);
+        }
+    }
     let sounds = match event {
         BattleEvent::PlayerAttack {
             player,
             enemy,
+            critical,
             defeated,
             ..
         } => game.battle().and_then(|battle| {
             let enemy = battle.enemies.get(enemy)?;
             let player = battle.players.get(player)?;
             Some(vec![
-                Some(player.attack_sound),
+                Some(if critical {
+                    player.critical_sound
+                } else {
+                    player.attack_sound
+                }),
                 Some(player.weapon_sound),
                 u16::try_from(if defeated {
                     enemy.death_sound
@@ -370,62 +812,38 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 .ok(),
             ])
         }),
-        BattleEvent::PlayerMagic {
-            player,
-            enemy,
-            magic_object,
-            defeated,
-            ..
-        } => game.battle().and_then(|battle| {
+        BattleEvent::PlayerMagic { player, visual, .. } => game.battle().and_then(|battle| {
             let player = battle.players.get(player)?;
-            let magic = player
-                .magics
-                .iter()
-                .find(|magic| magic.object_id == magic_object)
-                .map(|magic| magic.sound);
-            let enemy = battle.enemies.get(enemy)?;
-            Some(vec![
-                Some(player.magic_sound),
-                magic.and_then(|sound| u16::try_from(sound).ok()),
-                u16::try_from(if defeated {
-                    enemy.death_sound
-                } else {
-                    enemy.action_sound
-                })
-                .ok(),
-            ])
+            Some(vec![visual.then_some(player.magic_sound), None, None])
         }),
         BattleEvent::EnemyAttack {
             enemy,
             player,
+            protected_by,
+            auto_defended,
             defeated,
             ..
         } => game.battle().and_then(|battle| {
             let enemy = battle.enemies.get(enemy)?;
             let player = battle.players.get(player)?;
+            let defense_sound = protected_by
+                .and_then(|cover| battle.players.get(cover))
+                .map(|cover| cover.cover_sound)
+                .or_else(|| auto_defended.then_some(player.cover_sound));
             Some(vec![
                 u16::try_from(enemy.attack_sound).ok(),
-                defeated.then_some(player.death_sound),
+                defense_sound.or_else(|| defeated.then_some(player.death_sound)),
                 None,
             ])
         }),
-        BattleEvent::EnemyMagic {
-            enemy,
-            player,
-            magic_object,
-            defeated,
-            ..
-        } => game.battle().and_then(|battle| {
+        BattleEvent::EnemyMagic { enemy, visual, .. } => game.battle().and_then(|battle| {
             let enemy = battle.enemies.get(enemy)?;
-            let magic = enemy
-                .magic
-                .filter(|magic| magic.object_id == magic_object)
-                .map(|magic| magic.sound);
-            let player = battle.players.get(player)?;
             Some(vec![
-                u16::try_from(enemy.magic_sound).ok(),
-                magic.and_then(|sound| u16::try_from(sound).ok()),
-                defeated.then_some(player.death_sound),
+                visual
+                    .then(|| u16::try_from(enemy.magic_sound).ok())
+                    .flatten(),
+                None,
+                None,
             ])
         }),
         BattleEvent::EnemyConfusedAttack {
@@ -461,28 +879,21 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 defeated.then_some(target.death_sound),
             ])
         }),
-        BattleEvent::SimulatedMagic {
-            magic_object,
-            enemy,
-            defeated,
-            ..
-        } => game.battle().and_then(|battle| {
-            let enemy = battle.enemies.get(enemy)?;
-            Some(vec![
-                game.magic_sound(magic_object),
-                u16::try_from(if defeated {
-                    enemy.death_sound
-                } else {
-                    enemy.action_sound
-                })
-                .ok(),
-                None,
-            ])
+        BattleEvent::SimulatedMagic { .. } => None,
+        BattleEvent::PlayerUseItem { .. } => Some(vec![Some(28), None, None]),
+        BattleEvent::PlayerThrowItem { player, .. } => game.battle().and_then(|battle| {
+            let player = battle.players.get(player)?;
+            Some(vec![Some(player.magic_sound), None, None])
         }),
-        BattleEvent::PlayerUseItem { player, .. } | BattleEvent::PlayerThrowItem { player, .. } => {
+        BattleEvent::PlayerDefensiveMagic { player, .. } => game.battle().and_then(|battle| {
+            let player = battle.players.get(player)?;
+            Some(vec![Some(player.magic_sound), None, None])
+        }),
+        BattleEvent::PlayerDefend { .. } => None,
+        BattleEvent::PlayerCooperativeMagic { player, visual, .. } => {
             game.battle().and_then(|battle| {
                 let player = battle.players.get(player)?;
-                Some(vec![Some(player.magic_sound), None, None])
+                Some(vec![visual.then_some(player.magic_sound), None, None])
             })
         }
         BattleEvent::PlayerMagicAnimation {
@@ -492,7 +903,12 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
             Some(vec![Some(player.magic_sound), None, None])
         }),
         BattleEvent::PlayerMagicAnimation { player: None } => None,
-        BattleEvent::PlayerFlee { .. } => Some(vec![Some(45), None, None]),
+        BattleEvent::PlayerFlee {
+            succeeded: true, ..
+        } => Some(vec![Some(45), None, None]),
+        BattleEvent::PlayerFlee {
+            succeeded: false, ..
+        } => None,
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => None,
     }
     .unwrap_or_default();
@@ -511,69 +927,149 @@ fn select_battle_command(current: usize, direction: Option<Direction>) -> usize 
     }
 }
 
-fn preferred_magic(game: &GameState) -> Option<(usize, bool)> {
-    let battle = game.battle()?;
-    let player = battle.players.get(battle.active_player()?)?;
-    player
-        .magics
-        .iter()
-        .enumerate()
-        .filter(|(_, magic)| player.mp >= magic.mp_cost)
-        .max_by_key(|(_, magic)| magic.base_damage)
-        .map(|(index, magic)| (index, magic.attacks_all))
-}
-
-fn command_requires_enemy_selection(
-    game: &GameState,
-    selected_command: usize,
-    living_enemies: usize,
-) -> bool {
-    if living_enemies <= 1 {
-        return false;
-    }
-    match selected_command {
-        0 => game
-            .battle()
-            .and_then(|battle| battle.players.get(battle.active_player()?))
-            .is_some_and(|player| !player.attacks_all),
-        1 => preferred_magic(game).is_some_and(|(_, attacks_all)| !attacks_all),
-        _ => false,
-    }
-}
-
-fn execute_battle_command(
+fn update_battle_main_menu(
+    input: GameInput,
     game: &mut GameState,
     services: &mut SessionState,
-) -> Option<Vec<BattleEvent>> {
-    // A committed Classic-mode command usually queues no immediate event: the
-    // whole party chooses first, then the round is resolved. Preserve `Some`
-    // so the desktop selection state can still leave target selection.
-    match services.battle_command_selected {
-        0 => game
+    living: &[usize],
+) {
+    services.battle_command_selected =
+        select_battle_command(services.battle_command_selected, input.direction_pressed);
+    if input.cancel {
+        let _ = game
             .battle_mut()
-            .and_then(|battle| battle.attack(services.battle_selected_enemy)),
-        1 => preferred_magic(game).and_then(|(magic, _)| {
-            game.battle_mut()
-                .and_then(|battle| battle.cast_magic(magic, services.battle_selected_enemy))
-        }),
+            .and_then(|battle| battle.undo_last_command());
+        return;
+    }
+    if !input.confirm {
+        return;
+    }
+    match services.battle_command_selected {
+        0 => {
+            let attacks_all = game
+                .battle()
+                .and_then(|battle| battle.players.get(battle.active_player()?))
+                .is_some_and(|player| player.attacks_all);
+            if attacks_all || living.len() <= 1 {
+                commit_normal_attack(game, services);
+            } else {
+                services.battle_menu = BattleMenuState::TargetEnemy {
+                    command: BattlePendingCommand::Attack,
+                };
+                services.battle_targeting_enemy = true;
+            }
+        }
+        1 => {
+            services.battle_menu = BattleMenuState::Magic {
+                selected: services.magic_selected,
+            };
+        }
         2 => {
-            let count = game.battle_usable_inventory().len();
-            services.inventory_selected = services.inventory_selected.min(count.saturating_sub(1));
-            services.inventory_menu = Some(InventoryMenu {
-                selected: services.inventory_selected,
-                mode: InventoryMode::BattleUseItems,
-            });
-            Some(Vec::new())
+            let Some((magic, enabled)) = game.battle().and_then(|battle| {
+                Some((
+                    battle.active_cooperative_magic()?,
+                    battle.can_use_cooperative_magic(),
+                ))
+            }) else {
+                return;
+            };
+            if !enabled {
+                return;
+            }
+            if magic.apply_to_all() {
+                let committed = game
+                    .battle_mut()
+                    .and_then(|battle| battle.cast_cooperative_magic(BattleTarget::AllEnemies));
+                commit_battle_action(game, services, committed);
+            } else if let Some(&target) = living.first().filter(|_| living.len() <= 1) {
+                let committed = game
+                    .battle_mut()
+                    .and_then(|battle| battle.cast_cooperative_magic(BattleTarget::Enemy(target)));
+                commit_battle_action(game, services, committed);
+            } else if !living.is_empty() {
+                services.battle_menu = BattleMenuState::TargetEnemy {
+                    command: BattlePendingCommand::CooperativeMagic,
+                };
+                services.battle_targeting_enemy = true;
+            }
         }
-        _ => {
-            let count = game.throwable_inventory().len();
-            services.inventory_selected = services.inventory_selected.min(count.saturating_sub(1));
-            services.inventory_menu = Some(InventoryMenu {
-                selected: services.inventory_selected,
-                mode: InventoryMode::BattleThrowItems,
-            });
-            Some(Vec::new())
+        _ => services.battle_menu = BattleMenuState::Misc { selected: 0 },
+    }
+}
+
+fn begin_magic_selection(
+    game: &mut GameState,
+    services: &mut SessionState,
+    selected: usize,
+    living: &[usize],
+) {
+    let Some((magic, active_player, player_count)) = game.battle().and_then(|battle| {
+        let active = battle.active_player()?;
+        Some((
+            *battle.players.get(active)?.magics.get(selected)?,
+            active,
+            battle.players.len(),
+        ))
+    }) else {
+        return;
+    };
+    let enough_mp = game
+        .battle()
+        .and_then(|battle| battle.players.get(active_player))
+        .is_some_and(|player| player.mp >= magic.mp_cost);
+    if !enough_mp {
+        return;
+    }
+    services.magic_selected = selected;
+    let committed = match (magic.usable_to_enemy(), magic.apply_to_all()) {
+        (true, true) => game
+            .battle_mut()
+            .and_then(|battle| battle.cast_magic_at(selected, BattleTarget::AllEnemies)),
+        (true, false) if living.len() <= 1 => {
+            let Some(target) = living.first().copied() else {
+                return;
+            };
+            game.battle_mut()
+                .and_then(|battle| battle.cast_magic_at(selected, BattleTarget::Enemy(target)))
         }
+        (true, false) => {
+            services.battle_menu = BattleMenuState::TargetEnemy {
+                command: BattlePendingCommand::Magic(selected),
+            };
+            services.battle_targeting_enemy = true;
+            return;
+        }
+        (false, true) => game
+            .battle_mut()
+            .and_then(|battle| battle.cast_magic_at(selected, BattleTarget::AllPlayers)),
+        (false, false) if player_count <= 1 => game
+            .battle_mut()
+            .and_then(|battle| battle.cast_magic_at(selected, BattleTarget::Player(0))),
+        (false, false) => {
+            services.battle_menu = BattleMenuState::TargetPlayer {
+                command: BattlePendingCommand::Magic(selected),
+                selected: active_player,
+            };
+            return;
+        }
+    };
+    commit_battle_action(game, services, committed);
+}
+
+fn update_grid_selection(current: &mut usize, direction: Option<Direction>, count: usize) {
+    if count == 0 {
+        *current = 0;
+        return;
+    }
+    *current = (*current).min(count - 1);
+    match direction {
+        Some(Direction::North) => *current = current.saturating_sub(3),
+        Some(Direction::South) => *current = (*current + 3).min(count - 1),
+        Some(Direction::West) => {
+            *current = current.checked_sub(1).unwrap_or(count - 1);
+        }
+        Some(Direction::East) => *current = (*current + 1) % count,
+        None => {}
     }
 }
 
@@ -621,13 +1117,26 @@ mod tests {
             player: 0,
             enemy: 0,
             damage: 1,
+            critical: false,
             defeated: false,
         });
         let finished = battle_event_duration(BattleEvent::Finished(BattleResult::Won));
         let round = battle_event_duration(BattleEvent::RoundCompleted);
         let magic_animation =
             battle_event_duration(BattleEvent::PlayerMagicAnimation { player: Some(0) });
+        let use_item = battle_event_duration(BattleEvent::PlayerUseItem {
+            player: 0,
+            item_object: 1,
+            target: None,
+            consuming: true,
+        });
+        let throw_item = battle_event_duration(BattleEvent::PlayerThrowItem {
+            player: 0,
+            item_object: 1,
+            target: Some(0),
+        });
         assert_eq!((action, magic_animation, finished, round), (8, 22, 4, 2));
+        assert_eq!((use_item, throw_item), (20, 20));
     }
 
     #[test]
@@ -636,6 +1145,7 @@ mod tests {
             player: 0,
             enemy: 0,
             damage: 1,
+            critical: false,
             defeated: true,
         };
         let finished = BattleEvent::Finished(BattleResult::Won);

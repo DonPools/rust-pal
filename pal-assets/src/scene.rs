@@ -110,6 +110,11 @@ impl SceneData {
         self.event_objects.len()
     }
 
+    /// Complete scene table, including the final event-object boundary record.
+    pub fn scenes(&self) -> &[Scene] {
+        &self.scenes
+    }
+
     /// Complete global event-object table in one-based ID order.
     pub fn event_objects(&self) -> &[EventObject] {
         &self.event_objects

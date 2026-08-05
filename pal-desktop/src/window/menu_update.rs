@@ -3,21 +3,20 @@ use std::path::Path;
 use pal_assets::text::TextLibrary;
 use pal_core::game::{GameInput, GameState};
 use pal_core::role::{Direction, RoleSprites};
-use pal_core::script::ScriptRuntime;
+use pal_core::script::{ScriptRuntime, ScriptVisual};
 
 use crate::audio::{AUDIO_VOLUME_MAX, AUDIO_VOLUME_STEP};
 
 use super::dialog::ActiveDialog;
 use super::menu_state::{
     update_wrapping_selection, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
-    ItemUseSession, MagicSession, ShopMode,
+    ItemUseSession, MagicSession, SaveSlotMode, ShopMode,
 };
 use super::original_save::{
-    latest_original_save_slot, restore_original_save, RestoreOriginalSaveError,
+    next_saved_times, original_save_slots, save_original_game, SaveOriginalGameError,
 };
 use super::script_driver::{advance_script, ScriptRenderResources};
 use super::session::SessionState;
-use super::snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
 use super::LoadedScene;
 
 pub(super) struct MenuUpdateContext<'a, L, S, E> {
@@ -29,7 +28,6 @@ pub(super) struct MenuUpdateContext<'a, L, S, E> {
     pub(super) role_sprites: &'a RoleSprites,
     pub(super) load_scene: &'a mut L,
     pub(super) services: &'a mut SessionState,
-    pub(super) snapshot_path: &'a Path,
     pub(super) original_save_dir: &'a Path,
     pub(super) set_title: &'a mut S,
     pub(super) exit: &'a mut E,
@@ -62,31 +60,6 @@ where
         } else {
             self.services.music.stop();
         }
-    }
-
-    fn restore_latest_original_save(&mut self) -> Option<Result<(), RestoreOriginalSaveError>> {
-        let slot = latest_original_save_slot(self.original_save_dir)?;
-        Some(
-            restore_original_save(
-                self.original_save_dir,
-                slot,
-                self.game,
-                self.role_sprites,
-                self.load_scene,
-            )
-            .map(|environment| {
-                self.services.current_save_slot = Some(environment.slot);
-                self.services.visual.restore_original_environment(
-                    environment.night_palette,
-                    environment.screen_wave,
-                );
-                *self.dialog = None;
-                self.services.pending_dialog = None;
-                self.services.pending_script_event = None;
-                self.services.pending_scene_change = None;
-                self.sync_music();
-            }),
-        )
     }
 }
 
@@ -361,50 +334,27 @@ where
             } else if context.input.confirm {
                 match *selected {
                     0 => {
-                        if save_snapshot(context.snapshot_path, context.game).is_ok() {
-                            (context.set_title)("Rust-PAL [Saved]");
-                        } else {
-                            (context.set_title)("Rust-PAL [Save failed]");
-                        }
-                        keep_menu = false;
+                        menu = FieldMenu::SaveSlots {
+                            mode: SaveSlotMode::Save,
+                            selected: context
+                                .services
+                                .current_save_slot
+                                .map_or(0, |slot| usize::from(slot.saturating_sub(1))),
+                            slots: original_save_slots(context.original_save_dir),
+                        };
+                        (context.set_title)("Rust-PAL [Save slot]");
                     }
-                    1 => match context.restore_latest_original_save() {
-                        Some(Ok(())) => {
-                            (context.set_title)("Rust-PAL [Original save loaded]");
-                            keep_menu = false;
-                        }
-                        Some(Err(RestoreOriginalSaveError::SceneUnavailable)) => {
-                            (context.set_title)("Rust-PAL [Original save scene unavailable]");
-                        }
-                        Some(Err(
-                            RestoreOriginalSaveError::Unavailable
-                            | RestoreOriginalSaveError::Invalid,
-                        )) => {
-                            (context.set_title)("Rust-PAL [Invalid original save]");
-                        }
-                        None => match restore_snapshot(
-                            context.snapshot_path,
-                            context.game,
-                            context.role_sprites,
-                            context.load_scene,
-                        ) {
-                            Ok(()) => {
-                                *context.dialog = None;
-                                context.services.pending_dialog = None;
-                                context.services.pending_script_event = None;
-                                context.services.pending_scene_change = None;
-                                context.sync_music();
-                                (context.set_title)("Rust-PAL [Loaded]");
-                                keep_menu = false;
-                            }
-                            Err(RestoreSnapshotError::Unavailable) => {
-                                (context.set_title)("Rust-PAL [No save]");
-                            }
-                            Err(RestoreSnapshotError::SceneUnavailable) => {
-                                (context.set_title)("Rust-PAL [Save scene unavailable]");
-                            }
-                        },
-                    },
+                    1 => {
+                        menu = FieldMenu::SaveSlots {
+                            mode: SaveSlotMode::Load,
+                            selected: context
+                                .services
+                                .current_save_slot
+                                .map_or(0, |slot| usize::from(slot.saturating_sub(1))),
+                            slots: original_save_slots(context.original_save_dir),
+                        };
+                        (context.set_title)("Rust-PAL [Load slot]");
+                    }
                     2 => {
                         let enabled = !context.services.music.enabled();
                         context.services.music.set_enabled(enabled);
@@ -421,6 +371,71 @@ where
                         (context.exit)();
                     }
                     _ => unreachable!(),
+                }
+            }
+        }
+        FieldMenu::SaveSlots {
+            mode,
+            selected,
+            slots,
+        } => {
+            update_wrapping_selection(selected, context.input.direction_pressed, slots.len());
+            if context.input.cancel {
+                menu = FieldMenu::System {
+                    selected: match mode {
+                        SaveSlotMode::Save => 0,
+                        SaveSlotMode::Load => 1,
+                    },
+                };
+                (context.set_title)("Rust-PAL [System]");
+            } else if context.input.confirm {
+                let slot = slots[*selected].slot;
+                match mode {
+                    SaveSlotMode::Save => {
+                        let saved_times =
+                            next_saved_times(&original_save_slots(context.original_save_dir));
+                        let night_palette = context.services.visual.night_palette();
+                        let screen_wave = context.services.visual.screen_wave();
+                        match save_original_game(
+                            context.original_save_dir,
+                            slot,
+                            context.game,
+                            saved_times,
+                            night_palette,
+                            screen_wave,
+                        ) {
+                            Ok(()) => {
+                                context.services.current_save_slot = Some(slot);
+                                keep_menu = false;
+                                (context.set_title)(&format!(
+                                    "Rust-PAL [save slot {slot} written]"
+                                ));
+                            }
+                            Err(SaveOriginalGameError::Unavailable) => {
+                                (context.set_title)("Rust-PAL [Save state unavailable]");
+                            }
+                            Err(SaveOriginalGameError::Io(_)) => {
+                                (context.set_title)("Rust-PAL [Save failed]");
+                            }
+                        }
+                    }
+                    SaveSlotMode::Load if !slots[*selected].available => {
+                        (context.set_title)("Rust-PAL [empty save slot]");
+                    }
+                    SaveSlotMode::Load => {
+                        if context
+                            .services
+                            .visual
+                            .queue(ScriptVisual::FadeOut { speed: 1 })
+                        {
+                            context.services.music.stop();
+                            context.services.pending_load_slot = Some(slot);
+                            keep_menu = false;
+                            (context.set_title)(&format!("Rust-PAL [loading save slot {slot}]"));
+                        } else {
+                            (context.set_title)("Rust-PAL [load transition unavailable]");
+                        }
+                    }
                 }
             }
         }
@@ -623,9 +638,7 @@ where
                     .map(|request| (item_id, request, false));
             }
         }
-        InventoryMode::BattleUseItems
-        | InventoryMode::BattleThrowItems
-        | InventoryMode::BattleUseTarget { .. } => {
+        InventoryMode::BattleUseItems | InventoryMode::BattleThrowItems => {
             close_menu = true;
         }
     }

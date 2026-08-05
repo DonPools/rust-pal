@@ -253,6 +253,128 @@ impl OriginalSave {
     pub fn party_member_count(&self) -> usize {
         usize::from(self.party_member_index) + 1
     }
+
+    /// Encode a DOS or Win95 save without relying on Rust structure layout.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        if usize::from(self.party_member_index) >= SAVE_PARTY_CAPACITY
+            || self.scene_number == 0
+            || usize::from(self.scene_number) >= SAVE_SCENE_CAPACITY
+            || self.party_direction > 3
+            || usize::from(self.follower_count) > SAVE_PARTY_CAPACITY
+            || self.party_member_count() + usize::from(self.follower_count) > SAVE_PARTY_CAPACITY
+            || self.event_objects.len() > SAVE_EVENT_OBJECT_CAPACITY
+            || self.objects.layout() != self.layout
+        {
+            return None;
+        }
+        let (fixed_size, object_words) = match self.layout {
+            ObjectLayout::Dos => (DOS_SAVE_FIXED_SIZE, DOS_OBJECT_RECORD_SIZE / 2),
+            ObjectLayout::Win95 => (WIN_SAVE_FIXED_SIZE, WIN_OBJECT_RECORD_SIZE / 2),
+        };
+        let mut data =
+            Vec::with_capacity(fixed_size + self.event_objects.len() * EVENT_OBJECT_RECORD_SIZE);
+
+        push_u16(&mut data, self.saved_times);
+        push_i16(&mut data, self.viewport_x);
+        push_i16(&mut data, self.viewport_y);
+        push_u16(&mut data, self.party_member_index);
+        push_u16(&mut data, self.scene_number);
+        push_u16(&mut data, if self.night_palette { 0x180 } else { 0 });
+        push_u16(&mut data, self.party_direction);
+        push_u16(&mut data, self.music_number);
+        push_u16(&mut data, self.battle_music_number);
+        push_u16(&mut data, self.battlefield_number);
+        push_u16(&mut data, self.screen_wave);
+        push_u16(&mut data, self.battle_speed);
+        push_u16(&mut data, self.collect_value);
+        push_u16(&mut data, self.layer);
+        push_u16(&mut data, self.chase_range);
+        push_u16(&mut data, self.chase_speed_change_cycles);
+        push_u16(&mut data, self.follower_count);
+        data.extend_from_slice(&[0; 6]);
+        data.extend_from_slice(&self.cash.to_le_bytes());
+
+        for member in self.party {
+            push_u16(&mut data, member.role_id);
+            push_i16(&mut data, member.x);
+            push_i16(&mut data, member.y);
+            push_u16(&mut data, member.frame);
+            push_u16(&mut data, member.image_offset);
+        }
+        for point in self.trail {
+            push_i16(&mut data, point.x);
+            push_i16(&mut data, point.y);
+            push_u16(&mut data, point.direction);
+        }
+        for category in self.experience {
+            for experience in category {
+                push_u16(&mut data, experience.experience);
+                push_u16(&mut data, experience.reserved);
+                push_u16(&mut data, experience.level);
+                push_u16(&mut data, experience.count);
+            }
+        }
+        data.extend_from_slice(&self.player_roles.encode());
+        for slot in self.poisons {
+            for poison in slot {
+                push_u16(&mut data, poison.poison_id);
+                push_u16(&mut data, poison.script);
+            }
+        }
+        for item in self.inventory {
+            push_u16(&mut data, item.item_id);
+            push_u16(&mut data, item.amount);
+            push_u16(&mut data, item.amount_in_use);
+        }
+        for scene in self.scenes {
+            push_u16(&mut data, scene.map_num);
+            push_u16(&mut data, scene.script_on_enter);
+            push_u16(&mut data, scene.script_on_teleport);
+            push_u16(&mut data, scene.event_object_index);
+        }
+        for id in 0..SAVE_OBJECT_CAPACITY {
+            let object = u16::try_from(id).ok().and_then(|id| self.objects.get(id));
+            let words = object.map_or([0; WIN_OBJECT_RECORD_SIZE / 2], |object| object.data);
+            for word in 0..object_words {
+                let value =
+                    if self.layout == ObjectLayout::Dos && word == DOS_OBJECT_RECORD_SIZE / 2 - 1 {
+                        words[WIN_OBJECT_RECORD_SIZE / 2 - 1]
+                    } else {
+                        words[word]
+                    };
+                push_u16(&mut data, value);
+            }
+        }
+        for event in &self.event_objects {
+            push_i16(&mut data, event.vanish_time);
+            push_u16(&mut data, event.x);
+            push_u16(&mut data, event.y);
+            push_i16(&mut data, event.layer);
+            push_u16(&mut data, event.trigger_script);
+            push_u16(&mut data, event.auto_script);
+            push_i16(&mut data, event.state);
+            push_u16(&mut data, event.trigger_mode);
+            push_u16(&mut data, event.sprite_num);
+            push_u16(&mut data, event.sprite_frames);
+            push_u16(&mut data, event.direction);
+            push_u16(&mut data, event.current_frame);
+            push_u16(&mut data, event.script_idle_frame);
+            push_u16(&mut data, event.sprite_ptr_offset);
+            push_u16(&mut data, event.auto_sprite_frames);
+            push_u16(&mut data, event.auto_script_idle_frame);
+        }
+
+        (data.len() == fixed_size + self.event_objects.len() * EVENT_OBJECT_RECORD_SIZE)
+            .then_some(data)
+    }
+}
+
+fn push_u16(data: &mut Vec<u8>, value: u16) {
+    data.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i16(data: &mut Vec<u8>, value: i16) {
+    data.extend_from_slice(&value.to_le_bytes());
 }
 
 fn detect_layout(length: usize) -> Option<(ObjectLayout, usize, usize)> {
@@ -425,6 +547,23 @@ mod tests {
         assert_eq!(save.layout, ObjectLayout::Win95);
         assert_eq!(save.objects.get(0).unwrap().data[6], 0x55aa);
         assert_eq!(save.event_objects.len(), 1);
+    }
+
+    #[test]
+    fn encodes_parseable_dos_and_win95_saves() {
+        for layout in [ObjectLayout::Dos, ObjectLayout::Win95] {
+            let original = OriginalSave::parse(&fixture(layout, 2)).unwrap();
+            let encoded = original.encode().unwrap();
+            let reparsed = OriginalSave::parse(&encoded).unwrap();
+
+            assert_eq!(reparsed.layout, layout);
+            assert_eq!(reparsed.saved_times, 12);
+            assert_eq!((reparsed.viewport_x, reparsed.viewport_y), (-24, 48));
+            assert_eq!(reparsed.party_member_count(), 2);
+            assert_eq!(reparsed.objects.get(0).unwrap().data[0], 10);
+            assert_eq!(reparsed.objects.get(0).unwrap().data[6], 0x55aa);
+            assert_eq!(reparsed.event_objects, original.event_objects);
+        }
     }
 
     #[test]

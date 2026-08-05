@@ -16,6 +16,8 @@ const BATTLEFIELD_RECORD_BYTES: usize = (1 + MAGIC_ELEMENT_COUNT) * 2;
 const LEVEL_UP_MAGIC_RECORD_BYTES: usize = LEVEL_UP_ROLE_COUNT * 4;
 const ENEMY_POSITIONS_BYTES: usize = MAX_ENEMIES_IN_TEAM * MAX_ENEMIES_IN_TEAM * 4;
 const LEVEL_UP_EXP_BYTES: usize = LEVEL_UP_EXP_COUNT * 2;
+const BATTLE_EFFECT_ROLE_COUNT: usize = 10;
+const BATTLE_EFFECT_INDEX_BYTES: usize = BATTLE_EFFECT_ROLE_COUNT * 2 * 2;
 
 /// Static statistics and animation metadata for one enemy kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +279,72 @@ pub struct BattleSpriteArchive {
     sprites: Vec<Option<Sprite>>,
 }
 
+/// Shared battle-effect sprite and the player-sprite effect index table.
+pub struct BattleEffects {
+    sprite: Sprite,
+    indices: [[u16; 2]; BATTLE_EFFECT_ROLE_COUNT],
+}
+
+impl BattleEffects {
+    /// Load `DATA.MKF` chunks 10 and 11 with their original fixed table shape.
+    pub fn load(data_mkf: &[u8]) -> Option<Self> {
+        let archive = MkfArchive::new(data_mkf)?;
+        let sprite_chunk = archive.read_chunk(10)?;
+        let sprite =
+            Sprite::from_gop_chunk(sprite_chunk).or_else(|| sprite_from_yj1_chunk(sprite_chunk))?;
+        let table = archive.read_chunk(11)?;
+        if table.len() != BATTLE_EFFECT_INDEX_BYTES {
+            return None;
+        }
+        let indices = std::array::from_fn(|role| {
+            read_u16_array::<2>(table, role * 4).unwrap_or([u16::MAX; 2])
+        });
+        let frame_count = sprite.frame_count();
+        let valid = frame_count > 11
+            && indices.iter().all(|[magic, attack]| {
+                usize::from(*magic)
+                    .checked_mul(10)
+                    .and_then(|frame| frame.checked_add(24))
+                    .is_some_and(|frame| frame < frame_count)
+                    && usize::from(*attack)
+                        .checked_mul(3)
+                        .and_then(|frame| frame.checked_add(2))
+                        .is_some_and(|frame| frame < frame_count)
+            });
+        valid.then_some(Self { sprite, indices })
+    }
+
+    pub fn frame_count(&self) -> usize {
+        self.sprite.frame_count()
+    }
+
+    pub fn decode_frame(&self, frame: usize) -> Option<RleBitmap> {
+        self.sprite.decode_frame(frame)
+    }
+
+    /// Decode one of the three weapon-impact frames for a player battle sprite.
+    pub fn player_attack_frame(&self, battle_sprite: u16, phase: usize) -> Option<RleBitmap> {
+        let group = usize::from(*self.indices.get(usize::from(battle_sprite))?.get(1)?);
+        self.decode_frame(group.checked_mul(3)?.checked_add(phase.min(2))?)
+    }
+
+    /// Decode one of the ten original pre-magic frames for a player battle sprite.
+    pub fn player_pre_magic_frame(&self, battle_sprite: u16, phase: usize) -> Option<RleBitmap> {
+        let group = usize::from(*self.indices.get(usize::from(battle_sprite))?.first()?);
+        self.decode_frame(
+            group
+                .checked_mul(10)?
+                .checked_add(15)?
+                .checked_add(phase.min(9))?,
+        )
+    }
+
+    /// Decode the shared three-frame physical impact used by enemy attacks.
+    pub fn enemy_attack_frame(&self, phase: usize) -> Option<RleBitmap> {
+        self.decode_frame(9usize.checked_add(phase.min(2))?)
+    }
+}
+
 impl BattleSpriteArchive {
     pub fn load(data: &[u8]) -> Option<Self> {
         let archive = MkfArchive::new(data)?;
@@ -520,5 +588,43 @@ mod tests {
         assert_eq!(archive.frame_count(1), Some(1));
         assert_eq!(archive.decode_frame(1, 0).unwrap().pixels, [7, 8]);
         assert_eq!(archive.frame_count(2), None);
+    }
+
+    #[test]
+    fn battle_effects_validate_indices_and_select_original_frame_groups() {
+        let frames = (0..25u8)
+            .map(|color| vec![1, 0, 1, 0, 1, color])
+            .collect::<Vec<_>>();
+        let first_offset = u16::try_from(frames.len() + 1).unwrap();
+        let mut sprite = Vec::new();
+        let mut offset = first_offset;
+        for frame in &frames {
+            sprite.extend_from_slice(&offset.to_le_bytes());
+            offset += u16::try_from(frame.len() / 2).unwrap();
+        }
+        sprite.extend_from_slice(&0u16.to_le_bytes());
+        for frame in frames {
+            sprite.extend_from_slice(&frame);
+        }
+        let mut chunks = vec![Vec::new(); 12];
+        chunks[10] = sprite;
+        let mut indices = vec![0u16; BATTLE_EFFECT_ROLE_COUNT * 2];
+        indices[1] = 1;
+        chunks[11] = words(&indices);
+        let effects = BattleEffects::load(&make_mkf(&chunks)).unwrap();
+
+        assert_eq!(effects.frame_count(), 25);
+        assert_eq!(effects.player_attack_frame(0, 2).unwrap().pixels, [5]);
+        assert_eq!(effects.player_pre_magic_frame(0, 0).unwrap().pixels, [15]);
+        assert_eq!(effects.enemy_attack_frame(1).unwrap().pixels, [10]);
+
+        indices[0] = 2;
+        chunks[11] = words(&indices);
+        assert!(BattleEffects::load(&make_mkf(&chunks)).is_none());
+
+        indices[0] = 0;
+        chunks[11] = words(&indices);
+        chunks[11].pop();
+        assert!(BattleEffects::load(&make_mkf(&chunks)).is_none());
     }
 }

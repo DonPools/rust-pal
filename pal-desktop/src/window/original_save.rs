@@ -30,6 +30,29 @@ pub(super) enum RestoreOriginalSaveError {
     SceneUnavailable,
 }
 
+#[derive(Debug)]
+pub(super) enum SaveOriginalGameError {
+    Unavailable,
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SaveOriginalGameError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => formatter.write_str("game state cannot be saved"),
+            Self::Io(error) => write!(formatter, "failed to write save: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SaveOriginalGameError {}
+
+impl From<std::io::Error> for SaveOriginalGameError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 pub(super) fn latest_original_save_slot(directory: &Path) -> Option<u8> {
     original_save_slots(directory)
         .into_iter()
@@ -49,6 +72,48 @@ pub(super) fn original_save_slots(directory: &Path) -> [OriginalSaveSlot; 5] {
             available: save.is_some(),
         }
     })
+}
+
+pub(super) fn next_saved_times(slots: &[OriginalSaveSlot; 5]) -> u16 {
+    slots
+        .iter()
+        .map(|slot| slot.saved_times)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+pub(super) fn save_original_game(
+    directory: &Path,
+    slot: u8,
+    game: &GameState,
+    saved_times: u16,
+    night_palette: bool,
+    screen_wave: u16,
+) -> Result<(), SaveOriginalGameError> {
+    if !ORIGINAL_SAVE_SLOTS.contains(&slot) {
+        return Err(SaveOriginalGameError::Unavailable);
+    }
+    let bytes = game
+        .original_save(saved_times, night_palette, screen_wave)
+        .and_then(|save| save.encode())
+        .ok_or(SaveOriginalGameError::Unavailable)?;
+    write_slot(directory, slot, &bytes)
+}
+
+fn write_slot(directory: &Path, slot: u8, bytes: &[u8]) -> Result<(), SaveOriginalGameError> {
+    let path = directory.join(format!("{slot}.RPG"));
+    let temporary = directory.join(format!("{slot}.RPG.tmp"));
+    std::fs::write(&temporary, bytes)?;
+    match std::fs::rename(&temporary, &path) {
+        Ok(()) => Ok(()),
+        Err(_error) if path.exists() => {
+            std::fs::remove_file(&path)?;
+            std::fs::rename(temporary, path)?;
+            Ok(())
+        }
+        Err(error) => Err(SaveOriginalGameError::Io(error)),
+    }
 }
 
 pub(super) fn restore_original_save<L>(
@@ -160,8 +225,9 @@ mod tests {
         std::fs::create_dir(directory.join("SAVES")).unwrap();
         std::fs::write(directory.join("SAVES/4.rpg"), minimal_save(7)).unwrap();
         assert_eq!(latest_original_save_slot(&directory), Some(2));
+        let slots = original_save_slots(&directory);
         assert_eq!(
-            original_save_slots(&directory),
+            slots,
             [
                 OriginalSaveSlot {
                     slot: 1,
@@ -190,6 +256,25 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(next_saved_times(&slots), 10);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writes_and_replaces_a_parseable_slot_via_temporary_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "rust-pal-save-write-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("3.RPG"), b"old save").unwrap();
+
+        write_slot(&directory, 3, &minimal_save(21)).unwrap();
+
+        assert!(!directory.join("3.RPG.tmp").exists());
+        let saved = std::fs::read(directory.join("3.RPG")).unwrap();
+        assert_eq!(OriginalSave::parse(&saved).unwrap().saved_times, 21);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

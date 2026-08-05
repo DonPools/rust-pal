@@ -60,6 +60,7 @@ impl PlayerRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerRoles {
     roles: [PlayerRole; PLAYER_ROLE_COUNT],
+    raw: [u8; PLAYER_ROLES_BYTES],
 }
 
 impl PlayerRoles {
@@ -75,6 +76,7 @@ impl PlayerRoles {
                 .collect::<Option<Vec<_>>>()?
                 .try_into()
                 .ok()?,
+            raw: data.get(..PLAYER_ROLES_BYTES)?.try_into().ok()?,
         })
     }
 
@@ -87,7 +89,10 @@ impl PlayerRoles {
     }
 
     pub fn from_roles(roles: [PlayerRole; PLAYER_ROLE_COUNT]) -> Self {
-        Self { roles }
+        Self {
+            roles,
+            raw: [0; PLAYER_ROLES_BYTES],
+        }
     }
 
     pub fn cloned_roles(&self) -> [PlayerRole; PLAYER_ROLE_COUNT] {
@@ -96,6 +101,55 @@ impl PlayerRoles {
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &PlayerRole> {
         self.roles.iter()
+    }
+
+    /// Encode mutable role fields while retaining unmodeled original words.
+    pub fn encode(&self) -> [u8; PLAYER_ROLES_BYTES] {
+        let mut data = self.raw;
+        for (role_index, role) in self.roles.iter().enumerate() {
+            let mut write = |array: usize, value: u16| {
+                let offset = (array * PLAYER_ROLE_COUNT + role_index) * 2;
+                data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            };
+            write(0, role.avatar);
+            write(1, role.battle_sprite_num);
+            write(2, role.scene_sprite_num);
+            write(3, role.name_word_id);
+            write(4, u16::from(role.attack_all));
+            write(6, role.level);
+            write(7, role.max_hp);
+            write(8, role.max_mp);
+            write(9, role.hp);
+            write(10, role.mp);
+            for (index, &value) in role.equipment.iter().enumerate() {
+                write(11 + index, value);
+            }
+            write(17, role.attack_strength);
+            write(18, role.magic_strength);
+            write(19, role.defense);
+            write(20, role.dexterity);
+            write(21, role.flee_rate);
+            write(22, role.poison_resistance);
+            for (index, &value) in role.elemental_resistance.iter().enumerate() {
+                write(23 + index, value);
+            }
+            write(31, role.covered_by);
+            for (index, &value) in role.magic.iter().enumerate() {
+                write(32 + index, value);
+            }
+            write(64, role.walk_frames);
+            write(65, role.cooperative_magic);
+            write(66, role.unknown_5);
+            write(67, role.unknown_6);
+            write(68, role.death_sound);
+            write(69, role.attack_sound);
+            write(70, role.weapon_sound);
+            write(71, role.critical_sound);
+            write(72, role.magic_sound);
+            write(73, role.cover_sound);
+            write(74, role.dying_sound);
+        }
+        data
     }
 }
 
@@ -238,5 +292,24 @@ mod tests {
         let roles = PlayerRoles::parse(&table()).unwrap();
         assert!(roles.role(PLAYER_ROLE_COUNT).is_none());
         assert!(PlayerRoleGraphics::parse(&table(), PLAYER_ROLE_COUNT).is_none());
+    }
+
+    #[test]
+    fn encoding_retains_unmodeled_words_and_applies_role_changes() {
+        let data = table();
+        let mut roles = PlayerRoles::parse(&data).unwrap();
+        roles.role_mut(2).unwrap().level = 99;
+
+        let encoded = roles.encode();
+        let level_offset = (6 * PLAYER_ROLE_COUNT + 2) * 2;
+        assert_eq!(
+            u16::from_le_bytes(encoded[level_offset..level_offset + 2].try_into().unwrap()),
+            99
+        );
+        for array in [5, 28, 29, 30] {
+            let start = array * PLAYER_ARRAY_BYTES;
+            let end = start + PLAYER_ARRAY_BYTES;
+            assert_eq!(&encoded[start..end], &data[start..end]);
+        }
     }
 }

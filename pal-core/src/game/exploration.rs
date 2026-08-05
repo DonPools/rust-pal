@@ -9,6 +9,14 @@ pub struct GameInput {
     pub direction_pressed: Option<Direction>,
     pub confirm: bool,
     pub cancel: bool,
+    pub battle_repeat: bool,
+    pub battle_auto: bool,
+    pub battle_defend: bool,
+    pub battle_use_item: bool,
+    pub battle_throw_item: bool,
+    pub battle_flee: bool,
+    pub battle_status: bool,
+    pub battle_force: bool,
 }
 
 /// Collision boundary required by the exploration state.

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use pal_assets::battle::{BattleData, BattleSpriteArchive};
+use pal_assets::battle::{BattleData, BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::fbp::FbpArchive;
 use pal_assets::objects::GlobalObjects;
@@ -19,11 +19,11 @@ use pal_desktop::renderer::Renderer;
 
 use crate::assets::{
     create_global_scene_objects, create_scene_objects, load_battle_backgrounds, load_battle_data,
-    load_dialog_faces, load_dialog_icons, load_enemy_battle_sprites, load_fbp_archive,
-    load_global_objects, load_magics, load_map, load_music, load_palettes,
-    load_player_battle_sprites, load_player_roles, load_rng_archive, load_role_sprites,
-    load_scene_data, load_script_table, load_sound_effects, load_sound_font, load_stores,
-    load_text_resources, load_ui_sprites,
+    load_battle_effects, load_dialog_faces, load_dialog_icons, load_enemy_battle_sprites,
+    load_fbp_archive, load_global_objects, load_magic_effect_sprites, load_magics, load_map,
+    load_music, load_palettes, load_player_battle_sprites, load_player_roles, load_rng_archive,
+    load_role_sprites, load_scene_data, load_script_table, load_sound_effects, load_sound_font,
+    load_stores, load_text_resources, load_ui_sprites,
 };
 use crate::{DEFAULT_PALETTE, DEFAULT_SCENE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -49,6 +49,8 @@ pub(super) struct BootstrappedGame {
     pub(super) battle_data: BattleData,
     pub(super) enemy_battle_sprites: BattleSpriteArchive,
     pub(super) player_battle_sprites: BattleSpriteArchive,
+    pub(super) magic_effect_sprites: BattleSpriteArchive,
+    pub(super) battle_effects: BattleEffects,
     pub(super) battle_backgrounds: Vec<Option<Bitmap>>,
     pub(super) role_sprites: RoleSprites,
     pub(super) dialog_faces: Vec<Option<RleBitmap>>,
@@ -91,6 +93,10 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         load_enemy_battle_sprites(&data_dir).expect("failed to load ABC.MKF enemy sprites");
     let player_battle_sprites =
         load_player_battle_sprites(&data_dir).expect("failed to load F.MKF player sprites");
+    let magic_effect_sprites =
+        load_magic_effect_sprites(&data_dir).expect("failed to load FIRE.MKF magic effects");
+    let battle_effects =
+        load_battle_effects(&data_dir).expect("failed to load DATA.MKF battle effects");
     let battle_backgrounds =
         load_battle_backgrounds(&data_dir, &palette).expect("failed to load battle backgrounds");
     let global_objects =
@@ -128,6 +134,7 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         .with_scene_number(scene.number as u16)
         .with_scene_objects(scene_objects)
         .with_global_objects(global_scene_objects)
+        .with_original_save_data(scene_data.scenes(), scene_data.event_objects())
         .with_party(party)
         .with_player_roles(player_roles.clone())
         .with_economy_data(stores, global_objects.clone())
@@ -164,6 +171,8 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         battle_data,
         enemy_battle_sprites,
         player_battle_sprites,
+        magic_effect_sprites,
+        battle_effects,
         battle_backgrounds,
         role_sprites,
         dialog_faces,

@@ -146,6 +146,10 @@ impl GlobalObjects {
     pub fn get(&self, id: u16) -> Option<&GlobalObject> {
         self.objects.get(usize::from(id))
     }
+
+    pub fn get_mut(&mut self, id: u16) -> Option<&mut GlobalObject> {
+        self.objects.get_mut(usize::from(id))
+    }
 }
 
 #[cfg(test)]

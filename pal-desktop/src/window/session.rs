@@ -1,11 +1,13 @@
 use std::collections::VecDeque;
 
+use pal_assets::battle::BattleSpriteArchive;
 use pal_assets::script::ScriptTable;
 use pal_core::battle::BattleEvent;
 use pal_core::script::ScriptEvent;
 
 use crate::audio::{BackgroundMusic, SoundEffects};
 
+use super::battle_render::{BattleMenuState, PostBattlePresentation};
 use super::dialog::ActiveDialog;
 use super::menu_state::{
     ConfirmationMenu, EquipSession, FieldMenu, InventoryMenu, ItemUseSession, MagicSession,
@@ -63,9 +65,18 @@ pub(super) struct SessionState {
     pub(super) battle_selected_enemy: usize,
     pub(super) battle_command_selected: usize,
     pub(super) battle_targeting_enemy: bool,
-    pub(super) battle_pending_throw_item: Option<u16>,
+    pub(super) battle_menu: BattleMenuState,
+    pub(super) battle_auto_attack: bool,
+    pub(super) battle_force_all: bool,
+    pub(super) battle_repeat_all: bool,
     pub(super) battle_events: VecDeque<BattleEvent>,
     pub(super) battle_event_ticks: u16,
+    pub(super) battle_kept_effects: Vec<BattleEvent>,
+    pub(super) battle_effect_sound_count: u16,
+    pub(super) battle_feedback_sound_played: bool,
+    pub(super) magic_effect_frame_counts: Vec<Option<usize>>,
+    pub(super) player_battle_frame_counts: Vec<Option<usize>>,
+    pub(super) post_battle: Option<PostBattlePresentation>,
     pub(super) system_selected: usize,
     pub(super) confirmation_menu: Option<ConfirmationMenu>,
     pub(super) shop_menu: Option<ShopMenu>,
@@ -80,6 +91,7 @@ pub(super) struct SessionState {
     pub(super) dialog_delay_ms: u16,
     pub(super) waiting_for_key: bool,
     pub(super) load_last_save_requested: bool,
+    pub(super) pending_load_slot: Option<u8>,
     pub(super) quit_requested: bool,
     pub(super) current_save_slot: Option<u8>,
 }
@@ -90,6 +102,8 @@ impl SessionState {
         voc_mkf: &[u8],
         midi_mkf: &[u8],
         sound_font: &[u8],
+        magic_effect_sprites: &BattleSpriteArchive,
+        player_battle_sprites: &BattleSpriteArchive,
     ) -> Self {
         Self {
             pending_scene_change: None,
@@ -106,9 +120,22 @@ impl SessionState {
             battle_selected_enemy: 0,
             battle_command_selected: 0,
             battle_targeting_enemy: false,
-            battle_pending_throw_item: None,
+            battle_menu: BattleMenuState::Main,
+            battle_auto_attack: false,
+            battle_force_all: false,
+            battle_repeat_all: false,
             battle_events: VecDeque::new(),
             battle_event_ticks: 0,
+            battle_kept_effects: Vec::new(),
+            battle_effect_sound_count: 0,
+            battle_feedback_sound_played: false,
+            magic_effect_frame_counts: (0..magic_effect_sprites.len())
+                .map(|index| magic_effect_sprites.frame_count(index))
+                .collect(),
+            player_battle_frame_counts: (0..player_battle_sprites.len())
+                .map(|index| player_battle_sprites.frame_count(index))
+                .collect(),
+            post_battle: None,
             system_selected: 0,
             confirmation_menu: None,
             shop_menu: None,
@@ -124,6 +151,7 @@ impl SessionState {
             dialog_delay_ms: 24,
             waiting_for_key: false,
             load_last_save_requested: false,
+            pending_load_slot: None,
             quit_requested: false,
             current_save_slot: None,
         }

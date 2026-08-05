@@ -6,14 +6,22 @@ use pal_assets::battle::BattleData;
 use pal_assets::magic::Magics;
 use pal_assets::objects::GlobalObjects;
 use pal_assets::player_roles::{PlayerRole, PlayerRoles, PLAYER_ROLE_COUNT};
-use pal_assets::save::OriginalSave;
+use pal_assets::save::{
+    OriginalSave, SaveExperience, SaveInventoryEntry, SavePartyMember, SavePoison, SaveTrail,
+    SAVE_EXPERIENCE_KINDS, SAVE_INVENTORY_CAPACITY, SAVE_PARTY_CAPACITY, SAVE_POISON_SLOTS,
+    SAVE_ROLE_COUNT, SAVE_SCENE_CAPACITY,
+};
+use pal_assets::scene::{EventObject as AssetEventObject, Scene as AssetScene};
 use pal_assets::script::ScriptTable;
 use pal_assets::store::Stores;
 
 use crate::battle::{
     add_poison, cure_poison, cure_poison_by_level, BattleEnemy, BattleEvent, BattlePhase,
     BattlePoison, BattleRequest, BattleResult, BattleRewards, BattleScriptSource, BattleState,
-    BattleStatus, BattleStatuses, BattleSteal, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
+    BattleStatus, BattleStatuses, BattleSteal, BATTLE_STATUS_COUNT,
+    HIDDEN_EXPERIENCE_CATEGORY_COUNT, HIDDEN_EXP_ATTACK, HIDDEN_EXP_DEFENSE, HIDDEN_EXP_DEXTERITY,
+    HIDDEN_EXP_FLEE, HIDDEN_EXP_HEALTH, HIDDEN_EXP_MAGIC, HIDDEN_EXP_MAGIC_POWER,
+    MAX_BATTLE_POISONS,
 };
 use crate::map::tile_to_world;
 use crate::map::Map;
@@ -42,8 +50,8 @@ pub use snapshot::GameSnapshot;
 use snapshot::{
     SavedPlayerRole, SavedRole, SavedSceneObject, SavedTrailPoint, SnapshotData, SNAPSHOT_VERSION,
 };
-pub use state_support::AutoScriptError;
 use state_support::{apply_role_attribute, unique_script_entries, valid_role_attribute};
+pub use state_support::{AutoScriptError, AutoScriptUpdate};
 
 /// State for the current exploration scene.
 pub struct GameState<M = Map> {
@@ -90,6 +98,11 @@ pub struct GameState<M = Map> {
     party_followers: Vec<Role>,
     extra_follower_ids: Vec<u16>,
     party_trail: [TrailPoint; MAX_PARTY_MEMBERS],
+    save_scenes: Option<[AssetScene; SAVE_SCENE_CAPACITY]>,
+    save_event_objects: Vec<AssetEventObject>,
+    save_experience: [[SaveExperience; SAVE_ROLE_COUNT]; SAVE_EXPERIENCE_KINDS],
+    save_battle_speed: u16,
+    save_layer: u16,
     pub camera: Camera,
 }
 
@@ -155,6 +168,16 @@ impl<M: CollisionMap> GameState<M> {
             party_followers: Vec::new(),
             extra_follower_ids: Vec::new(),
             party_trail: [initial_trail; MAX_PARTY_MEMBERS],
+            save_scenes: None,
+            save_event_objects: Vec::new(),
+            save_experience: [[SaveExperience {
+                experience: 0,
+                reserved: 0,
+                level: 0,
+                count: 0,
+            }; SAVE_ROLE_COUNT]; SAVE_EXPERIENCE_KINDS],
+            save_battle_speed: 2,
+            save_layer: 0,
             camera: Camera::new(viewport_width, viewport_height),
         };
         state.follow_player();
@@ -187,6 +210,28 @@ impl<M: CollisionMap> GameState<M> {
         self
     }
 
+    /// Install static save records that are not otherwise needed by runtime logic.
+    pub fn with_original_save_data(
+        mut self,
+        scenes: &[AssetScene],
+        event_objects: &[AssetEventObject],
+    ) -> Self {
+        if scenes.len() <= SAVE_SCENE_CAPACITY
+            && event_objects.len() <= pal_assets::save::SAVE_EVENT_OBJECT_CAPACITY
+        {
+            let mut save_scenes = [AssetScene {
+                map_num: 0,
+                script_on_enter: 0,
+                script_on_teleport: 0,
+                event_object_index: 0,
+            }; SAVE_SCENE_CAPACITY];
+            save_scenes[..scenes.len()].copy_from_slice(scenes);
+            self.save_scenes = Some(save_scenes);
+            self.save_event_objects = event_objects.to_vec();
+        }
+        self
+    }
+
     pub fn with_party(mut self, party: Party) -> Self {
         self.party = party;
         self.rebuild_party_followers();
@@ -197,6 +242,11 @@ impl<M: CollisionMap> GameState<M> {
         self.player_roles = Some(player_roles);
         if let Some(roles) = &self.player_roles {
             self.party.sync_from_roles(roles);
+            for category in &mut self.save_experience {
+                for (experience, role) in category.iter_mut().zip(roles.iter()) {
+                    experience.level = role.level;
+                }
+            }
         }
         self.rebuild_party_followers();
         self
@@ -263,6 +313,9 @@ impl<M: CollisionMap> GameState<M> {
                 | BattleEvent::PlayerConfusedAttack { .. }
                 | BattleEvent::SimulatedMagic { .. }
                 | BattleEvent::PlayerFlee { .. }
+                | BattleEvent::PlayerDefend { .. }
+                | BattleEvent::PlayerDefensiveMagic { .. }
+                | BattleEvent::PlayerCooperativeMagic { .. }
                 | BattleEvent::PlayerMagicAnimation { .. }
                 | BattleEvent::RoundCompleted
                 | BattleEvent::Finished(_) => {}
@@ -645,6 +698,10 @@ impl<M: CollisionMap> GameState<M> {
                 poison_id,
                 poison_script,
             );
+            let face_color = self
+                .global_objects
+                .as_ref()
+                .and_then(|objects| poison_face_color(&self.player_poisons[target_index], objects));
             if let Some(battle) = self.active_battle.as_mut() {
                 if let Some(player) = battle
                     .players
@@ -652,6 +709,7 @@ impl<M: CollisionMap> GameState<M> {
                     .find(|player| player.role_id == target)
                 {
                     player.poisons = self.player_poisons[target_index];
+                    player.poison_face_color = face_color;
                 }
                 if added && !already_present {
                     battle.queue_player_poison_script(target, poison_id, poison_script);
@@ -671,6 +729,10 @@ impl<M: CollisionMap> GameState<M> {
         for target in targets {
             let target_index = usize::from(target);
             cure_poison(&mut self.player_poisons[target_index], poison_id);
+            let face_color = self
+                .global_objects
+                .as_ref()
+                .and_then(|objects| poison_face_color(&self.player_poisons[target_index], objects));
             if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
                 battle
                     .players
@@ -678,6 +740,7 @@ impl<M: CollisionMap> GameState<M> {
                     .find(|player| player.role_id == target)
             }) {
                 player.poisons = self.player_poisons[target_index];
+                player.poison_face_color = face_color;
             }
         }
         true
@@ -702,6 +765,7 @@ impl<M: CollisionMap> GameState<M> {
                 maximum_level,
                 objects,
             );
+            let face_color = poison_face_color(&self.player_poisons[target_index], objects);
             if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
                 battle
                     .players
@@ -709,6 +773,7 @@ impl<M: CollisionMap> GameState<M> {
                     .find(|player| player.role_id == target)
             }) {
                 player.poisons = self.player_poisons[target_index];
+                player.poison_face_color = face_color;
             }
         }
         true
@@ -805,6 +870,7 @@ impl<M: CollisionMap> GameState<M> {
             };
             player.statuses = *statuses;
             player.poisons = *poisons;
+            player.poison_face_color = poison_face_color(poisons, objects);
         }
         battle.refresh_player_effects();
         self.active_battle = Some(battle);
@@ -847,6 +913,19 @@ impl<M: CollisionMap> GameState<M> {
                 .filter_map(|player| player.is_alive().then_some(player.role_id))
                 .collect::<Vec<_>>();
             self.award_battle_experience(&living_roles, rewards.experience);
+            self.award_hidden_battle_experience(&battle, rewards.experience);
+            if let Some(roles) = self.player_roles.as_mut() {
+                for player in &battle.players {
+                    let role = roles.role_mut(usize::from(player.role_id))?;
+                    role.hp = role
+                        .hp
+                        .saturating_add(role.max_hp.saturating_sub(role.hp) / 2);
+                    role.mp = role
+                        .mp
+                        .saturating_add(role.max_mp.saturating_sub(role.mp) / 2);
+                }
+                self.party.sync_from_roles(roles);
+            }
         }
         self.auto_battle = false;
         Some((result, rewards))
@@ -883,6 +962,95 @@ impl<M: CollisionMap> GameState<M> {
                 self.role_experience[role_index] -= required;
                 if !self.level_up_role(role_id) {
                     break;
+                }
+            }
+        }
+    }
+
+    fn award_hidden_battle_experience(&mut self, battle: &BattleState, gained: u32) {
+        const SAVE_CATEGORY_OFFSET: usize = 1;
+        for (player_index, player) in battle.players.iter().enumerate() {
+            let role_index = usize::from(player.role_id);
+            let Some(counts) = battle.hidden_experience_counts(player_index) else {
+                continue;
+            };
+            for category in 0..HIDDEN_EXPERIENCE_CATEGORY_COUNT {
+                if let Some(saved) = self
+                    .save_experience
+                    .get_mut(category + SAVE_CATEGORY_OFFSET)
+                    .and_then(|roles| roles.get_mut(role_index))
+                {
+                    saved.count = 0;
+                }
+            }
+            if !player.is_alive() {
+                continue;
+            }
+            let total = counts
+                .iter()
+                .fold(0u32, |total, count| total.saturating_add(u32::from(*count)));
+            if total == 0 {
+                continue;
+            }
+            for (category, count) in counts.into_iter().enumerate() {
+                let save_category = category + SAVE_CATEGORY_OFFSET;
+                let Some(saved) = self
+                    .save_experience
+                    .get(save_category)
+                    .and_then(|roles| roles.get(role_index))
+                    .copied()
+                else {
+                    continue;
+                };
+                let mut experience = gained
+                    .saturating_mul(u32::from(count))
+                    .checked_div(total)
+                    .unwrap_or(0)
+                    .saturating_mul(2)
+                    .saturating_add(u32::from(saved.experience));
+                let mut level = saved.level.min(99);
+                while level < 99 {
+                    let Some(required) = self
+                        .battle_data
+                        .as_ref()
+                        .and_then(|data| data.level_up_experience.for_level(level))
+                        .map(u32::from)
+                        .filter(|required| *required > 0)
+                    else {
+                        break;
+                    };
+                    if experience < required {
+                        break;
+                    }
+                    experience -= required;
+                    let growth = u16::try_from(1 + self.growth_random(2)).unwrap_or(1);
+                    if let Some(role) = self
+                        .player_roles
+                        .as_mut()
+                        .and_then(|roles| roles.role_mut(role_index))
+                    {
+                        let attribute = match category {
+                            HIDDEN_EXP_HEALTH => &mut role.max_hp,
+                            HIDDEN_EXP_MAGIC => &mut role.max_mp,
+                            HIDDEN_EXP_ATTACK => &mut role.attack_strength,
+                            HIDDEN_EXP_MAGIC_POWER => &mut role.magic_strength,
+                            HIDDEN_EXP_DEFENSE => &mut role.defense,
+                            HIDDEN_EXP_DEXTERITY => &mut role.dexterity,
+                            HIDDEN_EXP_FLEE => &mut role.flee_rate,
+                            _ => break,
+                        };
+                        *attribute = attribute.saturating_add(growth).min(999);
+                    }
+                    level += 1;
+                }
+                if let Some(saved) = self
+                    .save_experience
+                    .get_mut(save_category)
+                    .and_then(|roles| roles.get_mut(role_index))
+                {
+                    saved.experience = u16::try_from(experience).unwrap_or(u16::MAX);
+                    saved.level = level;
+                    saved.count = 0;
                 }
             }
         }
@@ -1366,6 +1534,28 @@ impl<M: CollisionMap> GameState<M> {
             return None;
         }
         battle.throw_item(item.item_id, target_enemy, item.script_entry)
+    }
+
+    /// Repeat the active player's previous Classic battle command.
+    pub fn repeat_battle_action(&mut self) -> Option<Vec<BattleEvent>> {
+        let requirement = self.active_battle.as_ref()?.repeated_item_requirement();
+        if let Some((item_id, thrown)) = requirement {
+            let available = if thrown {
+                self.throwable_item(item_id).is_some()
+            } else {
+                self.battle_usable_item(item_id).is_some()
+            };
+            if !available {
+                let battle = self.active_battle.as_mut()?;
+                return if thrown {
+                    let target = battle.first_living_enemy()?;
+                    battle.attack(target)
+                } else {
+                    battle.defend()
+                };
+            }
+        }
+        self.active_battle.as_mut()?.repeat_last_action()
     }
 
     pub fn equippable_item(&self, item_id: u16, role_id: u16) -> Option<EquippableItem> {
@@ -1978,6 +2168,219 @@ impl<M: CollisionMap> GameState<M> {
         self.follow_player();
     }
 
+    /// Build a complete original-format save from the current mutable game state.
+    pub fn original_save(
+        &self,
+        saved_times: u16,
+        night_palette: bool,
+        screen_wave: u16,
+    ) -> Option<OriginalSave> {
+        if self.active_battle.is_some() || self.party.members().is_empty() {
+            return None;
+        }
+        let player_roles = self.player_roles.clone()?;
+        let mut objects = self.global_objects.clone()?;
+        let mut scenes = self.save_scenes?;
+
+        for (&scene_number, &map_num) in &self.scene_maps {
+            scenes
+                .get_mut(usize::from(scene_number.checked_sub(1)?))?
+                .map_num = map_num;
+        }
+        for (&scene_number, &entry) in &self.scene_enter_scripts {
+            scenes
+                .get_mut(usize::from(scene_number.checked_sub(1)?))?
+                .script_on_enter = entry;
+        }
+        for (&scene_number, &entry) in &self.scene_teleport_scripts {
+            scenes
+                .get_mut(usize::from(scene_number.checked_sub(1)?))?
+                .script_on_teleport = entry;
+        }
+
+        for (&object_id, &entry) in &self.item_use_scripts {
+            objects.get_mut(object_id)?.data[2] = entry;
+        }
+        for (&object_id, &entry) in &self.item_equip_scripts {
+            objects.get_mut(object_id)?.data[3] = entry;
+        }
+        for (&object_id, &entry) in &self.item_throw_scripts {
+            objects.get_mut(object_id)?.data[4] = entry;
+        }
+        for (&object_id, &entry) in &self.magic_success_scripts {
+            objects.get_mut(object_id)?.data[2] = entry;
+        }
+        for (&object_id, &entry) in &self.magic_use_scripts {
+            objects.get_mut(object_id)?.data[3] = entry;
+        }
+        for (&(object_id, field), &entry) in &self.object_script_overrides {
+            let field = usize::from(field).checked_add(2)?;
+            *objects.get_mut(object_id)?.data.get_mut(field)? = entry;
+        }
+
+        let role_ids = self
+            .party
+            .members()
+            .iter()
+            .map(|member| member.role_id)
+            .chain(self.extra_follower_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let party_roles = std::iter::once(&self.player)
+            .chain(self.party_followers.iter())
+            .collect::<Vec<_>>();
+        if role_ids.len() != party_roles.len()
+            || role_ids.len() > SAVE_PARTY_CAPACITY
+            || self.party.members().len() > SAVE_PARTY_CAPACITY
+        {
+            return None;
+        }
+        let mut party = [SavePartyMember {
+            role_id: 0,
+            x: 0,
+            y: 0,
+            frame: 0,
+            image_offset: 0,
+        }; SAVE_PARTY_CAPACITY];
+        for (slot, (&role_id, role)) in party
+            .iter_mut()
+            .zip(role_ids.iter().zip(party_roles.iter()))
+        {
+            if usize::from(role_id) >= SAVE_ROLE_COUNT {
+                return None;
+            }
+            *slot = SavePartyMember {
+                role_id,
+                x: i16::try_from(role.world_x.checked_sub(self.camera.x)?).ok()?,
+                y: i16::try_from(role.world_y.checked_sub(self.camera.y)?).ok()?,
+                frame: u16::try_from(role.frame_index()).ok()?,
+                image_offset: 0,
+            };
+        }
+        let trail = self.party_trail.map(|point| {
+            Some(SaveTrail {
+                x: i16::try_from(point.world_x).ok()?,
+                y: i16::try_from(point.world_y).ok()?,
+                direction: point.direction as u16,
+            })
+        });
+        let trail = trail
+            .into_iter()
+            .collect::<Option<Vec<_>>>()?
+            .try_into()
+            .ok()?;
+
+        let mut experience = self.save_experience;
+        for (role_id, primary) in experience[0].iter_mut().enumerate() {
+            primary.experience = u16::try_from(self.role_experience[role_id]).unwrap_or(u16::MAX);
+            primary.level = player_roles.role(role_id)?.level;
+        }
+        let mut poisons = [[SavePoison {
+            poison_id: 0,
+            script: 0,
+        }; SAVE_PARTY_CAPACITY]; SAVE_POISON_SLOTS];
+        for (party_index, member) in self.party.members().iter().enumerate() {
+            for (poison_index, poison) in self.player_poisons[usize::from(member.role_id)]
+                .iter()
+                .enumerate()
+                .take(SAVE_POISON_SLOTS)
+            {
+                poisons[poison_index][party_index] = SavePoison {
+                    poison_id: poison.object_id,
+                    script: poison.script_entry,
+                };
+            }
+        }
+        if self.inventory.len() > SAVE_INVENTORY_CAPACITY {
+            return None;
+        }
+        let mut inventory = [SaveInventoryEntry {
+            item_id: 0,
+            amount: 0,
+            amount_in_use: 0,
+        }; SAVE_INVENTORY_CAPACITY];
+        for (slot, &(item_id, amount)) in inventory.iter_mut().zip(&self.inventory) {
+            *slot = SaveInventoryEntry {
+                item_id,
+                amount,
+                amount_in_use: 0,
+            };
+        }
+
+        let mut runtime_objects = vec![None; self.save_event_objects.len()];
+        for object in self
+            .scene_objects
+            .iter()
+            .chain(self.inactive_objects.values())
+        {
+            let index = usize::from(object.id.checked_sub(1)?);
+            let slot = runtime_objects.get_mut(index)?;
+            if slot.replace(object).is_some() {
+                return None;
+            }
+        }
+        let event_objects = self
+            .save_event_objects
+            .iter()
+            .copied()
+            .zip(runtime_objects)
+            .map(|(mut saved, runtime)| {
+                let runtime = runtime?;
+                saved.vanish_time = runtime.vanish_time;
+                saved.x = u16::try_from(runtime.world_x.rem_euclid(1 << 16)).ok()?;
+                saved.y = u16::try_from(runtime.world_y.rem_euclid(1 << 16)).ok()?;
+                saved.layer = runtime.layer;
+                saved.trigger_script = runtime.trigger_script;
+                saved.auto_script = runtime.auto_script;
+                saved.state = runtime.state;
+                saved.trigger_mode = runtime.trigger_mode;
+                saved.sprite_num = u16::try_from(runtime.sprite_index.unwrap_or(0)).ok()?;
+                saved.sprite_frames = runtime.frames_per_direction;
+                saved.direction = runtime.direction as u16;
+                saved.current_frame = runtime.current_frame;
+                saved.auto_script_idle_frame = runtime.auto_script_idle_frame;
+                Some(saved)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let scene_index = usize::from(self.scene_number.checked_sub(1)?);
+        let (scene, next_scene) = (scenes.get(scene_index)?, scenes.get(scene_index + 1)?);
+        if scene.event_object_index > next_scene.event_object_index
+            || usize::from(next_scene.event_object_index) > event_objects.len()
+        {
+            return None;
+        }
+
+        Some(OriginalSave {
+            layout: objects.layout(),
+            saved_times,
+            viewport_x: i16::try_from(self.camera.x).ok()?,
+            viewport_y: i16::try_from(self.camera.y).ok()?,
+            party_member_index: u16::try_from(self.party.members().len().checked_sub(1)?).ok()?,
+            scene_number: self.scene_number,
+            night_palette,
+            party_direction: self.player.direction as u16,
+            music_number: self.current_music.unwrap_or(0),
+            battle_music_number: self.current_battle_music,
+            battlefield_number: self.current_battlefield,
+            screen_wave,
+            battle_speed: self.save_battle_speed,
+            collect_value: self.collect_value,
+            layer: self.save_layer,
+            chase_range: self.chase_range,
+            chase_speed_change_cycles: self.chase_speed_change_cycles,
+            follower_count: u16::try_from(self.extra_follower_ids.len()).ok()?,
+            cash: self.cash,
+            party,
+            trail,
+            experience,
+            player_roles,
+            poisons,
+            inventory,
+            scenes,
+            objects,
+            event_objects,
+        })
+    }
+
     pub fn snapshot(&self) -> GameSnapshot {
         GameSnapshot {
             scene_number: self.scene_number,
@@ -2381,6 +2784,11 @@ impl<M: CollisionMap> GameState<M> {
         if all_event_objects.len() != save.event_objects.len() {
             return false;
         }
+        let save_scenes = save.scenes;
+        let save_event_objects = save.event_objects.clone();
+        let save_experience = save.experience;
+        let save_battle_speed = save.battle_speed;
+        let save_layer = save.layer;
         let scene_index = match usize::from(save.scene_number).checked_sub(1) {
             Some(index) => index,
             None => return false,
@@ -2566,6 +2974,11 @@ impl<M: CollisionMap> GameState<M> {
         self.viewport_locked = false;
         self.party_trail = trail;
         self.extra_follower_ids = extra_follower_ids;
+        self.save_scenes = Some(save_scenes);
+        self.save_event_objects = save_event_objects;
+        self.save_experience = save_experience;
+        self.save_battle_speed = save_battle_speed;
+        self.save_layer = save_layer;
         self.camera.x = i32::from(save.viewport_x);
         self.camera.y = i32::from(save.viewport_y);
         self.rebuild_party_followers();
@@ -3608,9 +4021,13 @@ impl<M: CollisionMap> GameState<M> {
                     .iter_mut()
                     .find(|player| player.role_id == role_id)
             }) {
+                let face_color = self.global_objects.as_ref().and_then(|objects| {
+                    poison_face_color(&self.player_poisons[role_index], objects)
+                });
                 player.hp = hp;
                 player.statuses = self.player_statuses[role_index];
                 player.poisons = self.player_poisons[role_index];
+                player.poison_face_color = face_color;
             }
         }
         !revived.is_empty()
@@ -3796,6 +4213,11 @@ impl<M: CollisionMap> GameState<M> {
 
     /// Run one auto-script instruction for each active event object.
     pub fn update_auto_scripts(&mut self, scripts: &ScriptTable) -> Result<bool, AutoScriptError> {
+        self.update_auto_scripts_report(scripts).into_result()
+    }
+
+    /// Run automatic scripts while retaining visible changes made before an error.
+    pub fn update_auto_scripts_report(&mut self, scripts: &ScriptTable) -> AutoScriptUpdate {
         self.script_frame = self.script_frame.wrapping_add(1);
         let mut changed = false;
         let mut first_error = None;
@@ -3819,10 +4241,9 @@ impl<M: CollisionMap> GameState<M> {
                 self.chase_range = 1;
             }
         }
-        if let Some(error) = first_error {
-            Err(error)
-        } else {
-            Ok(changed)
+        AutoScriptUpdate {
+            changed,
+            error: first_error,
         }
     }
 
@@ -3959,7 +4380,7 @@ impl<M: CollisionMap> GameState<M> {
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                WalkObjectTo | WalkObjectToSlow => {
+                WalkObjectTo | WalkObjectToSlow | WalkObjectHalfSpeed | WalkObjectFast => {
                     let target = tile_to_world(
                         usize::from(entry.operands[0]),
                         usize::from(entry.operands[1]),
@@ -3971,18 +4392,18 @@ impl<M: CollisionMap> GameState<M> {
                         opcode: entry.opcode,
                     })?;
                     let object = &mut self.scene_objects[object_index];
-                    let should_move = opcode == WalkObjectTo
+                    let should_move = opcode != WalkObjectToSlow
                         || !self
                             .script_frame
                             .wrapping_add(u32::from(object_id))
                             .is_multiple_of(2);
-                    if should_move
-                        && walk_scene_object_to(
-                            object,
-                            target,
-                            if opcode == WalkObjectTo { 3 } else { 2 },
-                        )
-                    {
+                    let speed = match opcode {
+                        WalkObjectTo => 3,
+                        WalkObjectToSlow | WalkObjectHalfSpeed => 2,
+                        WalkObjectFast => 8,
+                        _ => unreachable!("matched object-walk opcode"),
+                    };
+                    if should_move && walk_scene_object_to(object, target, speed) {
                         object.auto_script = script_entry.wrapping_add(1);
                     }
                     return Ok(true);
@@ -4091,6 +4512,51 @@ impl<M: CollisionMap> GameState<M> {
                     target.world_y += i32::from(entry.operands[2] as i16);
                     target.advance_animation();
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
+                OffsetObject => {
+                    let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
+                        object_id
+                    } else {
+                        entry.operands[0]
+                    };
+                    let Some(target) = self.object_mut(target_id) else {
+                        return Err(AutoScriptError::MissingObject {
+                            object_id,
+                            entry: script_entry,
+                            target_id,
+                        });
+                    };
+                    target.world_x += i32::from(entry.operands[1] as i16);
+                    target.world_y += i32::from(entry.operands[2] as i16);
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
+                SetObjectLayer => {
+                    let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
+                        object_id
+                    } else {
+                        entry.operands[0]
+                    };
+                    let Some(target) = self.object_mut(target_id) else {
+                        return Err(AutoScriptError::MissingObject {
+                            object_id,
+                            entry: script_entry,
+                            target_id,
+                        });
+                    };
+                    target.layer = entry.operands[1] as i16;
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
+                JumpIfObjectOutsideZone => {
+                    let within_zone =
+                        self.objects_within_zone(object_id, entry.operands[0], entry.operands[1]);
+                    self.scene_objects[object_index].auto_script = if within_zone {
+                        script_entry.wrapping_add(1)
+                    } else {
+                        entry.operands[2]
+                    };
                     return Ok(true);
                 }
                 SyncObjectState => {
@@ -4225,14 +4691,9 @@ impl<M: CollisionMap> GameState<M> {
                 | JumpIfPartyContainsPlayer
                 | WalkPartyFast
                 | WalkPartyFastest
-                | WalkObjectHalfSpeed
-                | OffsetObject
-                | SetObjectLayer
                 | MoveViewport
                 | ToggleDayNightPalette
                 | JumpIfNotFacingObject
-                | WalkObjectFast
-                | JumpIfObjectOutsideZone
                 | PlaceUsedItemObject
                 | Delay
                 | JumpIfItemNotEquipped
@@ -4827,6 +5288,19 @@ fn apply_enemy_script_overrides(
         .unwrap_or(enemy.attack_equivalent_item_script);
 }
 
+fn poison_face_color(
+    poisons: &[BattlePoison; MAX_BATTLE_POISONS],
+    objects: &GlobalObjects,
+) -> Option<u8> {
+    poisons
+        .iter()
+        .filter(|poison| poison.object_id != 0)
+        .filter_map(|poison| objects.get(poison.object_id).copied())
+        .filter(|object| object.poison_level() <= 3)
+        .max_by_key(|object| object.poison_level())
+        .map(|object| object.poison_color() as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -5286,6 +5760,53 @@ mod tests {
     }
 
     #[test]
+    fn victory_applies_hidden_experience_and_recovers_half_missing_hp_and_mp() {
+        let mut state = battle_item_state(1);
+        state
+            .player_roles
+            .as_mut()
+            .unwrap()
+            .role_mut(0)
+            .unwrap()
+            .max_mp = 500;
+        for category in 1..SAVE_EXPERIENCE_KINDS {
+            state.save_experience[category][0].level = 1;
+        }
+        {
+            let battle = state.battle_mut().unwrap();
+            battle.players[0].hp = 100;
+            battle.players[0].mp = 100;
+            battle.players[0].max_mp = 500;
+            battle.enemies[0].hp = 1;
+            battle.enemies[0].experience = 20;
+            battle.enemies[0]
+                .statuses
+                .set_for_enemy(BattleStatus::Paralyzed, 2);
+            assert!(battle.attack(0).is_some());
+        }
+        for _ in 0..32 {
+            let _ = state.advance_battle_resolution();
+            if matches!(
+                state.battle().map(BattleState::phase),
+                Some(BattlePhase::Finished(BattleResult::Won))
+            ) {
+                break;
+            }
+        }
+        assert_eq!(
+            state.settle_battle().map(|settled| settled.0),
+            Some(BattleResult::Won)
+        );
+
+        let role = state.player_role(0).unwrap();
+        assert!(role.max_hp > 500);
+        assert!(role.attack_strength > 80);
+        assert_eq!(role.mp, 300);
+        assert_eq!(role.hp, 100 + (role.max_hp - 100) / 2);
+        assert_eq!(state.save_experience[HIDDEN_EXP_ATTACK + 1][0].count, 0);
+    }
+
+    #[test]
     fn battle_magic_scripts_scale_damage_from_remaining_mp_and_cash() {
         let mut role_data = vec![0; 900];
         for (array, value) in [
@@ -5305,11 +5826,23 @@ mod tests {
         let roles = PlayerRoles::parse(&role_data).unwrap();
         let party = Party::single(0, &roles).unwrap();
         let objects = GlobalObjects::parse(
-            &[[0u16; 6], [0, 0, 0, 0, 0, 0], [0, 0, 32, 31, 0, 0]]
-                .into_iter()
-                .flatten()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>(),
+            &[
+                [0u16; 6],
+                [0, 0, 0, 0, 0, 0],
+                [
+                    0,
+                    0,
+                    32,
+                    31,
+                    0,
+                    crate::battle::MAGIC_FLAG_USABLE_IN_BATTLE
+                        | crate::battle::MAGIC_FLAG_USABLE_TO_ENEMY,
+                ],
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
             pal_assets::objects::ObjectLayout::Dos,
         )
         .unwrap();
@@ -6926,35 +7459,86 @@ mod tests {
     }
 
     #[test]
-    fn one_auto_script_error_does_not_freeze_later_objects() {
-        let script_data = [[0x0000, 0, 0, 0], [0x1234, 0, 0, 0], [0x000b, 0, 0, 0]]
+    fn auto_script_report_preserves_later_animation_when_an_object_errors() {
+        let script_data = [[0x0000, 0, 0, 0], [0x1234, 0, 0, 0], [0x0087, 0, 0, 0]]
             .into_iter()
             .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
             .collect::<Vec<_>>();
         let scripts = ScriptTable::parse(&script_data).unwrap();
         let mut broken = blocking_object(80, 80);
         broken.auto_script = 1;
-        let mut mover = blocking_object(100, 100);
-        mover.id = 2;
-        mover.auto_script = 2;
-        let mut state = state(&[]).with_scene_objects(vec![broken, mover]);
+        let mut animator = blocking_object(100, 100);
+        animator.id = 2;
+        animator.auto_script = 2;
+        let mut state = state(&[]).with_scene_objects(vec![broken, animator]);
 
+        let update = state.update_auto_scripts_report(&scripts);
+        assert!(update.changed);
         assert_eq!(
-            state.update_auto_scripts(&scripts),
-            Err(AutoScriptError::Unsupported {
+            update.error,
+            Some(AutoScriptError::Unsupported {
                 object_id: 1,
                 entry: 1,
                 opcode: 0x1234,
             })
         );
-        assert_ne!(
+        assert_eq!(state.scene_objects[1].current_frame, 1);
+        assert_eq!(state.scene_objects[1].auto_script, 3);
+    }
+
+    #[test]
+    fn auto_scripts_support_extended_object_motion_and_zone_branches() {
+        let script_data = [
+            [0x0000, 0, 0, 0],
+            [0x007d, 0xffff, 0xfffc, 2],
+            [0x0000, 0, 0, 0],
+            [0x007c, 4, 6, 0],
+            [0x0083, 4, 1, 6],
+            [0x0000, 0, 0, 0],
+            [0x0000, 0, 0, 0],
+            [0x007e, 0xffff, 0xfffe, 0],
+            [0x0000, 0, 0, 0],
+        ]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+        let scripts = ScriptTable::parse(&script_data).unwrap();
+        let mut offset = blocking_object(100, 100);
+        offset.auto_script = 1;
+        let mut walker = blocking_object(100, 100);
+        walker.id = 2;
+        walker.auto_script = 3;
+        let mut zone_owner = blocking_object(100, 100);
+        zone_owner.id = 3;
+        zone_owner.auto_script = 4;
+        let mut zone_target = blocking_object(200, 100);
+        zone_target.id = 4;
+        let mut layered = blocking_object(80, 80);
+        layered.id = 5;
+        layered.auto_script = 7;
+        let mut state =
+            state(&[]).with_scene_objects(vec![offset, walker, zone_owner, zone_target, layered]);
+
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert_eq!(
+            (
+                state.scene_objects[0].world_x,
+                state.scene_objects[0].world_y
+            ),
+            (96, 102)
+        );
+        assert_eq!(state.scene_objects[0].auto_script, 2);
+        assert_eq!(
             (
                 state.scene_objects[1].world_x,
                 state.scene_objects[1].world_y
             ),
-            (100, 100)
+            (104, 98)
         );
         assert_eq!(state.scene_objects[1].auto_script, 3);
+        assert_eq!(state.scene_objects[2].auto_script, 6);
+        assert_eq!(state.scene_objects[4].layer, -2);
+        assert_eq!(state.scene_objects[4].auto_script, 8);
     }
 
     #[test]
@@ -7063,5 +7647,27 @@ mod tests {
         assert_eq!(state.scene_enter_script(0), 123);
         assert_eq!(state.scene_teleport_script(0), 456);
         assert!(state.object_script_overrides.is_empty());
+
+        let encoded = state.original_save(13, true, 8).unwrap().encode().unwrap();
+        let saved = OriginalSave::parse(&encoded).unwrap();
+        assert_eq!(saved.saved_times, 13);
+        assert!(saved.night_palette);
+        assert_eq!(saved.screen_wave, 8);
+        assert_eq!((saved.viewport_x, saved.viewport_y), (100, 50));
+        assert_eq!((saved.party[0].x, saved.party[0].y), (160, 112));
+        assert_eq!(saved.music_number, 31);
+        assert_eq!(saved.cash, 1234);
+        assert_eq!(saved.inventory[0].item_id, 99);
+        assert_eq!(saved.inventory[0].amount, 3);
+        assert_eq!(saved.experience[0][0].experience, 42);
+        assert_eq!(saved.poisons[0][0].poison_id, 1);
+        assert_eq!(saved.scenes[0].script_on_enter, 123);
+        assert_eq!(saved.scenes[0].script_on_teleport, 456);
+
+        let mut reloaded = self::state(&[]);
+        assert!(reloaded.restore_original_save(saved, test_map(), Vec::new()));
+        assert_eq!(reloaded.cash, 1234);
+        assert_eq!(reloaded.inventory_count(99), 3);
+        assert_eq!((reloaded.camera.x, reloaded.camera.y), (100, 50));
     }
 }

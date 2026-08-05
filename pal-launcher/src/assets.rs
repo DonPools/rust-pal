@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use pal_assets::battle::{BattleData, BattleSpriteArchive};
+use pal_assets::battle::{BattleData, BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::fbp::FbpArchive;
 use pal_assets::magic::Magics;
@@ -92,6 +92,14 @@ pub(super) fn load_enemy_battle_sprites(data_dir: &Path) -> Option<BattleSpriteA
 
 pub(super) fn load_player_battle_sprites(data_dir: &Path) -> Option<BattleSpriteArchive> {
     BattleSpriteArchive::load(&std::fs::read(data_dir.join("F.MKF")).ok()?)
+}
+
+pub(super) fn load_magic_effect_sprites(data_dir: &Path) -> Option<BattleSpriteArchive> {
+    BattleSpriteArchive::load(&std::fs::read(data_dir.join("FIRE.MKF")).ok()?)
+}
+
+pub(super) fn load_battle_effects(data_dir: &Path) -> Option<BattleEffects> {
+    BattleEffects::load(&std::fs::read(data_dir.join("DATA.MKF")).ok()?)
 }
 
 pub(super) fn load_dialog_faces(data_dir: &Path) -> Option<Vec<Option<RleBitmap>>> {

@@ -4,13 +4,14 @@ use pal_assets::mkf::MkfArchive;
 use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
 use pal_assets::save::OriginalSave;
 use pal_assets::voc::VocClip;
-use pal_core::battle::{BattlePhase, BattleResult, BattleStatus};
+use pal_core::battle::{BattlePhase, BattleResult, BattleStatus, BattleTarget};
 use pal_core::script::{
     ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual,
 };
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
 use pal_desktop::window::{
-    render_battle, render_tile_map, BattleRenderResources, BattleRenderState, Viewport,
+    render_battle, render_tile_map, BattleMenuState, BattleRenderResources, BattleRenderState,
+    Viewport,
 };
 
 use crate::assets::{
@@ -37,6 +38,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         battle_data,
         enemy_battle_sprites,
         player_battle_sprites,
+        magic_effect_sprites,
+        battle_effects,
         battle_backgrounds,
         role_sprites,
         dialog_faces,
@@ -510,6 +513,73 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         global_objects.get(99).is_some(),
         "item 99 has no object definition"
     );
+    let exported_save = game
+        .original_save(1, false, 0)
+        .and_then(|save| save.encode())
+        .and_then(|bytes| OriginalSave::parse(&bytes))
+        .expect("initial game state cannot round-trip through an original .rpg save");
+    assert_eq!(exported_save.saved_times, 1);
+    assert_eq!(exported_save.scene_number, game.scene_number);
+    assert!(exported_save.experience.iter().all(|category| {
+        category.iter().enumerate().all(|(role_id, experience)| {
+            exported_save
+                .player_roles
+                .role(role_id)
+                .is_some_and(|role| experience.level == role.level)
+        })
+    }));
+    assert_eq!(
+        exported_save.event_objects.len(),
+        scene_data.event_object_count()
+    );
+    let exported_event_objects = exported_save
+        .event_objects
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let id = u16::try_from(index).ok()?.checked_add(1)?;
+            let frame_count = if event.sprite_num == 0 {
+                0
+            } else {
+                role_sprites.character_frame_count(usize::from(event.sprite_num))?
+            };
+            pal_core::scene::SceneObject::from_asset(id, event, frame_count)
+        })
+        .collect::<Option<Vec<_>>>()
+        .expect("exported save contains an invalid event object");
+    let exported_scene_index = usize::from(exported_save.scene_number) - 1;
+    let exported_map_number = exported_save.scenes[exported_scene_index].map_num;
+    let exported_scene = load_runtime_scene_with_map(
+        &data_dir,
+        &scene_data,
+        exported_save.scene_number,
+        Some(exported_map_number),
+        &role_sprites,
+    )
+    .expect("exported save scene or map is unavailable");
+    let scratch_scene = load_runtime_scene_with_map(
+        &data_dir,
+        &scene_data,
+        exported_save.scene_number,
+        Some(exported_map_number),
+        &role_sprites,
+    )
+    .expect("exported save scratch scene or map is unavailable");
+    let mut exported_game = pal_core::game::GameState::new(
+        scratch_scene.map,
+        game.player.clone(),
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    );
+    assert!(
+        exported_game.restore_original_save(
+            exported_save,
+            exported_scene.map,
+            exported_event_objects
+        ),
+        "exported save could not be restored into a fresh game state"
+    );
+    assert_eq!(exported_game.scene_number, game.scene_number);
     assert!(
         initial_event_sprite_numbers
             .iter()
@@ -1274,6 +1344,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         BattleRenderResources {
             enemy_sprites: &enemy_battle_sprites,
             player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             backgrounds: &battle_backgrounds,
             text: &text,
             font: &font,
@@ -1283,9 +1355,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             selected_enemy: battle.first_living_enemy().unwrap_or(0),
             selected_command: 0,
             targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
             ticks: 0,
             event: None,
             event_ticks: 0,
+            kept_effects: &[],
         },
     );
     let battle_idle_frame = renderer.screen().to_vec();
@@ -1303,6 +1378,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         magic_object: 314,
         blow,
         damage: 0,
+        visual: true,
         defeated: false,
     };
     render_battle(
@@ -1311,6 +1387,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         BattleRenderResources {
             enemy_sprites: &enemy_battle_sprites,
             player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             backgrounds: &battle_backgrounds,
             text: &text,
             font: &font,
@@ -1320,9 +1398,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             selected_enemy: 0,
             selected_command: 0,
             targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
             ticks: 0,
             event: Some(blow_event(0)),
             event_ticks: 1,
+            kept_effects: &[],
         },
     );
     let magic_without_blow = renderer.screen().to_vec();
@@ -1332,6 +1413,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         BattleRenderResources {
             enemy_sprites: &enemy_battle_sprites,
             player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             backgrounds: &battle_backgrounds,
             text: &text,
             font: &font,
@@ -1341,9 +1424,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             selected_enemy: 0,
             selected_command: 0,
             targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
             ticks: 0,
             event: Some(blow_event(-3)),
             event_ticks: 1,
+            kept_effects: &[],
         },
     );
     let battle_blow_pixels = renderer
@@ -1356,12 +1442,38 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         battle_blow_pixels > 0,
         "signed magic blow did not displace rendered enemies"
     );
+    let mut kept_battle = battle.clone();
+    let kept_magic_object = kept_battle.players[0]
+        .magics
+        .iter_mut()
+        .find(|magic| {
+            magic.magic_type != 9
+                && magic_effect_sprites
+                    .frame_count(usize::from(magic.effect))
+                    .is_some_and(|count| count > 0)
+        })
+        .map(|magic| {
+            magic.keep_effect = u16::MAX;
+            magic.object_id
+        })
+        .expect("first battle leader has no renderable magic effect");
+    let kept_event = pal_core::battle::BattleEvent::PlayerMagic {
+        player: 0,
+        enemy: 0,
+        magic_object: kept_magic_object,
+        blow: 0,
+        damage: 0,
+        visual: true,
+        defeated: false,
+    };
     render_battle(
         &mut renderer,
-        battle,
+        &kept_battle,
         BattleRenderResources {
             enemy_sprites: &enemy_battle_sprites,
             player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             backgrounds: &battle_backgrounds,
             text: &text,
             font: &font,
@@ -1371,9 +1483,47 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             selected_enemy: 0,
             selected_command: 0,
             targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
+            ticks: 0,
+            event: None,
+            event_ticks: 0,
+            kept_effects: &[kept_event],
+        },
+    );
+    let kept_effect_pixels = renderer
+        .screen()
+        .chunks_exact(4)
+        .zip(battle_idle_frame.chunks_exact(4))
+        .filter(|(kept, idle)| kept != idle)
+        .count();
+    assert!(
+        kept_effect_pixels > 0,
+        "persistent magic effect did not survive the active event"
+    );
+    render_battle(
+        &mut renderer,
+        battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+            ui_sprites: &ui_sprites,
+        },
+        BattleRenderState {
+            selected_enemy: 0,
+            selected_command: 0,
+            targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
             ticks: 0,
             event: Some(pal_core::battle::BattleEvent::PlayerMagicAnimation { player: None }),
             event_ticks: 1,
+            kept_effects: &[],
         },
     );
     let magic_color_shift_pixels = renderer
@@ -1392,6 +1542,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         BattleRenderResources {
             enemy_sprites: &enemy_battle_sprites,
             player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             backgrounds: &battle_backgrounds,
             text: &text,
             font: &font,
@@ -1401,9 +1553,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             selected_enemy: 0,
             selected_command: 0,
             targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
             ticks: 0,
             event: Some(pal_core::battle::BattleEvent::PlayerMagicAnimation { player: Some(1) }),
             event_ticks: 5,
+            kept_effects: &[],
         },
     );
     let pre_magic_pixels = renderer
@@ -1452,6 +1607,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                     BattleRenderResources {
                         enemy_sprites: &enemy_battle_sprites,
                         player_sprites: &player_battle_sprites,
+                        magic_effect_sprites: &magic_effect_sprites,
+                        battle_effects: &battle_effects,
                         backgrounds: &battle_backgrounds,
                         text: &text,
                         font: &font,
@@ -1461,9 +1618,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                         selected_enemy: battle.first_living_enemy().unwrap_or(0),
                         selected_command: 0,
                         targeting_enemy: false,
+                        menu: BattleMenuState::Main,
+                        auto_attack: false,
                         ticks: 4,
                         event: Some(event),
                         event_ticks: 4,
+                        kept_effects: &[],
                     },
                 );
                 battle_feedback_pixels = renderer
@@ -1491,14 +1651,26 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 .magics
                 .iter()
                 .enumerate()
-                .filter(|(_, magic)| player.mp >= magic.mp_cost)
+                .filter(|(_, magic)| {
+                    magic.usable_to_enemy()
+                        && (magic.base_damage as i16) > 0
+                        && player.mp >= magic.mp_cost
+                })
                 .max_by_key(|(_, magic)| magic.base_damage)
-                .map(|(index, _)| index);
+                .map(|(index, magic)| (index, magic.apply_to_all()));
             (target, magic)
         };
-        let committed = if let Some(magic) = magic {
-            game.battle_mut()
-                .and_then(|battle| battle.cast_magic(magic, target))
+        let committed = if let Some((magic, apply_to_all)) = magic {
+            game.battle_mut().and_then(|battle| {
+                battle.cast_magic_at(
+                    magic,
+                    if apply_to_all {
+                        BattleTarget::AllEnemies
+                    } else {
+                        BattleTarget::Enemy(target)
+                    },
+                )
+            })
         } else {
             game.battle_mut().and_then(|battle| battle.attack(target))
         }
@@ -1521,6 +1693,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         BattleRenderResources {
             enemy_sprites: &enemy_battle_sprites,
             player_sprites: &player_battle_sprites,
+            magic_effect_sprites: &magic_effect_sprites,
+            battle_effects: &battle_effects,
             backgrounds: &battle_backgrounds,
             text: &text,
             font: &font,
@@ -1530,15 +1704,18 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             selected_enemy: 0,
             selected_command: 0,
             targeting_enemy: false,
+            menu: BattleMenuState::Main,
+            auto_attack: false,
             ticks: 0,
             event: None,
             event_ticks: 0,
+            kept_effects: &[],
         },
     );
     let settlement_border_pixels = renderer
         .screen()
         .chunks_exact(4)
-        .filter(|pixel| *pixel == [255, 236, 80, 255])
+        .filter(|pixel| *pixel == [224, 216, 168, 255])
         .count();
     assert!(
         settlement_border_pixels > 0,

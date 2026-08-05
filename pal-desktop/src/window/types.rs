@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use pal_assets::battle::BattleSpriteArchive;
+use pal_assets::battle::{BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::fbp::FbpArchive;
 use pal_assets::palette::PaletteSet;
@@ -59,6 +59,8 @@ pub struct GameResources {
     pub item_sprites: Vec<Option<RleBitmap>>,
     pub enemy_battle_sprites: BattleSpriteArchive,
     pub player_battle_sprites: BattleSpriteArchive,
+    pub magic_effect_sprites: BattleSpriteArchive,
+    pub battle_effects: BattleEffects,
     pub battle_backgrounds: Vec<Option<Bitmap>>,
     pub status_background: Bitmap,
     pub equip_background: Bitmap,

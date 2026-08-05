@@ -576,6 +576,7 @@ mod tests {
             direction_pressed: None,
             confirm: true,
             cancel: false,
+            ..GameInput::default()
         };
 
         let (_, action) = intro.update(50, input, &empty_rng).unwrap();

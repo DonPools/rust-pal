@@ -170,9 +170,16 @@ fn advance_script_with_budget<L>(
                     .unwrap_or(0);
                 services.battle_command_selected = 0;
                 services.battle_targeting_enemy = false;
-                services.battle_pending_throw_item = None;
+                services.battle_menu = super::battle_render::BattleMenuState::Main;
+                services.battle_auto_attack = false;
+                services.battle_force_all = false;
+                services.battle_repeat_all = false;
+                services.post_battle = None;
                 services.battle_events.clear();
                 services.battle_event_ticks = 0;
+                services.battle_kept_effects.clear();
+                services.battle_effect_sound_count = 0;
+                services.battle_feedback_sound_played = false;
                 if game.current_battle_music == 0 {
                     services.music.stop();
                 } else if !services.music.play(game.current_battle_music, true, 0) {
@@ -806,9 +813,9 @@ pub(super) fn update_trigger_world(
     services: &mut SessionState,
     set_title: &mut impl FnMut(&str),
 ) {
-    match game.update_auto_scripts(&services.auto_scripts) {
-        Ok(_) => {}
-        Err(error) => set_title(&auto_script_error_title(error)),
+    let update = game.update_auto_scripts_report(&services.auto_scripts);
+    if let Some(error) = update.error {
+        set_title(&auto_script_error_title(error));
     }
     for sound_id in game.take_auto_script_sounds() {
         if !services.sound_effects.play(sound_id) {
