@@ -1,5 +1,17 @@
 # 场景菜单行为
 
+## 开场菜单
+
+开场菜单使用 DOS 版 `FBP.MKF` 图片 60 作为背景，并循环播放 MIDI 31。一级菜单使用
+`WORD.DAT` 词条 7、8，依次为新游戏和读取存档；菜单键在一级菜单等同选择新游戏。
+选择读取后显示 1–5 槽，词条为 43–47，每槽右侧显示存档头中的四位保存次数。菜单键
+返回一级菜单，并把默认选择恢复为新游戏。
+
+确认新游戏后，场景 1 的进入脚本在黑屏期间启动，到第一次可见场景绘制时淡入。确认存档
+后，从 `data/1.RPG`…`5.RPG` 或 `data/SAVES/1.rpg`…`5.rpg` 读取所选槽，恢复存档指定
+场景、队伍、对象、调色板、波纹和音乐；加载存档不会重新执行该场景的进入脚本。空槽、
+损坏存档或无法加载的场景会返回槽位菜单并重新淡入开场背景。
+
 ## 主菜单层级
 
 场景中按菜单键先进入四项主菜单，词条使用 `WORD.DAT` 固定编号：
@@ -53,6 +65,6 @@ DOS 中文版的 `WORD.DAT` 固定词条宽度为 10 字节，因此物品列表
 
 ## 参考
 
-- SDLPAL `uigame.c`：`PAL_InGameMenu`、`PAL_InventoryMenu`、`PAL_ItemUseMenu`
+- SDLPAL `uigame.c`：`PAL_OpeningMenu`、`PAL_SaveSlotMenu`、`PAL_InGameMenu`
 - SDLPAL `itemmenu.c`：`PAL_ItemSelectMenuInit`、`PAL_ItemSelectMenuUpdate`
 - SDLPAL `play.c`：`PAL_GameUseItem`、`PAL_GameEquipItem`

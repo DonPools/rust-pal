@@ -610,6 +610,16 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         .filter(|(with_object, map_pixel)| with_object != map_pixel)
         .count();
     let text_before = renderer.screen().to_vec();
+    for word_id in [7usize, 8, 43, 44, 45, 46, 47] {
+        assert!(
+            text.word(word_id).is_some_and(|word| !word.is_empty()),
+            "opening menu word {word_id} is unavailable"
+        );
+    }
+    assert!(
+        fbp_archive.frame(60).is_some(),
+        "opening menu FBP picture 60 is unavailable"
+    );
     let sample_word = (0..text.word_count())
         .filter_map(|index| text.word(index))
         .find(|word| !word.is_empty())
@@ -1667,6 +1677,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "event object {} rendered: {event_object_pixels} pixels",
         visible_object_id
     );
+    println!("opening menu data passed: FBP 60, 2 main labels and 5 save-slot labels");
     println!(
         "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels, \
          {speed_controls} speed, {terminal_controls} terminal and {icon_controls} icon controls",

@@ -50,6 +50,7 @@ pub struct GameResources {
     pub role_sprites: RoleSprites,
     pub script_table: ScriptTable,
     pub initial_enter_script: u16,
+    pub opening_background: Bitmap,
     pub text: TextLibrary,
     pub font: BitmapFont,
     pub dialog_faces: Vec<Option<RleBitmap>>,

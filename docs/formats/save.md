@@ -47,6 +47,8 @@ palette offset、队伍方向、场景/BGM/战斗资源编号、screen wave、�
 - `--check-assets` 在 `data/SAVES/` 存在时会解析其中全部 `.rpg`，核对事件对象表长度，
   并把保存次数最新的一份恢复到它指定的真实场景、地图和角色精灵；该目录不是运行所需
   的版权资源基线，因此不存在时仍由 DOS/Win95 内存 fixture 覆盖解析与恢复规则。
+- 开场槽位菜单和系统读取共用这些查找路径：`data/{slot}.RPG`、小写扩展名以及
+  `data/SAVES/{slot}.RPG` 两种目录布局；同一槽优先使用 `data/` 根目录中的文件。
 
 ## 参考
 

@@ -9,8 +9,8 @@ use pal_core::game::GameState;
 
 use super::draw::{draw_number, fill_rect, stroke_rect};
 use super::menu_state::{
-    ConfirmationMenu, FieldMenu, InventoryMenu, InventoryMode, ShopMenu, ShopMode,
-    INVENTORY_COLUMNS, INVENTORY_VISIBLE_ROWS,
+    ConfirmationMenu, FieldMenu, InventoryMenu, InventoryMode, OpeningMenu, OpeningMenuPage,
+    ShopMenu, ShopMode, INVENTORY_COLUMNS, INVENTORY_VISIBLE_ROWS,
 };
 use crate::renderer::Renderer;
 
@@ -279,6 +279,56 @@ fn draw_player_info_boxes(renderer: &mut Renderer, game: &GameState, sprites: &[
             y + 26,
             NumberColor::Cyan,
         );
+    }
+}
+
+pub(super) fn render_opening_menu(
+    renderer: &mut Renderer,
+    background: &Bitmap,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    menu: OpeningMenu,
+    ui_ticks: u64,
+) {
+    renderer.replace_screen(&background.rgba);
+    match menu.page {
+        OpeningMenuPage::Main => {
+            for (index, word_id) in [7usize, 8].into_iter().enumerate() {
+                let Some(label) = text.word(word_id) else {
+                    continue;
+                };
+                let color = if index == menu.main_selected {
+                    selected_color(ui_ticks)
+                } else {
+                    0x4f
+                };
+                renderer.draw_big5_text_shadowed(font, label, 125, 95 + index as i32 * 17, color);
+            }
+        }
+        OpeningMenuPage::SaveSlots => {
+            for (index, slot) in menu.slots.into_iter().enumerate() {
+                let y = 7 + index as i32 * 38;
+                draw_single_line_box(renderer, sprites, 195, y, 6);
+                if let Some(label) = text.word(43 + index) {
+                    let color = if index == menu.slot_selected {
+                        selected_color(ui_ticks)
+                    } else {
+                        0x4f
+                    };
+                    renderer.draw_big5_text_shadowed(font, label, 210, y + 10, color);
+                }
+                draw_ui_number(
+                    renderer,
+                    sprites,
+                    u32::from(slot.saved_times),
+                    4,
+                    246,
+                    y + 14,
+                    NumberColor::Yellow,
+                );
+            }
+        }
     }
 }
 

@@ -9,6 +9,13 @@ use super::LoadedScene;
 
 pub(super) const ORIGINAL_SAVE_SLOTS: std::ops::RangeInclusive<u8> = 1..=5;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct OriginalSaveSlot {
+    pub(super) slot: u8,
+    pub(super) saved_times: u16,
+    pub(super) available: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct OriginalSaveEnvironment {
     pub(super) slot: u8,
@@ -24,14 +31,24 @@ pub(super) enum RestoreOriginalSaveError {
 }
 
 pub(super) fn latest_original_save_slot(directory: &Path) -> Option<u8> {
-    ORIGINAL_SAVE_SLOTS
-        .filter_map(|slot| {
-            let bytes = read_slot(directory, slot)?;
-            let save = OriginalSave::parse(&bytes)?;
-            Some((save.saved_times, slot))
-        })
+    original_save_slots(directory)
+        .into_iter()
+        .filter(|slot| slot.available)
+        .map(|slot| (slot.saved_times, slot.slot))
         .max()
         .map(|(_, slot)| slot)
+}
+
+pub(super) fn original_save_slots(directory: &Path) -> [OriginalSaveSlot; 5] {
+    std::array::from_fn(|index| {
+        let slot = u8::try_from(index + 1).expect("five save slots fit in u8");
+        let save = read_slot(directory, slot).and_then(|bytes| OriginalSave::parse(&bytes));
+        OriginalSaveSlot {
+            slot,
+            saved_times: save.as_ref().map_or(0, |save| save.saved_times),
+            available: save.is_some(),
+        }
+    })
 }
 
 pub(super) fn restore_original_save<L>(
@@ -102,10 +119,12 @@ fn read_slot(directory: &Path, slot: u8) -> Option<Vec<u8>> {
         .find_map(|path| std::fs::read(path).ok())
 }
 
-fn slot_paths(directory: &Path, slot: u8) -> [PathBuf; 2] {
+fn slot_paths(directory: &Path, slot: u8) -> [PathBuf; 4] {
     [
         directory.join(format!("{slot}.RPG")),
         directory.join(format!("{slot}.rpg")),
+        directory.join("SAVES").join(format!("{slot}.RPG")),
+        directory.join("SAVES").join(format!("{slot}.rpg")),
     ]
 }
 
@@ -138,7 +157,39 @@ mod tests {
         std::fs::write(directory.join("1.RPG"), minimal_save(3)).unwrap();
         std::fs::write(directory.join("2.rpg"), minimal_save(9)).unwrap();
         std::fs::write(directory.join("3.RPG"), b"invalid").unwrap();
+        std::fs::create_dir(directory.join("SAVES")).unwrap();
+        std::fs::write(directory.join("SAVES/4.rpg"), minimal_save(7)).unwrap();
         assert_eq!(latest_original_save_slot(&directory), Some(2));
+        assert_eq!(
+            original_save_slots(&directory),
+            [
+                OriginalSaveSlot {
+                    slot: 1,
+                    saved_times: 3,
+                    available: true,
+                },
+                OriginalSaveSlot {
+                    slot: 2,
+                    saved_times: 9,
+                    available: true,
+                },
+                OriginalSaveSlot {
+                    slot: 3,
+                    saved_times: 0,
+                    available: false,
+                },
+                OriginalSaveSlot {
+                    slot: 4,
+                    saved_times: 7,
+                    available: true,
+                },
+                OriginalSaveSlot {
+                    slot: 5,
+                    saved_times: 0,
+                    available: false,
+                },
+            ]
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

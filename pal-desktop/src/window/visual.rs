@@ -134,6 +134,19 @@ impl VisualState {
             )
     }
 
+    /// Keep the next scene black until its enter script has finished, then let
+    /// the normal implicit scene fade-in reveal it.
+    pub(super) fn prepare_scene_fade_in(&mut self) {
+        self.pending = None;
+        self.effect = None;
+        self.indexed_screen = None;
+        self.rgba_screen = None;
+        self.brightness = 0;
+        self.needs_scene_fade_in = true;
+        self.fade_screen_frozen = false;
+        self.ending_effect_sprite = 0;
+    }
+
     /// Start the implicit fade performed by the original scene renderer after
     /// opcode 0x0050. Explicit script effects get the first chance to consume
     /// the pending fade; this path runs only once script execution pauses.
@@ -1158,6 +1171,21 @@ mod tests {
         assert_eq!(visual.rgba_screen.as_deref(), Some(current.as_slice()));
         assert_eq!(visual.brightness, 64);
         assert!(visual.fade_screen_frozen);
+    }
+
+    #[test]
+    fn prepared_scene_stays_black_until_automatic_fade_in_is_queued() {
+        let mut visual = VisualState::new();
+        visual.rgba_screen = Some(vec![17; RNG_FRAME_PIXELS * 4]);
+        visual.brightness = 64;
+
+        visual.prepare_scene_fade_in();
+
+        assert_eq!(visual.brightness, 0);
+        assert!(visual.needs_scene_fade_in);
+        assert!(visual.rgba_screen.is_none());
+        assert!(visual.queue_automatic_scene_fade_in());
+        assert!(visual.is_blocking());
     }
 
     #[test]

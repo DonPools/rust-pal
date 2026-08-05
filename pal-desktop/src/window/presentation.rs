@@ -12,9 +12,10 @@ use super::battle_render::{render_battle, BattleRenderResources, BattleRenderSta
 use super::debug_render::{focused_debug_object, render_collision_overlay, render_object_overlay};
 use super::dialog::{render_dialog, ActiveDialog};
 use super::menu_render::{
-    render_confirmation_menu, render_field_menu, render_inventory_menu, render_shop_menu,
+    render_confirmation_menu, render_field_menu, render_inventory_menu, render_opening_menu,
+    render_shop_menu,
 };
-use super::menu_state::{ConfirmationMenu, FieldMenu, InventoryMenu, ShopMenu};
+use super::menu_state::{ConfirmationMenu, FieldMenu, InventoryMenu, OpeningMenu, ShopMenu};
 use super::scene_render::render_tile_map;
 use super::visual::VisualState;
 use super::Viewport;
@@ -22,6 +23,8 @@ use crate::renderer::Renderer;
 
 #[derive(Clone, Copy)]
 pub(super) struct UiRenderContext<'a> {
+    pub(super) opening_menu: Option<&'a OpeningMenu>,
+    pub(super) opening_background: &'a Bitmap,
     pub(super) dialog: Option<&'a ActiveDialog>,
     pub(super) field_menu: Option<&'a FieldMenu>,
     pub(super) inventory_menu: Option<&'a InventoryMenu>,
@@ -77,6 +80,21 @@ pub(super) fn render_game(
         renderer.set_palette(&palette);
     }
     let override_rendered = ui.visual.render_override(renderer);
+    if let Some(opening_menu) = ui.opening_menu {
+        if !override_rendered {
+            render_opening_menu(
+                renderer,
+                ui.opening_background,
+                ui.text,
+                ui.font,
+                ui.ui_sprites,
+                *opening_menu,
+                ui.ui_ticks,
+            );
+        }
+        ui.visual.apply_post_effects(renderer, role_sprites);
+        return;
+    }
     if !override_rendered {
         if let Some(battle) = game.battle() {
             render_battle(

@@ -1,8 +1,70 @@
-use pal_core::game::{GameState, StoreItem};
+use pal_core::game::{GameInput, GameState, StoreItem};
 use pal_core::role::Direction;
+
+use super::original_save::OriginalSaveSlot;
 
 pub(super) const INVENTORY_COLUMNS: usize = 3;
 pub(super) const INVENTORY_VISIBLE_ROWS: usize = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OpeningMenuPage {
+    Main,
+    SaveSlots,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OpeningMenu {
+    pub(super) page: OpeningMenuPage,
+    pub(super) main_selected: usize,
+    pub(super) slot_selected: usize,
+    pub(super) slots: [OriginalSaveSlot; 5],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OpeningMenuAction {
+    None,
+    StartNewGame,
+    LoadSlot(u8),
+}
+
+impl OpeningMenu {
+    pub(super) fn new(slots: [OriginalSaveSlot; 5]) -> Self {
+        Self {
+            page: OpeningMenuPage::Main,
+            main_selected: 0,
+            slot_selected: 0,
+            slots,
+        }
+    }
+
+    pub(super) fn update(&mut self, input: GameInput) -> OpeningMenuAction {
+        match self.page {
+            OpeningMenuPage::Main => {
+                update_wrapping_selection(&mut self.main_selected, input.direction_pressed, 2);
+                if input.cancel || (input.confirm && self.main_selected == 0) {
+                    OpeningMenuAction::StartNewGame
+                } else if input.confirm {
+                    self.page = OpeningMenuPage::SaveSlots;
+                    OpeningMenuAction::None
+                } else {
+                    OpeningMenuAction::None
+                }
+            }
+            OpeningMenuPage::SaveSlots => {
+                update_wrapping_selection(&mut self.slot_selected, input.direction_pressed, 5);
+                if input.cancel {
+                    self.page = OpeningMenuPage::Main;
+                    self.main_selected = 0;
+                    OpeningMenuAction::None
+                } else if input.confirm {
+                    OpeningMenuAction::LoadSlot(self.slots[self.slot_selected].slot)
+                } else {
+                    OpeningMenuAction::None
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FieldMenu {
@@ -157,5 +219,56 @@ pub(super) fn update_wrapping_selection(
         }
         Some(Direction::South | Direction::East) => *selected = (*selected + 1) % count,
         None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(direction: Option<Direction>, confirm: bool, cancel: bool) -> GameInput {
+        GameInput {
+            direction: None,
+            direction_pressed: direction,
+            confirm,
+            cancel,
+        }
+    }
+
+    #[test]
+    fn opening_menu_selects_new_game_and_save_slots_with_original_cancel_behavior() {
+        let slots = std::array::from_fn(|index| OriginalSaveSlot {
+            slot: index as u8 + 1,
+            saved_times: index as u16,
+            available: true,
+        });
+        let mut menu = OpeningMenu::new(slots);
+
+        assert_eq!(
+            menu.update(input(Some(Direction::South), false, false)),
+            OpeningMenuAction::None
+        );
+        assert_eq!(menu.main_selected, 1);
+        assert_eq!(
+            menu.update(input(None, true, false)),
+            OpeningMenuAction::None
+        );
+        assert_eq!(menu.page, OpeningMenuPage::SaveSlots);
+
+        menu.update(input(Some(Direction::South), false, false));
+        assert_eq!(
+            menu.update(input(None, true, false)),
+            OpeningMenuAction::LoadSlot(2)
+        );
+        assert_eq!(
+            menu.update(input(None, false, true)),
+            OpeningMenuAction::None
+        );
+        assert_eq!(menu.page, OpeningMenuPage::Main);
+        assert_eq!(menu.main_selected, 0);
+        assert_eq!(
+            menu.update(input(None, false, true)),
+            OpeningMenuAction::StartNewGame
+        );
     }
 }

@@ -34,6 +34,7 @@ pub(super) struct BootstrappedGame {
     pub(super) initial_map_number: u16,
     pub(super) initial_enter_script: u16,
     pub(super) initial_event_sprite_numbers: Vec<u16>,
+    pub(super) opening_background: Bitmap,
     pub(super) text: TextLibrary,
     pub(super) font: BitmapFont,
     pub(super) script_table: ScriptTable,
@@ -68,6 +69,14 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         .day
         .clone();
     let fbp_archive = load_fbp_archive(&data_dir).expect("failed to load FBP.MKF");
+    let opening_background = Bitmap::from_indexed(
+        fbp_archive
+            .frame(60)
+            .expect("FBP.MKF opening menu background 60 is missing"),
+        SCREEN_WIDTH as u16,
+        SCREEN_HEIGHT as u16,
+        &palette,
+    );
     let rng_archive = load_rng_archive(&data_dir).expect("failed to load RNG.MKF");
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
@@ -140,6 +149,7 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         initial_map_number,
         initial_enter_script,
         initial_event_sprite_numbers,
+        opening_background,
         text,
         font,
         script_table,

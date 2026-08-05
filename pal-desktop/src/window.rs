@@ -34,7 +34,7 @@ use pal_core::role::RoleSprites;
 use pal_core::scene::SceneObject;
 #[cfg(test)]
 use pal_core::script::DialogPosition;
-use pal_core::script::ScriptRuntime;
+use pal_core::script::{ScriptRuntime, ScriptVisual};
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, WindowEvent};
@@ -59,11 +59,13 @@ use dialog_text::dialog_page_count;
 #[cfg(test)]
 use dialog_text::wrap_big5_lines;
 use input::HeldInput;
-use menu_state::FieldMenu;
 #[cfg(test)]
 use menu_state::{update_wrapping_selection, InventoryMenu, ShopMenu, ShopMode};
+use menu_state::{FieldMenu, OpeningMenu, OpeningMenuAction};
 use menu_update::{update_active_menu, MenuUpdateContext};
-use original_save::{latest_original_save_slot, restore_original_save, RestoreOriginalSaveError};
+use original_save::{
+    latest_original_save_slot, original_save_slots, restore_original_save, RestoreOriginalSaveError,
+};
 use presentation::{render_game, UiRenderContext};
 pub use scene_render::render_tile_map;
 #[cfg(test)]
@@ -72,6 +74,8 @@ use script_driver::{advance_script, auto_script_error_title, ScriptRenderResourc
 use session::SessionState;
 use snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
 pub use types::{GameResources, LoadedScene, Viewport};
+
+const OPENING_MENU_MUSIC: u16 = 31;
 
 pub fn run_game_window<L>(
     mut renderer: Renderer,
@@ -85,6 +89,7 @@ pub fn run_game_window<L>(
         role_sprites,
         script_table,
         initial_enter_script,
+        opening_background,
         text,
         font,
         dialog_faces,
@@ -139,14 +144,22 @@ pub fn run_game_window<L>(
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
     let mut script_services = SessionState::new(auto_scripts, &voc_mkf, &midi_mkf, &sound_font);
-    let initial_enter_script = game.scene_enter_script(initial_enter_script);
-    if initial_enter_script != 0 {
-        scripts.start(pal_core::scene::TriggerRequest {
-            object_id: 0xffff,
-            script_entry: initial_enter_script,
-            kind: pal_core::scene::TriggerKind::Touch,
-        });
-    }
+    let mut opening_menu = Some(OpeningMenu::new(original_save_slots(&original_save_dir)));
+    let mut pending_opening_action = None;
+    script_services.music.play(OPENING_MENU_MUSIC, true, 1);
+    script_services
+        .visual
+        .queue(ScriptVisual::FadeIn { speed: 1 });
+    script_services
+        .visual
+        .start_pending(
+            renderer.screen(),
+            &palettes,
+            &fbp_archive,
+            &rng_archive,
+            &role_sprites,
+        )
+        .expect("failed to start opening menu fade-in");
     render_game(
         &mut renderer,
         &game,
@@ -155,6 +168,8 @@ pub fn run_game_window<L>(
         show_objects,
         scripts.debug_snapshot(),
         UiRenderContext {
+            opening_menu: opening_menu.as_ref(),
+            opening_background: &opening_background,
             dialog: dialog.as_ref(),
             field_menu: script_services.field_menu.as_ref(),
             inventory_menu: script_services.inventory_menu.as_ref(),
@@ -232,7 +247,11 @@ pub fn run_game_window<L>(
                                     );
                                     true
                                 }
-                                KeyCode::F5 if !scripts.is_active() && dialog.is_none() => {
+                                KeyCode::F5
+                                    if opening_menu.is_none()
+                                        && !scripts.is_active()
+                                        && dialog.is_none() =>
+                                {
                                     if save_snapshot(&snapshot_path, &game).is_ok() {
                                         window.set_title("Rust-PAL [Snapshot saved]");
                                     } else {
@@ -240,7 +259,11 @@ pub fn run_game_window<L>(
                                     }
                                     true
                                 }
-                                KeyCode::F9 if !scripts.is_active() && dialog.is_none() => {
+                                KeyCode::F9
+                                    if opening_menu.is_none()
+                                        && !scripts.is_active()
+                                        && dialog.is_none() =>
+                                {
                                     match restore_snapshot(
                                         &snapshot_path,
                                         &mut game,
@@ -286,6 +309,8 @@ pub fn run_game_window<L>(
                                 show_objects,
                                 scripts.debug_snapshot(),
                                 UiRenderContext {
+                                    opening_menu: opening_menu.as_ref(),
+                                    opening_background: &opening_background,
                                     dialog: dialog.as_ref(),
                                     field_menu: script_services.field_menu.as_ref(),
                                     inventory_menu: script_services.inventory_menu.as_ref(),
@@ -465,6 +490,97 @@ pub fn run_game_window<L>(
                                     window.set_title(&format!(
                                         "Rust-PAL [invalid auto sound {sound_id}]"
                                     ));
+                                }
+                            }
+                        }
+                    } else if opening_menu.is_some() {
+                        changed = true;
+                        if let Some(action) = pending_opening_action.take() {
+                            match action {
+                                OpeningMenuAction::StartNewGame => {
+                                    opening_menu = None;
+                                    script_services.music.stop();
+                                    script_services.visual.prepare_scene_fade_in();
+                                    let enter_script =
+                                        game.scene_enter_script(initial_enter_script);
+                                    if enter_script != 0 {
+                                        scripts.start(pal_core::scene::TriggerRequest {
+                                            object_id: 0xffff,
+                                            script_entry: enter_script,
+                                            kind: pal_core::scene::TriggerKind::Touch,
+                                        });
+                                    }
+                                    window.set_title("Rust-PAL");
+                                }
+                                OpeningMenuAction::LoadSlot(slot) => {
+                                    match restore_original_save(
+                                        &original_save_dir,
+                                        slot,
+                                        &mut game,
+                                        &role_sprites,
+                                        &mut load_scene,
+                                    ) {
+                                        Ok(environment) => {
+                                            script_services.current_save_slot =
+                                                Some(environment.slot);
+                                            script_services.visual.restore_original_environment(
+                                                environment.night_palette,
+                                                environment.screen_wave,
+                                            );
+                                            script_services.visual.prepare_scene_fade_in();
+                                            dialog = None;
+                                            script_services.pending_dialog = None;
+                                            script_services.field_menu = None;
+                                            script_services.inventory_menu = None;
+                                            script_services.shop_menu = None;
+                                            script_services.confirmation_menu = None;
+                                            opening_menu = None;
+                                            if let Some(music_id) = game.current_music {
+                                                script_services.music.play(music_id, true, 0);
+                                            } else {
+                                                script_services.music.stop();
+                                            }
+                                            window.set_title(&format!(
+                                                "Rust-PAL [save slot {slot} loaded]"
+                                            ));
+                                        }
+                                        Err(RestoreOriginalSaveError::SceneUnavailable) => {
+                                            script_services
+                                                .visual
+                                                .queue(ScriptVisual::FadeIn { speed: 1 });
+                                            window.set_title("Rust-PAL [save scene unavailable]");
+                                        }
+                                        Err(RestoreOriginalSaveError::Unavailable) => {
+                                            script_services
+                                                .visual
+                                                .queue(ScriptVisual::FadeIn { speed: 1 });
+                                            window.set_title("Rust-PAL [empty save slot]");
+                                        }
+                                        Err(RestoreOriginalSaveError::Invalid) => {
+                                            script_services
+                                                .visual
+                                                .queue(ScriptVisual::FadeIn { speed: 1 });
+                                            window.set_title("Rust-PAL [invalid save slot]");
+                                        }
+                                    }
+                                }
+                                OpeningMenuAction::None => {}
+                            }
+                        } else {
+                            let action = opening_menu
+                                .as_mut()
+                                .expect("opening menu was checked above")
+                                .update(sampled);
+                            if action != OpeningMenuAction::None {
+                                if script_services
+                                    .visual
+                                    .queue(ScriptVisual::FadeOut { speed: 1 })
+                                {
+                                    pending_opening_action = Some(action);
+                                } else {
+                                    window.set_title(
+                                        "Rust-PAL [opening transition is already active]",
+                                    );
                                 }
                             }
                         }
@@ -712,7 +828,10 @@ pub fn run_game_window<L>(
                         || script_services.inventory_menu.is_some()
                         || script_services.confirmation_menu.is_some()
                         || script_services.shop_menu.is_some();
-                    if script_is_paused && script_services.visual.queue_automatic_scene_fade_in() {
+                    if opening_menu.is_none()
+                        && script_is_paused
+                        && script_services.visual.queue_automatic_scene_fade_in()
+                    {
                         changed = true;
                     }
                     match script_services.visual.start_pending(
@@ -729,11 +848,12 @@ pub fn run_game_window<L>(
                     }
                     accumulator -= tick;
                 }
-                if dialog.is_none()
-                    && (script_services.field_menu.is_some()
-                        || script_services.inventory_menu.is_some()
-                        || script_services.confirmation_menu.is_some()
-                        || script_services.shop_menu.is_some())
+                if opening_menu.is_some()
+                    || (dialog.is_none()
+                        && (script_services.field_menu.is_some()
+                            || script_services.inventory_menu.is_some()
+                            || script_services.confirmation_menu.is_some()
+                            || script_services.shop_menu.is_some()))
                 {
                     changed = true;
                 }
@@ -747,6 +867,8 @@ pub fn run_game_window<L>(
                         show_objects,
                         scripts.debug_snapshot(),
                         UiRenderContext {
+                            opening_menu: opening_menu.as_ref(),
+                            opening_background: &opening_background,
                             dialog: dialog.as_ref(),
                             field_menu: script_services.field_menu.as_ref(),
                             inventory_menu: script_services.inventory_menu.as_ref(),
