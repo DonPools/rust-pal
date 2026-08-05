@@ -182,7 +182,8 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         | BattleEvent::EnemyAttack { .. }
         | BattleEvent::EnemyMagic { .. }
         | BattleEvent::EnemyConfusedAttack { .. }
-        | BattleEvent::PlayerConfusedAttack { .. } => ACTION_EVENT_TICKS,
+        | BattleEvent::PlayerConfusedAttack { .. }
+        | BattleEvent::SimulatedMagic { .. } => ACTION_EVENT_TICKS,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -298,6 +299,24 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 Some(player.attack_sound),
                 Some(player.weapon_sound),
                 defeated.then_some(target.death_sound),
+            ])
+        }),
+        BattleEvent::SimulatedMagic {
+            magic_object,
+            enemy,
+            defeated,
+            ..
+        } => game.battle().and_then(|battle| {
+            let enemy = battle.enemies.get(enemy)?;
+            Some(vec![
+                game.magic_sound(magic_object),
+                u16::try_from(if defeated {
+                    enemy.death_sound
+                } else {
+                    enemy.action_sound
+                })
+                .ok(),
+                None,
             ])
         }),
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => None,

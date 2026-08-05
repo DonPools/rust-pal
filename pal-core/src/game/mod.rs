@@ -265,6 +265,12 @@ impl<M: CollisionMap> GameState<M> {
             BattleScriptSource::EnemyMagicSuccess { magic_object, .. } => {
                 self.magic_success_scripts.insert(magic_object, next_entry);
             }
+            BattleScriptSource::PlayerMagicUse { magic_object, .. } => {
+                self.magic_use_scripts.insert(magic_object, next_entry);
+            }
+            BattleScriptSource::PlayerMagicSuccess { magic_object, .. } => {
+                self.magic_success_scripts.insert(magic_object, next_entry);
+            }
             BattleScriptSource::EnemyAttackItem { item_object, .. } => {
                 self.item_use_scripts.insert(item_object, next_entry);
             }
@@ -357,6 +363,23 @@ impl<M: CollisionMap> GameState<M> {
 
     pub fn collect_value(&self) -> u16 {
         self.collect_value
+    }
+
+    pub fn magic_sound(&self, magic_object: u16) -> Option<u16> {
+        let magic_number = self
+            .global_objects
+            .as_ref()?
+            .get(magic_object)?
+            .magic_number();
+        u16::try_from(self.magics.as_ref()?.get(magic_number)?.sound).ok()
+    }
+
+    pub fn has_magic_definition(&self, magic_object: u16) -> bool {
+        self.global_objects
+            .as_ref()
+            .and_then(|objects| objects.get(magic_object))
+            .and_then(|object| self.magics.as_ref()?.get(object.magic_number()))
+            .is_some()
     }
 
     fn set_player_status(&mut self, role_id: u16, status: u16, rounds: u16) -> bool {
@@ -636,6 +659,18 @@ impl<M: CollisionMap> GameState<M> {
                 .unwrap_or(enemy.attack_equivalent_item_script);
         }
         for player in &mut battle.players {
+            for magic in &mut player.magics {
+                magic.use_script = self
+                    .magic_use_scripts
+                    .get(&magic.object_id)
+                    .copied()
+                    .unwrap_or(magic.use_script);
+                magic.success_script = self
+                    .magic_success_scripts
+                    .get(&magic.object_id)
+                    .copied()
+                    .unwrap_or(magic.success_script);
+            }
             let role_index = usize::from(player.role_id);
             let (Some(statuses), Some(poisons)) = (
                 self.player_statuses.get(role_index),
@@ -2593,6 +2628,58 @@ impl<M: CollisionMap> GameState<M> {
                     .as_mut()
                     .is_some_and(|battle| battle.set_script_result(result));
             }
+            ScriptAction::SimulatePlayerMagic {
+                enemy_index,
+                magic_object,
+                base_strength,
+            } => {
+                let (Some(battle), Some(objects), Some(magics)) = (
+                    self.active_battle.as_mut(),
+                    self.global_objects.as_ref(),
+                    self.magics.as_ref(),
+                ) else {
+                    return false;
+                };
+                return battle.simulate_player_magic(
+                    usize::from(enemy_index),
+                    magic_object,
+                    base_strength,
+                    objects,
+                    magics,
+                );
+            }
+            ScriptAction::ScaleMagicByMp {
+                role_id,
+                magic_object,
+                multiplier,
+            } => {
+                let Some(_base_damage) = self.active_battle.as_mut().and_then(|battle| {
+                    battle.scale_active_magic_by_mp(role_id, magic_object, multiplier)
+                }) else {
+                    return false;
+                };
+                let Some(roles) = self.player_roles.as_mut() else {
+                    return false;
+                };
+                let Some(role) = roles.role_mut(usize::from(role_id)) else {
+                    return false;
+                };
+                role.mp = 0;
+                self.party.sync_from_roles(roles);
+                return true;
+            }
+            ScriptAction::ScaleMagicByCash { magic_object } => {
+                let spent = self.cash.min(5_000);
+                let base_damage = u16::try_from(spent.saturating_mul(2) / 5).unwrap_or(u16::MAX);
+                let Some(battle) = self.active_battle.as_mut() else {
+                    return false;
+                };
+                if !battle.set_active_magic_base_damage(magic_object, base_damage) {
+                    return false;
+                }
+                self.cash -= spent;
+                return true;
+            }
             ScriptAction::SetEquipmentEffect {
                 role_id,
                 attribute,
@@ -4274,6 +4361,79 @@ mod tests {
         );
         assert_eq!(state.player_poisons[0][0].object_id, 3);
         assert_eq!(state.player_poisons[0][1], BattlePoison::default());
+    }
+
+    #[test]
+    fn battle_magic_scripts_scale_damage_from_remaining_mp_and_cash() {
+        let mut role_data = vec![0; 900];
+        for (array, value) in [
+            (7, 500u16),
+            (8, 20),
+            (9, 500),
+            (10, 20),
+            (17, 20),
+            (18, 80),
+            (19, 20),
+            (20, 100),
+            (32, 2),
+        ] {
+            let offset = array * PLAYER_ROLE_COUNT * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let objects = GlobalObjects::parse(
+            &[[0u16; 6], [0, 0, 0, 0, 0, 0], [0, 0, 32, 31, 0, 0]]
+                .into_iter()
+                .flatten()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            pal_assets::objects::ObjectLayout::Dos,
+        )
+        .unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let mut magic_data = [0; 32];
+        magic_data[24..26].copy_from_slice(&5u16.to_le_bytes());
+        magic_data[26..28].copy_from_slice(&50u16.to_le_bytes());
+        let magics = Magics::parse(&magic_data).unwrap();
+        let scripts = ScriptTable::parse(&[0; 8]).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_economy_data(stores, objects)
+            .with_magic_data(magics)
+            .with_battle_data(battle_data_for_growth());
+        state.cash = 100;
+        assert!(state.start_battle(
+            BattleRequest {
+                enemy_team: 0,
+                lost_entry: 0,
+                flee_entry: 0,
+                is_boss: true,
+            },
+            &scripts,
+        ));
+        assert!(state.battle_mut().unwrap().cast_magic(0, 0).is_some());
+        assert!(state.advance_battle_resolution().is_empty());
+        let use_script = state.take_battle_script().unwrap();
+        assert_eq!(use_script.script_entry, 31);
+        assert!(state.apply_script_action(ScriptAction::ScaleMagicByMp {
+            role_id: 0,
+            magic_object: 2,
+            multiplier: 8,
+        }));
+        assert_eq!(state.player_role(0).unwrap().mp, 0);
+        assert!(state.apply_script_action(ScriptAction::ScaleMagicByCash { magic_object: 2 }));
+        assert_eq!(state.cash, 0);
+        assert!(state.finish_battle_script(41, true));
+        assert!(state.advance_battle_resolution().is_empty());
+        let success_script = state.take_battle_script().unwrap();
+        assert_eq!(success_script.script_entry, 32);
+        assert!(state.finish_battle_script(42, true));
+        assert!(matches!(
+            state.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerMagic { damage, .. }] if *damage >= 40
+        ));
     }
 
     #[test]

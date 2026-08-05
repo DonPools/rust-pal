@@ -170,7 +170,7 @@ define_script_opcodes! {
     RideObjectSlow = 0x003F, "RIDE_SLOW", "Ride the current event object to a tile at low speed.", Implemented;
     SetObjectTriggerMode = 0x0040, "OBJ_TRIGGER_MODE", "Set an event object's interaction trigger mode.", Implemented;
     MarkScriptFailed = 0x0041, "FAIL", "Mark the current script execution as failed.", Implemented;
-    SimulatePlayerMagic = 0x0042, "MAGIC_SIM", "Simulate a player's magic attack in battle.", Unsupported;
+    SimulatePlayerMagic = 0x0042, "MAGIC_SIM", "Simulate a player's magic attack in battle.", Implemented;
     PlayMusic = 0x0043, "MUSIC", "Play or stop scene background music.", Implemented;
     RideObject = 0x0044, "RIDE", "Ride the current event object to a tile at normal speed.", Implemented;
     SetBattleMusic = 0x0045, "BATTLE_MUSIC", "Set the music number for the next battle.", Implemented;
@@ -190,7 +190,7 @@ define_script_opcodes! {
     UseNightPalette = 0x0054, "PALETTE_NIGHT", "Switch to the night palette.", Implemented;
     AddMagic = 0x0055, "MAGIC_ADD", "Teach a magic object to a player.", Implemented;
     RemoveMagic = 0x0056, "MAGIC_REMOVE", "Remove a magic object from a player.", Implemented;
-    ScaleMagicByMp = 0x0057, "MAGIC_SCALE_MP", "Set magic base damage from the consumed MP amount.", Unsupported;
+    ScaleMagicByMp = 0x0057, "MAGIC_SCALE_MP", "Set magic base damage from the consumed MP amount.", Implemented;
     JumpIfItemCountLess = 0x0058, "JLT_ITEM", "Jump when fewer than the requested number of items are held.", Implemented;
     ChangeScene = 0x0059, "SCENE", "Change to the specified scene.", Implemented;
     HalvePlayerHp = 0x005A, "HP_HALF", "Halve a player's HP.", Implemented;
@@ -238,7 +238,7 @@ define_script_opcodes! {
     Delay = 0x0085, "DELAY", "Delay for operand 0 periods of 80 milliseconds.", Implemented;
     JumpIfItemNotEquipped = 0x0086, "JNOT_EQUIPPED", "Jump when fewer than the requested item count are equipped.", Implemented;
     AnimateObject = 0x0087, "OBJ_ANIMATE", "Advance an event object's animation.", Implemented;
-    ScaleMagicByCash = 0x0088, "MAGIC_SCALE_CASH", "Consume cash and derive magic base damage from it.", Unsupported;
+    ScaleMagicByCash = 0x0088, "MAGIC_SCALE_CASH", "Consume cash and derive magic base damage from it.", Implemented;
     SetBattleResult = 0x0089, "BATTLE_RESULT", "Set the current battle result.", Implemented;
     EnableAutoBattle = 0x008A, "AUTO_BATTLE", "Enable automatic commands for the next battle.", Unsupported;
     SetPalette = 0x008B, "PALETTE_SET", "Change the current palette number.", Implemented;
@@ -595,6 +595,19 @@ pub enum ScriptAction {
     EnemyEscape,
     SetBattleResult {
         result: u16,
+    },
+    SimulatePlayerMagic {
+        enemy_index: u16,
+        magic_object: u16,
+        base_strength: u16,
+    },
+    ScaleMagicByMp {
+        role_id: u16,
+        magic_object: u16,
+        multiplier: u16,
+    },
+    ScaleMagicByCash {
+        magic_object: u16,
     },
     SetEquipmentEffect {
         role_id: u16,
@@ -1433,6 +1446,41 @@ impl ScriptRuntime {
                         status: entry.operands[0],
                     }));
                 }
+                SimulatePlayerMagic => {
+                    let selected = (entry.operands[2] as i16).wrapping_sub(1);
+                    let enemy_index = if selected < 0 {
+                        execution.object_id
+                    } else {
+                        selected as u16
+                    };
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SimulatePlayerMagic {
+                        enemy_index,
+                        magic_object: entry.operands[0],
+                        base_strength: entry.operands[1],
+                    }));
+                }
+                ScaleMagicByMp => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::ScaleMagicByMp {
+                        role_id: execution.object_id,
+                        magic_object: entry.operands[0],
+                        multiplier: if entry.operands[1] == 0 {
+                            8
+                        } else {
+                            entry.operands[1]
+                        },
+                    }));
+                }
+                ScaleMagicByCash => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::ScaleMagicByCash {
+                        magic_object: entry.operands[0],
+                    }));
+                }
                 DrainEnemyHp => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2091,9 +2139,7 @@ impl ScriptRuntime {
                 | SetTemporaryBattleSprite
                 | CollectEnemy
                 | TransmuteCollectedEnemies
-                | SimulatePlayerMagic
                 | ChasePlayer
-                | ScaleMagicByMp
                 | HideBattleActor
                 | PauseEnemyChase
                 | SpeedUpEnemyChase
@@ -2101,7 +2147,6 @@ impl ScriptRuntime {
                 | StealEnemy
                 | BlowEnemiesAway
                 | JumpIfObjectOutsideZone
-                | ScaleMagicByCash
                 | EnableAutoBattle
                 | LevelUpPlayer
                 | HalveCash
@@ -2233,7 +2278,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [140, 1, 24]);
+        assert_eq!(support_counts, [143, 1, 21]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2758,6 +2803,9 @@ mod tests {
             [ScriptOpcode::EnemyCastMagic.raw(), 88, 0, 0],
             [ScriptOpcode::EnemyEscape.raw(), 0, 0, 0],
             [ScriptOpcode::SetBattleResult.raw(), 0, 0, 0],
+            [ScriptOpcode::SimulatePlayerMagic.raw(), 88, 123, 0],
+            [ScriptOpcode::ScaleMagicByMp.raw(), 89, 0, 0],
+            [ScriptOpcode::ScaleMagicByCash.raw(), 90, 0, 0],
             [ScriptOpcode::JumpIfPlayerLacksPoison.raw(), 40, 91, 0],
             [ScriptOpcode::JumpIfEnemyLacksPoison.raw(), 41, 92, 0],
             [ScriptOpcode::JumpIfPlayerNotPoisoned.raw(), 93, 0, 0],
@@ -2832,6 +2880,17 @@ mod tests {
             },
             ScriptAction::EnemyEscape,
             ScriptAction::SetBattleResult { result: 0 },
+            ScriptAction::SimulatePlayerMagic {
+                enemy_index: 7,
+                magic_object: 88,
+                base_strength: 123,
+            },
+            ScriptAction::ScaleMagicByMp {
+                role_id: 7,
+                magic_object: 89,
+                multiplier: 8,
+            },
+            ScriptAction::ScaleMagicByCash { magic_object: 90 },
         ];
         for action in expected {
             assert_eq!(runtime.advance(), Some(ScriptEvent::Action(action)));
@@ -3450,14 +3509,17 @@ mod tests {
 
     #[test]
     fn reports_unsupported_and_invalid_entries() {
-        let mut runtime = ScriptRuntime::new(table(&[[0, 0, 0, 0], [0x42, 0, 0, 0]]));
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::ThrowWeapon.raw(), 0, 0, 0],
+        ]));
         runtime.start(trigger(1));
         assert_eq!(
             runtime.advance(),
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: 0x42,
+                opcode: ScriptOpcode::ThrowWeapon.raw(),
             })
         );
 

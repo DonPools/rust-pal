@@ -2,7 +2,7 @@ use pal_assets::fbp::FbpArchive;
 use pal_assets::mkf::MkfArchive;
 use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
 use pal_core::battle::{BattlePhase, BattleResult, BattleStatus};
-use pal_core::script::{ScriptAction, ScriptEvent, ScriptOpcode, ScriptRuntime};
+use pal_core::script::{ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
 use pal_desktop::window::{
     render_battle, render_tile_map, BattleRenderResources, BattleRenderState, Viewport,
@@ -100,6 +100,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut enemy_turn_jumps = 0usize;
     let mut player_confusion_scripts = 0usize;
     let mut player_haste_scripts = 0usize;
+    let mut simulated_magic_scripts = 0usize;
+    let mut mp_scaled_magic_scripts = 0usize;
+    let mut cash_scaled_magic_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -112,6 +115,25 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 usize::from(entry.operands[0] == BattleStatus::Confused as u16);
             player_haste_scripts += usize::from(entry.operands[0] == BattleStatus::Haste as u16);
         }
+        if matches!(
+            ScriptOpcode::from_raw(entry.opcode),
+            Some(
+                ScriptOpcode::SimulatePlayerMagic
+                    | ScriptOpcode::ScaleMagicByMp
+                    | ScriptOpcode::ScaleMagicByCash
+            )
+        ) {
+            assert!(
+                game.has_magic_definition(entry.operands[0]),
+                "script {index} references unavailable magic object {}",
+                entry.operands[0]
+            );
+        }
+        simulated_magic_scripts +=
+            usize::from(entry.opcode == ScriptOpcode::SimulatePlayerMagic.raw());
+        mp_scaled_magic_scripts += usize::from(entry.opcode == ScriptOpcode::ScaleMagicByMp.raw());
+        cash_scaled_magic_scripts +=
+            usize::from(entry.opcode == ScriptOpcode::ScaleMagicByCash.raw());
         if let Some(
             ScriptOpcode::ShowFbp | ScriptOpcode::ScrollFbp | ScriptOpcode::ShowFbpWithSprite,
         ) = ScriptOpcode::from_raw(entry.opcode)
@@ -162,6 +184,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(
         player_confusion_scripts > 0 && player_haste_scripts > 0,
         "scripts do not exercise player confusion and haste statuses"
+    );
+    assert!(
+        simulated_magic_scripts > 0 && mp_scaled_magic_scripts > 0 && cash_scaled_magic_scripts > 0,
+        "scripts do not exercise simulated and dynamically scaled magic"
     );
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
     let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
@@ -347,6 +373,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         "battle data contains no attack-equivalent enemy items"
     );
     let auto_scripts = script_table.clone();
+    let mut battle_scripts = ScriptRuntime::new(auto_scripts.clone());
     let mut scripts = ScriptRuntime::new(script_table);
     assert!(scripts.start(trigger));
     let mut script_messages = 0;
@@ -887,10 +914,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut battle_feedback_pixels = 0;
     for _ in 0..1024 {
         let events = game.advance_battle_resolution();
-        assert!(
-            game.take_battle_script().is_none(),
-            "the first-battle baseline unexpectedly queued a lifecycle script"
-        );
+        if let Some(request) = game.take_battle_script() {
+            run_headless_battle_script(&mut game, &mut battle_scripts, request, &text);
+            continue;
+        }
         if !matches!(
             game.battle().map(|battle| battle.phase()),
             Some(BattlePhase::AwaitingCommand)
@@ -907,6 +934,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                         | pal_core::battle::BattleEvent::EnemyMagic { .. }
                         | pal_core::battle::BattleEvent::EnemyConfusedAttack { .. }
                         | pal_core::battle::BattleEvent::PlayerConfusedAttack { .. }
+                        | pal_core::battle::BattleEvent::SimulatedMagic { .. }
                 )
             }) {
                 let battle = game
@@ -1140,7 +1168,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     println!(
         "script data passed: {} records, {script_messages} messages, {script_ticks} timed actions, \
-         {enemy_turn_jumps} enemy-turn branches",
+         {enemy_turn_jumps} enemy-turn branches, {simulated_magic_scripts} simulated, \
+         {mp_scaled_magic_scripts} MP-scaled and {cash_scaled_magic_scripts} cash-scaled magic \
+         scripts",
         script_count,
     );
     println!("sound data passed: {sound_effect_count} PCM VOC effects");
@@ -1226,4 +1256,132 @@ fn text_control_counts(text: &pal_assets::text::TextLibrary) -> (usize, usize, u
         }
     }
     (speed, terminal, icon)
+}
+
+fn run_headless_battle_script(
+    game: &mut pal_core::game::GameState,
+    scripts: &mut ScriptRuntime,
+    request: pal_core::scene::TriggerRequest,
+    text: &pal_assets::text::TextLibrary,
+) {
+    assert!(scripts.start(request), "battle script runtime was busy");
+    for _ in 0..4096 {
+        match scripts
+            .advance()
+            .expect("battle script stopped without completing")
+        {
+            ScriptEvent::Action(
+                action @ (ScriptAction::AdjustPlayerHealth { .. }
+                | ScriptAction::RevivePlayer { .. }),
+            ) => {
+                let succeeded = game.apply_script_action(action);
+                assert!(scripts.set_success(succeeded));
+            }
+            ScriptEvent::Action(action @ ScriptAction::SetEnemyStatus { resisted_entry, .. }) => {
+                if !game.apply_script_action(action) {
+                    assert!(scripts.branch_to(resisted_entry));
+                }
+            }
+            ScriptEvent::Action(action @ ScriptAction::FleeBattle { failure_entry }) => {
+                if !game.apply_script_action(action) {
+                    assert!(scripts.branch_to(failure_entry));
+                }
+            }
+            ScriptEvent::Action(action) => assert!(
+                game.apply_script_action(action),
+                "battle script action could not be applied: {action:?}"
+            ),
+            ScriptEvent::Condition(condition) => {
+                let (matches, target_entry) = match condition {
+                    ScriptCondition::ItemCountLess {
+                        item_id,
+                        amount,
+                        target_entry,
+                    } => (
+                        i32::from(game.item_count(item_id)) < i32::from(amount),
+                        target_entry,
+                    ),
+                    ScriptCondition::ObjectStateEquals {
+                        object_id,
+                        state,
+                        target_entry,
+                    } => (game.object_state(object_id) == Some(state), target_entry),
+                    ScriptCondition::SceneEquals {
+                        scene_number,
+                        target_entry,
+                    } => (game.scene_number == scene_number, target_entry),
+                    ScriptCondition::PartyContainsName {
+                        name_word_id,
+                        target_entry,
+                    } => (game.party_contains_name(name_word_id), target_entry),
+                    ScriptCondition::PlayerFacesObject {
+                        object_id,
+                        range,
+                        target_entry,
+                    } => (!game.player_faces_object(object_id, range), target_entry),
+                    ScriptCondition::PartyNotFullHp { target_entry } => {
+                        (game.party_not_full_hp(), target_entry)
+                    }
+                    ScriptCondition::ItemNotEquipped {
+                        item_id,
+                        amount,
+                        target_entry,
+                    } => (game.equipped_item_count(item_id) < amount, target_entry),
+                    ScriptCondition::PlayerLacksPoison {
+                        role_id,
+                        poison_id,
+                        target_entry,
+                    } => (!game.player_has_poison(role_id, poison_id), target_entry),
+                    ScriptCondition::EnemyLacksPoison {
+                        enemy_index,
+                        poison_id,
+                        target_entry,
+                    } => (!game.enemy_has_poison(enemy_index, poison_id), target_entry),
+                    ScriptCondition::PlayerNotPoisoned {
+                        role_id,
+                        target_entry,
+                    } => (
+                        game.player_poisons(role_id).is_none_or(|poisons| {
+                            poisons.iter().all(|poison| poison.object_id == 0)
+                        }),
+                        target_entry,
+                    ),
+                    ScriptCondition::EnemyHpAbove {
+                        enemy_index,
+                        percentage,
+                        target_entry,
+                    } => (game.enemy_hp_above(enemy_index, percentage), target_entry),
+                    ScriptCondition::EnemyNotFirstKind {
+                        enemy_index,
+                        target_entry,
+                    } => (game.enemy_not_first_kind(enemy_index), target_entry),
+                    ScriptCondition::EnemyTurn { target_entry } => {
+                        (game.is_enemy_turn(), target_entry)
+                    }
+                };
+                if matches {
+                    assert!(scripts.branch_to(target_entry));
+                }
+            }
+            ScriptEvent::Message { message_id, .. } => assert!(
+                text.message(usize::from(message_id)).is_some(),
+                "battle script references unavailable message {message_id}"
+            ),
+            ScriptEvent::Waiting
+            | ScriptEvent::Delay
+            | ScriptEvent::FadeScene { .. }
+            | ScriptEvent::Visual(_)
+            | ScriptEvent::WaitForKey => {}
+            ScriptEvent::Completed {
+                next_entry,
+                succeeded,
+                ..
+            } => {
+                assert!(game.finish_battle_script(next_entry, succeeded));
+                return;
+            }
+            event => panic!("headless battle script yielded an unexpected event: {event:?}"),
+        }
+    }
+    panic!("headless battle script exceeded the instruction limit");
 }

@@ -59,6 +59,10 @@ pub fn render_battle(
                     enemy: target,
                     defeated: true,
                     ..
+                } | BattleEvent::SimulatedMagic {
+                    enemy: target,
+                    defeated: true,
+                    ..
                 } | BattleEvent::EnemyConfusedAttack {
                     target,
                     defeated: true,
@@ -109,6 +113,7 @@ pub fn render_battle(
             Some(
                 BattleEvent::PlayerAttack { enemy, .. }
                     | BattleEvent::PlayerMagic { enemy, .. }
+                    | BattleEvent::SimulatedMagic { enemy, .. }
                     | BattleEvent::EnemyConfusedAttack { target: enemy, .. }
             ) if enemy == index
         );
@@ -212,7 +217,8 @@ fn action_offset(ticks_remaining: u16) -> i32 {
 fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: BattleEvent) {
     let (x, y, damage) = match event {
         BattleEvent::PlayerAttack { enemy, damage, .. }
-        | BattleEvent::PlayerMagic { enemy, damage, .. } => {
+        | BattleEvent::PlayerMagic { enemy, damage, .. }
+        | BattleEvent::SimulatedMagic { enemy, damage, .. } => {
             let Some(enemy) = battle.enemies.get(enemy) else {
                 return;
             };
