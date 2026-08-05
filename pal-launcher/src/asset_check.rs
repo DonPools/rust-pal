@@ -106,6 +106,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut thrown_weapon_scripts = 0usize;
     let mut mp_scaled_magic_scripts = 0usize;
     let mut cash_scaled_magic_scripts = 0usize;
+    let mut divide_enemy_scripts = 0usize;
+    let mut summon_enemy_scripts = 0usize;
+    let mut transform_enemy_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -162,6 +165,34 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         mp_scaled_magic_scripts += usize::from(entry.opcode == ScriptOpcode::ScaleMagicByMp.raw());
         cash_scaled_magic_scripts +=
             usize::from(entry.opcode == ScriptOpcode::ScaleMagicByCash.raw());
+        divide_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::DivideEnemy.raw());
+        summon_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::SummonEnemy.raw());
+        transform_enemy_scripts += usize::from(entry.opcode == ScriptOpcode::TransformEnemy.raw());
+        if entry.opcode == ScriptOpcode::TransformEnemy.raw()
+            || (entry.opcode == ScriptOpcode::SummonEnemy.raw()
+                && !matches!(entry.operands[0], 0 | u16::MAX))
+        {
+            let object = global_objects.get(entry.operands[0]).unwrap_or_else(|| {
+                panic!(
+                    "dynamic enemy script {index} references unavailable object {}",
+                    entry.operands[0]
+                )
+            });
+            let enemy_id = object.enemy_id();
+            battle_data.enemies.get(enemy_id).unwrap_or_else(|| {
+                panic!(
+                    "dynamic enemy script {index} references unavailable enemy definition \
+                     {enemy_id} through object {}",
+                    entry.operands[0]
+                )
+            });
+            assert!(
+                enemy_battle_sprites
+                    .frame_count(usize::from(enemy_id))
+                    .is_some(),
+                "dynamic enemy script {index} references unavailable ABC sprite {enemy_id}"
+            );
+        }
         if let Some(
             ScriptOpcode::ShowFbp | ScriptOpcode::ScrollFbp | ScriptOpcode::ShowFbpWithSprite,
         ) = ScriptOpcode::from_raw(entry.opcode)
@@ -225,6 +256,15 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         (temporary_stat_scripts, temporary_sprite_scripts),
         (14, 1),
         "real scripts no longer match temporary player-effect coverage"
+    );
+    assert_eq!(
+        (
+            divide_enemy_scripts,
+            summon_enemy_scripts,
+            transform_enemy_scripts,
+        ),
+        (2, 32, 4),
+        "real scripts no longer match dynamic enemy behavior coverage"
     );
     let (usable_item_definitions, throwable_item_definitions) = (0..global_objects.len())
         .filter_map(|index| global_objects.get(u16::try_from(index).ok()?))
@@ -1276,6 +1316,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         game.party.members().len(),
     );
     println!(
+        "M6 dynamic enemy data passed: {divide_enemy_scripts} divisions, \
+         {summon_enemy_scripts} summons, {transform_enemy_scripts} transformations"
+    );
+    println!(
         "asset check passed: {visible_pixels} visible pixels, \
              {chromatic_pixels} chromatic pixels"
     );
@@ -1339,6 +1383,14 @@ fn run_headless_battle_script(
             }
             ScriptEvent::Action(action @ ScriptAction::FleeBattle { failure_entry }) => {
                 if !game.apply_script_action(action) {
+                    assert!(scripts.branch_to(failure_entry));
+                }
+            }
+            ScriptEvent::Action(
+                action @ (ScriptAction::DivideEnemy { failure_entry, .. }
+                | ScriptAction::SummonEnemy { failure_entry, .. }),
+            ) => {
+                if !game.apply_script_action(action) && failure_entry != 0 {
                     assert!(scripts.branch_to(failure_entry));
                 }
             }

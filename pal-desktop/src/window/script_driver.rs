@@ -242,8 +242,33 @@ pub(super) fn advance_script<L>(
             scripts.branch_to(failure_entry);
         }
         Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::DivideEnemy { failure_entry, .. },
+        )) if !game.apply_script_action(action) && failure_entry != 0 => {
+            scripts.branch_to(failure_entry);
+        }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::SummonEnemy { failure_entry, .. },
+        )) => {
+            if game.apply_script_action(action) {
+                services.sound_effects.play(212);
+            } else if failure_entry != 0 {
+                scripts.branch_to(failure_entry);
+            }
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::TransformEnemy {
+            enemy_index,
+            object_id,
+        })) => match game.transform_enemy(enemy_index, object_id) {
+            Some(true) => {
+                services.sound_effects.play(47);
+            }
+            Some(false) => {}
+            None => set_title("Rust-PAL [script transform target is unavailable]"),
+        },
+        Some(ScriptEvent::Action(
             pal_core::script::ScriptAction::SetEnemyStatus { .. }
-            | pal_core::script::ScriptAction::FleeBattle { .. },
+            | pal_core::script::ScriptAction::FleeBattle { .. }
+            | pal_core::script::ScriptAction::DivideEnemy { .. },
         )) => {}
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::PlaceObjectInFront { blocked_entry, .. },

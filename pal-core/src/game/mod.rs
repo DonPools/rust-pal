@@ -11,9 +11,9 @@ use pal_assets::script::ScriptTable;
 use pal_assets::store::Stores;
 
 use crate::battle::{
-    add_poison, cure_poison, cure_poison_by_level, BattleEvent, BattlePhase, BattlePoison,
-    BattleRequest, BattleResult, BattleRewards, BattleScriptSource, BattleState, BattleStatus,
-    BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
+    add_poison, cure_poison, cure_poison_by_level, BattleEnemy, BattleEvent, BattlePhase,
+    BattlePoison, BattleRequest, BattleResult, BattleRewards, BattleScriptSource, BattleState,
+    BattleStatus, BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS,
 };
 use crate::map::tile_to_world;
 use crate::map::Map;
@@ -373,7 +373,11 @@ impl<M: CollisionMap> GameState<M> {
             && self
                 .active_battle
                 .as_ref()
-                .and_then(|battle| battle.enemies.get(usize::from(enemy_index)))
+                .and_then(|battle| {
+                    battle
+                        .enemy_index_for_slot(usize::from(enemy_index))
+                        .and_then(|index| battle.enemies.get(index))
+                })
                 .is_some_and(|enemy| {
                     enemy
                         .poisons
@@ -385,15 +389,56 @@ impl<M: CollisionMap> GameState<M> {
     pub fn enemy_hp_above(&self, enemy_index: u16, percentage: u16) -> bool {
         self.active_battle
             .as_ref()
-            .and_then(|battle| battle.enemy_hp_above(usize::from(enemy_index), percentage))
+            .and_then(|battle| {
+                battle
+                    .enemy_index_for_slot(usize::from(enemy_index))
+                    .and_then(|index| battle.enemy_hp_above(index, percentage))
+            })
             .unwrap_or(false)
     }
 
     pub fn enemy_not_first_kind(&self, enemy_index: u16) -> bool {
         self.active_battle
             .as_ref()
-            .and_then(|battle| battle.enemy_not_first_kind(usize::from(enemy_index)))
+            .and_then(|battle| {
+                battle
+                    .enemy_index_for_slot(usize::from(enemy_index))
+                    .and_then(|index| battle.enemy_not_first_kind(index))
+            })
             .unwrap_or(false)
+    }
+
+    fn battle_enemy_index(&self, enemy_slot: u16) -> Option<usize> {
+        self.active_battle
+            .as_ref()?
+            .enemy_index_for_slot(usize::from(enemy_slot))
+    }
+
+    /// Transform a battle enemy selected by its original slot.
+    ///
+    /// Returns `Some(false)` when the instruction is valid but an active status suppresses it.
+    pub fn transform_enemy(&mut self, enemy_slot: u16, object_id: u16) -> Option<bool> {
+        let enemy_index = self.battle_enemy_index(enemy_slot)?;
+        let magic_use_scripts = &self.magic_use_scripts;
+        let magic_success_scripts = &self.magic_success_scripts;
+        let item_use_scripts = &self.item_use_scripts;
+        let (battle, data, objects, magics) = (
+            self.active_battle.as_mut()?,
+            self.battle_data.as_ref()?,
+            self.global_objects.as_ref()?,
+            self.magics.as_ref()?,
+        );
+        let transformed = battle.transform_enemy(enemy_index, object_id, data, objects, magics)?;
+        if transformed {
+            let enemy = battle.enemies.get_mut(enemy_index)?;
+            apply_enemy_script_overrides(
+                enemy,
+                magic_use_scripts,
+                magic_success_scripts,
+                item_use_scripts,
+            );
+        }
+        Some(transformed)
     }
 
     pub fn collect_value(&self) -> u16 {
@@ -2602,9 +2647,17 @@ impl<M: CollisionMap> GameState<M> {
                 amount,
                 apply_to_all,
             } => {
-                return self.active_battle.as_mut().is_some_and(|battle| {
-                    battle.damage_enemy(usize::from(enemy_index), amount, apply_to_all)
-                });
+                let enemy_index = if apply_to_all {
+                    0
+                } else if let Some(index) = self.battle_enemy_index(enemy_index) {
+                    index
+                } else {
+                    return false;
+                };
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.damage_enemy(enemy_index, amount, apply_to_all));
             }
             ScriptAction::PoisonEnemy {
                 enemy_index,
@@ -2619,13 +2672,15 @@ impl<M: CollisionMap> GameState<M> {
                 else {
                     return false;
                 };
+                let enemy_index = if apply_to_all {
+                    0
+                } else if let Some(index) = self.battle_enemy_index(enemy_index) {
+                    index
+                } else {
+                    return false;
+                };
                 return self.active_battle.as_mut().is_some_and(|battle| {
-                    battle.poison_enemy(
-                        usize::from(enemy_index),
-                        poison_id,
-                        script_entry,
-                        apply_to_all,
-                    )
+                    battle.poison_enemy(enemy_index, poison_id, script_entry, apply_to_all)
                 });
             }
             ScriptAction::PoisonPlayer {
@@ -2638,8 +2693,15 @@ impl<M: CollisionMap> GameState<M> {
                 poison_id,
                 apply_to_all,
             } => {
+                let enemy_index = if apply_to_all {
+                    0
+                } else if let Some(index) = self.battle_enemy_index(enemy_index) {
+                    index
+                } else {
+                    return false;
+                };
                 return self.active_battle.as_mut().is_some_and(|battle| {
-                    battle.cure_enemy_poison(usize::from(enemy_index), poison_id, apply_to_all)
+                    battle.cure_enemy_poison(enemy_index, poison_id, apply_to_all)
                 });
             }
             ScriptAction::CurePlayerPoison {
@@ -2668,12 +2730,13 @@ impl<M: CollisionMap> GameState<M> {
                 let Some(status) = BattleStatus::from_raw(status) else {
                     return false;
                 };
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
                 return self
                     .active_battle
                     .as_mut()
-                    .and_then(|battle| {
-                        battle.set_enemy_status(usize::from(enemy_index), status, rounds)
-                    })
+                    .and_then(|battle| battle.set_enemy_status(enemy_index, status, rounds))
                     .unwrap_or(false);
             }
             ScriptAction::RemovePlayerStatus { role_id, status } => {
@@ -2711,10 +2774,13 @@ impl<M: CollisionMap> GameState<M> {
                 enemy_index,
                 amount,
             } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
                 return self
                     .active_battle
                     .as_mut()
-                    .is_some_and(|battle| battle.drain_enemy_hp(usize::from(enemy_index), amount));
+                    .is_some_and(|battle| battle.drain_enemy_hp(enemy_index, amount));
             }
             ScriptAction::FleeBattle { .. } => {
                 return self
@@ -2730,22 +2796,32 @@ impl<M: CollisionMap> GameState<M> {
                 enemy_index,
                 maximum_damage,
             } => {
-                return self.active_battle.as_mut().is_some_and(|battle| {
-                    battle.halve_enemy_hp(usize::from(enemy_index), maximum_damage)
-                });
-            }
-            ScriptAction::KillPlayer { role_id } => return self.set_player_hp(role_id, false),
-            ScriptAction::KillEnemy { enemy_index } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
                 return self
                     .active_battle
                     .as_mut()
-                    .is_some_and(|battle| battle.kill_enemy(usize::from(enemy_index)));
+                    .is_some_and(|battle| battle.halve_enemy_hp(enemy_index, maximum_damage));
+            }
+            ScriptAction::KillPlayer { role_id } => return self.set_player_hp(role_id, false),
+            ScriptAction::KillEnemy { enemy_index } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.kill_enemy(enemy_index));
             }
             ScriptAction::SetEnemyMagic {
                 enemy_index,
                 magic_object,
                 rate,
             } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
                 let persisted_use = self.magic_use_scripts.get(&magic_object).copied();
                 let persisted_success = self.magic_success_scripts.get(&magic_object).copied();
                 let (Some(battle), Some(objects), Some(magics)) = (
@@ -2755,18 +2831,12 @@ impl<M: CollisionMap> GameState<M> {
                 ) else {
                     return false;
                 };
-                if !battle.set_enemy_magic(
-                    usize::from(enemy_index),
-                    magic_object,
-                    rate,
-                    objects,
-                    magics,
-                ) {
+                if !battle.set_enemy_magic(enemy_index, magic_object, rate, objects, magics) {
                     return false;
                 }
                 if let Some(magic) = battle
                     .enemies
-                    .get_mut(usize::from(enemy_index))
+                    .get_mut(enemy_index)
                     .and_then(|enemy| enemy.magic.as_mut())
                 {
                     magic.use_script = persisted_use.unwrap_or(magic.use_script);
@@ -2774,6 +2844,65 @@ impl<M: CollisionMap> GameState<M> {
                 }
                 return true;
             }
+            ScriptAction::DivideEnemy {
+                enemy_index,
+                copies,
+                ..
+            } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
+                let (Some(battle), Some(data)) =
+                    (self.active_battle.as_mut(), self.battle_data.as_ref())
+                else {
+                    return false;
+                };
+                return battle
+                    .divide_enemy(enemy_index, copies, &data.enemy_positions)
+                    .is_some();
+            }
+            ScriptAction::SummonEnemy {
+                enemy_index,
+                object_id,
+                count,
+                ..
+            } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
+                let magic_use_scripts = &self.magic_use_scripts;
+                let magic_success_scripts = &self.magic_success_scripts;
+                let item_use_scripts = &self.item_use_scripts;
+                let (Some(battle), Some(data), Some(objects), Some(magics)) = (
+                    self.active_battle.as_mut(),
+                    self.battle_data.as_ref(),
+                    self.global_objects.as_ref(),
+                    self.magics.as_ref(),
+                ) else {
+                    return false;
+                };
+                let Some(added) =
+                    battle.summon_enemy(enemy_index, object_id, count, data, objects, magics)
+                else {
+                    return false;
+                };
+                for index in added {
+                    let Some(enemy) = battle.enemies.get_mut(index) else {
+                        return false;
+                    };
+                    apply_enemy_script_overrides(
+                        enemy,
+                        magic_use_scripts,
+                        magic_success_scripts,
+                        item_use_scripts,
+                    );
+                }
+                return true;
+            }
+            ScriptAction::TransformEnemy {
+                enemy_index,
+                object_id,
+            } => return self.transform_enemy(enemy_index, object_id).is_some(),
             ScriptAction::EnemyEscape => {
                 return self
                     .active_battle
@@ -2791,6 +2920,9 @@ impl<M: CollisionMap> GameState<M> {
                 magic_object,
                 base_strength,
             } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
                 let (Some(battle), Some(objects), Some(magics)) = (
                     self.active_battle.as_mut(),
                     self.global_objects.as_ref(),
@@ -2799,7 +2931,7 @@ impl<M: CollisionMap> GameState<M> {
                     return false;
                 };
                 return battle.simulate_player_magic(
-                    usize::from(enemy_index),
+                    enemy_index,
                     magic_object,
                     base_strength,
                     objects,
@@ -2811,6 +2943,9 @@ impl<M: CollisionMap> GameState<M> {
                 magic_object,
                 multiplier,
             } => {
+                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                    return false;
+                };
                 let (Some(battle), Some(objects), Some(magics)) = (
                     self.active_battle.as_mut(),
                     self.global_objects.as_ref(),
@@ -2818,13 +2953,7 @@ impl<M: CollisionMap> GameState<M> {
                 ) else {
                     return false;
                 };
-                return battle.throw_weapon(
-                    usize::from(enemy_index),
-                    magic_object,
-                    multiplier,
-                    objects,
-                    magics,
-                );
+                return battle.throw_weapon(enemy_index, magic_object, multiplier, objects, magics);
             }
             ScriptAction::ScaleMagicByMp {
                 role_id,
@@ -4334,6 +4463,28 @@ fn direction_toward(x_offset: i32, y_offset: i32) -> Direction {
     }
 }
 
+fn apply_enemy_script_overrides(
+    enemy: &mut BattleEnemy,
+    magic_use_scripts: &BTreeMap<u16, u16>,
+    magic_success_scripts: &BTreeMap<u16, u16>,
+    item_use_scripts: &BTreeMap<u16, u16>,
+) {
+    if let Some(magic) = enemy.magic.as_mut() {
+        magic.use_script = magic_use_scripts
+            .get(&magic.object_id)
+            .copied()
+            .unwrap_or(magic.use_script);
+        magic.success_script = magic_success_scripts
+            .get(&magic.object_id)
+            .copied()
+            .unwrap_or(magic.success_script);
+    }
+    enemy.attack_equivalent_item_script = item_use_scripts
+        .get(&enemy.attack_equivalent_item)
+        .copied()
+        .unwrap_or(enemy.attack_equivalent_item_script);
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -4798,6 +4949,41 @@ mod tests {
         );
         assert!(state.settle_battle().is_some());
         assert_eq!(state.player_role(0).unwrap().attack_strength, 80);
+    }
+
+    #[test]
+    fn dynamic_enemy_actions_resolve_original_slots_after_reuse() {
+        let mut state = battle_item_state(1);
+        assert!(state.apply_script_action(ScriptAction::DivideEnemy {
+            enemy_index: 0,
+            copies: 1,
+            failure_entry: 80,
+        }));
+        assert_eq!(state.battle().unwrap().enemies.len(), 2);
+        assert_eq!(state.battle().unwrap().enemies[0].hp, 500);
+        assert_eq!(state.battle().unwrap().enemies[1].slot, 1);
+
+        assert!(state.apply_script_action(ScriptAction::KillEnemy { enemy_index: 1 }));
+        assert!(state.apply_script_action(ScriptAction::SummonEnemy {
+            enemy_index: 0,
+            object_id: 0,
+            count: 1,
+            failure_entry: 81,
+        }));
+        let battle = state.battle().unwrap();
+        assert_eq!(battle.enemies.len(), 3);
+        assert_eq!(battle.enemy_index_for_slot(1), Some(2));
+        assert_eq!(battle.enemies[2].hp, 1000);
+
+        assert!(state.apply_script_action(ScriptAction::DamageEnemy {
+            enemy_index: 1,
+            amount: 7,
+            apply_to_all: false,
+        }));
+        assert_eq!(state.battle().unwrap().enemies[1].hp, 0);
+        assert_eq!(state.battle().unwrap().enemies[2].hp, 993);
+        assert_eq!(state.transform_enemy(1, 1), Some(true));
+        assert_eq!(state.battle().unwrap().enemies[2].hp, 993);
     }
 
     #[test]

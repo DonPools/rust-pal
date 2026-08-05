@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use pal_assets::battle::{BattleData, BattlePosition, Enemy};
+use pal_assets::battle::{BattleData, BattlePosition, Enemy, EnemyPositions, MAX_ENEMIES_IN_TEAM};
 use pal_assets::magic::Magics;
 use pal_assets::objects::{GlobalObject, GlobalObjects};
 use pal_assets::player_roles::PlayerRole;
@@ -533,6 +533,8 @@ pub struct BattleState {
     pub is_boss: bool,
     pub players: Vec<BattlePlayer>,
     pub enemies: Vec<BattleEnemy>,
+    enemy_layout_slots: usize,
+    hiding_time: u16,
     phase: BattlePhase,
     active_player: Option<usize>,
     acted: Vec<bool>,
@@ -578,22 +580,8 @@ impl BattleState {
             .enumerate()
             .filter(|&(_, object_id)| object_id != 0)
             .map(|(slot, object_id)| {
-                let object = objects.get(object_id)?;
-                let enemy_id = object.enemy_id();
-                let enemy = data.enemies.get(enemy_id)?;
                 let position = data.enemy_positions.get(layout.len(), slot)?;
-                let magic = match enemy.magic {
-                    0 | u16::MAX => None,
-                    object_id => Some(battle_magic(object_id, objects, magics)?),
-                };
-                let attack_item_script = match enemy.attack_equivalent_item {
-                    0 => 0,
-                    object_id => objects.get(object_id)?.item_use_script(),
-                };
-                let mut actor =
-                    battle_enemy(slot, position, object_id, enemy_id, enemy, object, magic);
-                actor.attack_equivalent_item_script = attack_item_script;
-                Some(actor)
+                battle_enemy_from_object(slot, position, object_id, data, objects, magics)
             })
             .collect::<Option<Vec<_>>>()?;
         if enemies.is_empty() {
@@ -629,7 +617,7 @@ impl BattleState {
                     (actor.turn_start_script != 0).then_some(BattleScriptRequest {
                         source: BattleScriptSource::EnemyTurnStart { enemy },
                         entry: actor.turn_start_script,
-                        object_id: u16::try_from(enemy).ok()?,
+                        object_id: u16::try_from(actor.slot).ok()?,
                     })
                 })
                 .collect()
@@ -643,6 +631,8 @@ impl BattleState {
             is_boss: request.is_boss,
             players,
             enemies,
+            enemy_layout_slots: layout.len(),
+            hiding_time: 0,
             phase,
             active_player,
             acted,
@@ -1012,7 +1002,7 @@ impl BattleState {
                         continue;
                     }
                     if !ready_complete && actor.ready_script != 0 {
-                        let Some(object_id) = u16::try_from(enemy).ok() else {
+                        let Some(object_id) = u16::try_from(actor.slot).ok() else {
                             self.flow = BattleFlow::Outcome(BattleResult::Lost);
                             continue;
                         };
@@ -1187,7 +1177,7 @@ impl BattleState {
                                 object_id: if magic.attacks_all {
                                     u16::MAX
                                 } else {
-                                    u16::try_from(target).unwrap_or(u16::MAX)
+                                    self.enemy_slot_for_index(target).unwrap_or(u16::MAX)
                                 },
                             });
                             self.flow = BattleFlow::PlayerMagic {
@@ -1281,6 +1271,204 @@ impl BattleState {
         self.enemies.iter().position(BattleEnemy::is_alive)
     }
 
+    /// Resolve an original five-slot enemy owner to the stable runtime actor index.
+    pub fn enemy_index_for_slot(&self, slot: usize) -> Option<usize> {
+        self.enemies
+            .iter()
+            .rposition(|enemy| enemy.slot == slot && enemy.is_alive())
+            .or_else(|| self.enemies.iter().rposition(|enemy| enemy.slot == slot))
+    }
+
+    pub fn enemy_slot_for_index(&self, enemy_index: usize) -> Option<u16> {
+        u16::try_from(self.enemies.get(enemy_index)?.slot).ok()
+    }
+
+    /// Divide the sole living enemy, preserving its current definition and script entries.
+    ///
+    /// The original health divisor uses the requested copy count even when only the first four
+    /// free slots can be populated.
+    pub fn divide_enemy(
+        &mut self,
+        enemy_index: usize,
+        copies: u16,
+        positions: &EnemyPositions,
+    ) -> Option<Vec<usize>> {
+        if self.phase != BattlePhase::AwaitingCommand
+            || self.enemies.iter().filter(|enemy| enemy.is_alive()).count() != 1
+        {
+            return None;
+        }
+        let source = self.enemies.get(enemy_index)?.clone();
+        if !source.is_alive() || source.hp <= 1 {
+            return None;
+        }
+
+        let requested = usize::from(copies.max(1));
+        let free_slots = (0..MAX_ENEMIES_IN_TEAM)
+            .filter(|&slot| {
+                !self
+                    .enemies
+                    .iter()
+                    .any(|enemy| enemy.slot == slot && enemy.is_alive())
+            })
+            .take(requested)
+            .collect::<Vec<_>>();
+        let layout_slots = self
+            .enemies
+            .iter()
+            .filter(|enemy| enemy.is_alive())
+            .map(|enemy| enemy.slot)
+            .chain(free_slots.iter().copied())
+            .max()?
+            .checked_add(1)?;
+        if layout_slots > MAX_ENEMIES_IN_TEAM
+            || self
+                .enemies
+                .iter()
+                .filter(|enemy| enemy.is_alive())
+                .map(|enemy| enemy.slot)
+                .chain(free_slots.iter().copied())
+                .any(|slot| positions.get(layout_slots, slot).is_none())
+        {
+            return None;
+        }
+
+        let shared_hp = u16::try_from(
+            (u32::from(source.hp) + u32::try_from(requested).ok()?)
+                / (u32::try_from(requested).ok()? + 1),
+        )
+        .ok()?;
+        self.enemy_layout_slots = layout_slots;
+        for enemy in self.enemies.iter_mut().filter(|enemy| enemy.is_alive()) {
+            enemy.position = positions.get(layout_slots, enemy.slot)?;
+        }
+        self.enemies.get_mut(enemy_index)?.hp = shared_hp;
+
+        let mut added = Vec::with_capacity(free_slots.len());
+        for slot in free_slots {
+            self.retire_defeated_slot(slot);
+            let mut copy = source.clone();
+            copy.slot = slot;
+            copy.position = positions.get(layout_slots, slot)?;
+            copy.hp = shared_hp;
+            copy.statuses = BattleStatuses::default();
+            copy.poisons = [BattlePoison::default(); MAX_BATTLE_POISONS];
+            added.push(self.enemies.len());
+            self.enemies.push(copy);
+        }
+        Some(added)
+    }
+
+    /// Summon enemies into empty slots inside the current layout boundary.
+    pub fn summon_enemy(
+        &mut self,
+        enemy_index: usize,
+        object_id: u16,
+        count: u16,
+        data: &BattleData,
+        objects: &GlobalObjects,
+        magics: &Magics,
+    ) -> Option<Vec<usize>> {
+        if self.phase != BattlePhase::AwaitingCommand || self.hiding_time != 0 {
+            return None;
+        }
+        let source = self.enemies.get(enemy_index)?;
+        if !source.is_alive()
+            || source.statuses.is_active(BattleStatus::Sleep)
+            || source.statuses.is_active(BattleStatus::Paralyzed)
+            || source.statuses.is_active(BattleStatus::Confused)
+        {
+            return None;
+        }
+        let summoned_object = match object_id {
+            0 | u16::MAX => source.object_id,
+            object_id => object_id,
+        };
+        let requested = if count as i16 <= 0 {
+            1
+        } else {
+            usize::from(count)
+        };
+        let free_slots = (0..self.enemy_layout_slots)
+            .filter(|&slot| {
+                !self
+                    .enemies
+                    .iter()
+                    .any(|enemy| enemy.slot == slot && enemy.is_alive())
+            })
+            .take(requested)
+            .collect::<Vec<_>>();
+        if free_slots.len() != requested {
+            return None;
+        }
+        let actors = free_slots
+            .iter()
+            .copied()
+            .map(|slot| {
+                let position = data.enemy_positions.get(self.enemy_layout_slots, slot)?;
+                battle_enemy_from_object(slot, position, summoned_object, data, objects, magics)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        for slot in free_slots {
+            self.retire_defeated_slot(slot);
+        }
+        let first = self.enemies.len();
+        self.enemies.extend(actors);
+        Some((first..self.enemies.len()).collect())
+    }
+
+    /// Replace an enemy's static definition while retaining HP, statuses and lifecycle scripts.
+    ///
+    /// `Some(false)` is a valid no-op caused by hiding or an incapacitating status.
+    pub fn transform_enemy(
+        &mut self,
+        enemy_index: usize,
+        object_id: u16,
+        data: &BattleData,
+        objects: &GlobalObjects,
+        magics: &Magics,
+    ) -> Option<bool> {
+        if self.phase != BattlePhase::AwaitingCommand {
+            return None;
+        }
+        let source = self.enemies.get(enemy_index)?;
+        if self.hiding_time != 0
+            || source.statuses.is_active(BattleStatus::Sleep)
+            || source.statuses.is_active(BattleStatus::Paralyzed)
+            || source.statuses.is_active(BattleStatus::Confused)
+        {
+            return Some(false);
+        }
+        let position = data
+            .enemy_positions
+            .get(self.enemy_layout_slots, source.slot)?;
+        let mut replacement =
+            battle_enemy_from_object(source.slot, position, object_id, data, objects, magics)?;
+        replacement.hp = source.hp;
+        replacement.turn_start_script = source.turn_start_script;
+        replacement.battle_end_script = source.battle_end_script;
+        replacement.ready_script = source.ready_script;
+        replacement.statuses = source.statuses;
+        replacement.poisons = source.poisons;
+        self.enemies[enemy_index] = replacement;
+        Some(true)
+    }
+
+    fn retire_defeated_slot(&mut self, slot: usize) {
+        for enemy in self
+            .enemies
+            .iter_mut()
+            .filter(|enemy| enemy.slot == slot && !enemy.is_alive())
+        {
+            enemy.object_id = 0;
+            enemy.turn_start_script = 0;
+            enemy.battle_end_script = 0;
+            enemy.ready_script = 0;
+            enemy.statuses = BattleStatuses::default();
+            enemy.poisons = [BattlePoison::default(); MAX_BATTLE_POISONS];
+        }
+    }
+
     pub fn rewards(&self) -> BattleRewards {
         BattleRewards {
             experience: self
@@ -1366,11 +1554,9 @@ impl BattleState {
 
     pub fn enemy_not_first_kind(&self, enemy_index: usize) -> Option<bool> {
         let enemy = self.enemies.get(enemy_index)?;
-        Some(
-            self.enemies[..enemy_index]
-                .iter()
-                .any(|other| other.is_alive() && other.object_id == enemy.object_id),
-        )
+        Some(self.enemies.iter().any(|other| {
+            other.is_alive() && other.object_id == enemy.object_id && other.slot < enemy.slot
+        }))
     }
 
     pub fn set_enemy_magic(
@@ -1490,7 +1676,7 @@ impl BattleState {
                     && !already_present
                     && script_entry != 0
                 {
-                    let Some(object_id) = u16::try_from(target).ok() else {
+                    let Some(object_id) = self.enemy_slot_for_index(target) else {
                         return false;
                     };
                     self.pending_scripts.push_back(BattleScriptRequest {
@@ -1993,7 +2179,7 @@ impl BattleState {
                         item_object,
                     },
                     target
-                        .and_then(|target| u16::try_from(target).ok())
+                        .and_then(|target| self.enemy_slot_for_index(target))
                         .unwrap_or(u16::MAX),
                 )
             }
@@ -2355,7 +2541,7 @@ impl BattleState {
         });
         let enemy_scripts = self.enemies.iter().enumerate().flat_map(|(enemy, actor)| {
             actor.poisons.iter().filter_map(move |poison| {
-                let object_id = u16::try_from(enemy).ok()?;
+                let object_id = u16::try_from(actor.slot).ok()?;
                 (poison.object_id != 0 && poison.script_entry != 0).then_some(BattleScriptRequest {
                     source: BattleScriptSource::EnemyPoison {
                         enemy,
@@ -2381,7 +2567,7 @@ impl BattleState {
                             Some(BattleScriptRequest {
                                 source: BattleScriptSource::EnemyTurnStart { enemy },
                                 entry: actor.turn_start_script,
-                                object_id: u16::try_from(enemy).ok()?,
+                                object_id: u16::try_from(actor.slot).ok()?,
                             })
                         } else {
                             None
@@ -2401,7 +2587,7 @@ impl BattleState {
                             Some(BattleScriptRequest {
                                 source: BattleScriptSource::EnemyBattleEnd { enemy },
                                 entry: actor.battle_end_script,
-                                object_id: u16::try_from(enemy).ok()?,
+                                object_id: u16::try_from(actor.slot).ok()?,
                             })
                         } else {
                             None
@@ -2601,6 +2787,30 @@ impl BattleState {
             self.flow = BattleFlow::BattleEndScripts(result);
         }
     }
+}
+
+fn battle_enemy_from_object(
+    slot: usize,
+    position: BattlePosition,
+    object_id: u16,
+    data: &BattleData,
+    objects: &GlobalObjects,
+    magics: &Magics,
+) -> Option<BattleEnemy> {
+    let object = objects.get(object_id)?;
+    let enemy_id = object.enemy_id();
+    let enemy = data.enemies.get(enemy_id)?;
+    let magic = match enemy.magic {
+        0 | u16::MAX => None,
+        object_id => Some(battle_magic(object_id, objects, magics)?),
+    };
+    let attack_equivalent_item_script = match enemy.attack_equivalent_item {
+        0 => 0,
+        object_id => objects.get(object_id)?.item_use_script(),
+    };
+    let mut actor = battle_enemy(slot, position, object_id, enemy_id, enemy, object, magic);
+    actor.attack_equivalent_item_script = attack_equivalent_item_script;
+    Some(actor)
 }
 
 fn battle_enemy(
@@ -2814,7 +3024,21 @@ mod tests {
         ] {
             enemy[word * 2..word * 2 + 2].copy_from_slice(&value.to_le_bytes());
         }
-        chunks[1] = enemy;
+        let mut transformed_enemy = enemy.clone();
+        for (word, value) in [
+            (5, 7u16),
+            (11, 240),
+            (12, 77),
+            (13, 88),
+            (14, 9),
+            (21, 99),
+            (22, 91),
+            (23, 83),
+            (24, 75),
+        ] {
+            transformed_enemy[word * 2..word * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        chunks[1] = [enemy, transformed_enemy].concat();
         chunks[2] = words(&[1, 1, u16::MAX, u16::MAX, u16::MAX]);
         chunks[5] = vec![0; 12];
         chunks[6] = vec![0; 20];
@@ -2828,6 +3052,7 @@ mod tests {
         let mut object_words = vec![0; 10 * 6];
         object_words[6..12].copy_from_slice(&[0, 0, 11, 12, 13, 0]);
         object_words[12..18].copy_from_slice(&[0, 0, 32, 31, 0, 0]);
+        object_words[18..24].copy_from_slice(&[1, 4, 21, 22, 23, 0]);
         object_words[54..60].copy_from_slice(&[0, 0, 33, 0, 0, 0]);
         let objects = GlobalObjects::parse(&words(&object_words), ObjectLayout::Dos).unwrap();
 
@@ -2928,6 +3153,112 @@ mod tests {
                 cash: 96
             }
         );
+    }
+
+    #[test]
+    fn division_uses_free_slots_and_requested_health_divisor() {
+        let (data, objects, magics, role) = fixture(100, 10, 100);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        assert!(battle.divide_enemy(0, 2, &data.enemy_positions).is_none());
+
+        battle.enemies[0]
+            .statuses
+            .set_for_enemy(BattleStatus::Protect, 4);
+        assert!(battle.kill_enemy(1));
+        let added = battle
+            .divide_enemy(0, 2, &data.enemy_positions)
+            .expect("sole living enemy should divide");
+        assert_eq!(added, vec![2, 3]);
+        assert_eq!(battle.enemies[0].hp, 34);
+        assert_eq!(battle.enemies[2].hp, 34);
+        assert_eq!(battle.enemies[3].hp, 34);
+        assert_eq!(battle.enemies[2].slot, 1);
+        assert_eq!(battle.enemies[3].slot, 2);
+        assert_eq!(battle.enemies[1].object_id, 0);
+        assert_eq!(battle.enemies[1].battle_end_script, 0);
+        assert_eq!(battle.enemy_index_for_slot(1), Some(2));
+        assert_eq!(battle.enemies[0].position, BattlePosition { x: 12, y: 22 });
+        assert_eq!(battle.enemies[2].position, BattlePosition { x: 17, y: 27 });
+        assert_eq!(battle.enemies[3].position, BattlePosition { x: 22, y: 32 });
+        assert_eq!(battle.enemies[2].turn_start_script, 11);
+        assert!(!battle.enemies[2].statuses.is_active(BattleStatus::Protect));
+    }
+
+    #[test]
+    fn summon_fills_only_current_layout_holes_and_loads_static_enemy_data() {
+        let (data, objects, magics, role) = fixture(100, 10, 100);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        assert!(battle
+            .summon_enemy(0, 3, 1, &data, &objects, &magics)
+            .is_none());
+        assert!(battle.kill_enemy(1));
+        assert!(battle
+            .summon_enemy(0, 3, 2, &data, &objects, &magics)
+            .is_none());
+
+        let added = battle
+            .summon_enemy(0, 3, 0, &data, &objects, &magics)
+            .expect("zero count should summon one enemy");
+        assert_eq!(added, vec![2]);
+        let summoned = &battle.enemies[2];
+        assert_eq!(summoned.slot, 1);
+        assert_eq!(summoned.object_id, 3);
+        assert_eq!(summoned.enemy_id, 1);
+        assert_eq!(summoned.hp, 240);
+        assert_eq!(summoned.attack_strength, 99);
+        assert_eq!(summoned.turn_start_script, 21);
+        assert_eq!(summoned.battle_end_script, 22);
+        assert_eq!(summoned.ready_script, 23);
+        assert_eq!(summoned.position, BattlePosition { x: 16, y: 26 });
+    }
+
+    #[test]
+    fn transform_replaces_static_data_but_preserves_runtime_state_and_scripts() {
+        let (data, objects, magics, role) = fixture(100, 10, 100);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        battle.enemies[0].hp = 37;
+        battle.enemies[0].turn_start_script = 41;
+        battle.enemies[0].battle_end_script = 42;
+        battle.enemies[0].ready_script = 43;
+        battle.enemies[0]
+            .statuses
+            .set_for_enemy(BattleStatus::Protect, 4);
+        battle.enemies[0].poisons[0] = BattlePoison {
+            object_id: 6,
+            script_entry: 90,
+        };
+
+        assert_eq!(
+            battle.transform_enemy(0, 3, &data, &objects, &magics),
+            Some(true)
+        );
+        let enemy = &battle.enemies[0];
+        assert_eq!(enemy.object_id, 3);
+        assert_eq!(enemy.enemy_id, 1);
+        assert_eq!(enemy.hp, 37);
+        assert_eq!(enemy.max_hp, 240);
+        assert_eq!(enemy.attack_strength, 99);
+        assert_eq!(enemy.magic_strength, 91);
+        assert_eq!(enemy.defense, 83);
+        assert_eq!(enemy.dexterity, 75);
+        assert_eq!(enemy.y_offset, 7);
+        assert_eq!(enemy.turn_start_script, 41);
+        assert_eq!(enemy.battle_end_script, 42);
+        assert_eq!(enemy.ready_script, 43);
+        assert!(enemy.statuses.is_active(BattleStatus::Protect));
+        assert_eq!(enemy.poisons[0].object_id, 6);
+
+        battle.enemies[0]
+            .statuses
+            .set_for_enemy(BattleStatus::Confused, 1);
+        assert_eq!(
+            battle.transform_enemy(0, 1, &data, &objects, &magics),
+            Some(false)
+        );
+        assert_eq!(battle.enemies[0].object_id, 3);
     }
 
     #[test]

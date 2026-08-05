@@ -258,9 +258,9 @@ define_script_opcodes! {
     SetSceneMap = 0x0099, "SCENE_MAP", "Change the map number used by a scene.", Implemented;
     SetObjectStates = 0x009A, "OBJ_STATES", "Set one state across a contiguous event-object range.", Implemented;
     FadeToCurrentScene = 0x009B, "FADE_CURRENT", "Fade to the current scene using the original compatibility behavior.", Implemented;
-    DivideEnemy = 0x009C, "ENEMY_DIVIDE", "Divide one enemy into additional copies.", Unsupported;
-    SummonEnemy = 0x009E, "ENEMY_SUMMON", "Make an enemy summon another monster.", Unsupported;
-    TransformEnemy = 0x009F, "ENEMY_TRANSFORM", "Transform an enemy into another object.", Unsupported;
+    DivideEnemy = 0x009C, "ENEMY_DIVIDE", "Divide one enemy into additional copies.", Implemented;
+    SummonEnemy = 0x009E, "ENEMY_SUMMON", "Make an enemy summon another monster.", Implemented;
+    TransformEnemy = 0x009F, "ENEMY_TRANSFORM", "Transform an enemy into another object.", Implemented;
     QuitGame = 0x00A0, "QUIT", "Run the ending path and terminate the game.", Implemented;
     CollapseParty = 0x00A1, "PARTY_COLLAPSE", "Move every party member and trail point onto the leader.", Implemented;
     RandomSelect = 0x00A2, "RANDOM_NEXT", "Select one of the following operand 0 instructions randomly.", Implemented;
@@ -600,6 +600,21 @@ pub enum ScriptAction {
         enemy_index: u16,
         magic_object: u16,
         rate: u16,
+    },
+    DivideEnemy {
+        enemy_index: u16,
+        copies: u16,
+        failure_entry: u16,
+    },
+    SummonEnemy {
+        enemy_index: u16,
+        object_id: u16,
+        count: u16,
+        failure_entry: u16,
+    },
+    TransformEnemy {
+        enemy_index: u16,
+        object_id: u16,
     },
     EnemyEscape,
     SetBattleResult {
@@ -1593,6 +1608,33 @@ impl ScriptRuntime {
                         result: entry.operands[0],
                     }));
                 }
+                DivideEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::DivideEnemy {
+                        enemy_index: execution.object_id,
+                        copies: entry.operands[0],
+                        failure_entry: entry.operands[1],
+                    }));
+                }
+                SummonEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SummonEnemy {
+                        enemy_index: execution.object_id,
+                        object_id: entry.operands[0],
+                        count: entry.operands[1],
+                        failure_entry: entry.operands[2],
+                    }));
+                }
+                TransformEnemy => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::TransformEnemy {
+                        enemy_index: execution.object_id,
+                        object_id: entry.operands[0],
+                    }));
+                }
                 RemoveEquipment => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2197,9 +2239,6 @@ impl ScriptRuntime {
                 | SetObjectScript
                 | PlayerMagicAnimation
                 | PlayEndingAnimation
-                | DivideEnemy
-                | SummonEnemy
-                | TransformEnemy
                 | PlayCdMusic => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
@@ -2322,7 +2361,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [146, 1, 18]);
+        assert_eq!(support_counts, [149, 1, 15]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2853,6 +2892,9 @@ mod tests {
             [ScriptOpcode::ThrowWeapon.raw(), 91, 7, 0],
             [ScriptOpcode::ScaleMagicByMp.raw(), 89, 0, 0],
             [ScriptOpcode::ScaleMagicByCash.raw(), 90, 0, 0],
+            [ScriptOpcode::DivideEnemy.raw(), 2, 98, 0],
+            [ScriptOpcode::SummonEnemy.raw(), 501, 3, 99],
+            [ScriptOpcode::TransformEnemy.raw(), 502, 0, 0],
             [ScriptOpcode::JumpIfPlayerLacksPoison.raw(), 40, 91, 0],
             [ScriptOpcode::JumpIfEnemyLacksPoison.raw(), 41, 92, 0],
             [ScriptOpcode::JumpIfPlayerNotPoisoned.raw(), 93, 0, 0],
@@ -2952,6 +2994,21 @@ mod tests {
                 multiplier: 8,
             },
             ScriptAction::ScaleMagicByCash { magic_object: 90 },
+            ScriptAction::DivideEnemy {
+                enemy_index: 7,
+                copies: 2,
+                failure_entry: 98,
+            },
+            ScriptAction::SummonEnemy {
+                enemy_index: 7,
+                object_id: 501,
+                count: 3,
+                failure_entry: 99,
+            },
+            ScriptAction::TransformEnemy {
+                enemy_index: 7,
+                object_id: 502,
+            },
         ];
         for action in expected {
             assert_eq!(runtime.advance(), Some(ScriptEvent::Action(action)));
