@@ -363,22 +363,26 @@ impl<M: CollisionMap> GameState<M> {
         let Some(status) = BattleStatus::from_raw(status) else {
             return false;
         };
-        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
-            battle
+        if let Some(battle) = self.active_battle.as_mut() {
+            let Some(player) = battle
                 .players
                 .iter_mut()
                 .find(|player| player.role_id == role_id)
-        }) {
+            else {
+                return false;
+            };
             if !player
                 .statuses
                 .set_for_player(status, rounds, player.is_alive())
             {
                 return false;
             }
+            let statuses = player.statuses;
             let Some(saved) = self.player_statuses.get_mut(usize::from(role_id)) else {
                 return false;
             };
-            *saved = player.statuses;
+            *saved = statuses;
+            battle.refresh_player_effects();
             return true;
         }
         let Some(alive) = self.player_role(role_id).map(|role| role.hp != 0) else {
@@ -405,17 +409,21 @@ impl<M: CollisionMap> GameState<M> {
         let Some(status) = BattleStatus::from_raw(status) else {
             return false;
         };
-        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
-            battle
+        if let Some(battle) = self.active_battle.as_mut() {
+            let Some(player) = battle
                 .players
                 .iter_mut()
                 .find(|player| player.role_id == role_id)
-        }) {
+            else {
+                return false;
+            };
             player.statuses.remove_from_player(status);
+            let statuses = player.statuses;
             let Some(saved) = self.player_statuses.get_mut(usize::from(role_id)) else {
                 return false;
             };
-            *saved = player.statuses;
+            *saved = statuses;
+            battle.refresh_player_effects();
             return true;
         }
         let Some(statuses) = self.player_statuses.get_mut(usize::from(role_id)) else {

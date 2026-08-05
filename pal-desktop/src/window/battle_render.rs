@@ -143,6 +143,11 @@ pub fn render_battle(
                 x -= offset;
                 y -= offset / 2;
             }
+            Some(BattleEvent::PlayerConfusedAttack { player, .. }) if player == index => {
+                let offset = action_offset(event_ticks);
+                x -= offset;
+                y -= offset / 2;
+            }
             Some(BattleEvent::PlayerMagic { player, .. }) if player == index => {
                 y -= action_offset(event_ticks) / 3;
             }
@@ -164,6 +169,7 @@ pub fn render_battle(
                 Some(
                     BattleEvent::EnemyAttack { player, .. }
                         | BattleEvent::EnemyMagic { player, .. }
+                        | BattleEvent::PlayerConfusedAttack { target: player, .. }
                 ) if player == index
             );
             if is_hit && event_ticks.is_multiple_of(2) {
@@ -217,7 +223,12 @@ fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: Bat
             )
         }
         BattleEvent::EnemyAttack { player, damage, .. }
-        | BattleEvent::EnemyMagic { player, damage, .. } => {
+        | BattleEvent::EnemyMagic { player, damage, .. }
+        | BattleEvent::PlayerConfusedAttack {
+            target: player,
+            damage,
+            ..
+        } => {
             let (x, y) = player_position(battle.players.len(), player);
             (x + 12, y - 34, damage)
         }

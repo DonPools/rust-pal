@@ -1,7 +1,7 @@
 use pal_assets::fbp::FbpArchive;
 use pal_assets::mkf::MkfArchive;
 use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
-use pal_core::battle::{BattlePhase, BattleResult};
+use pal_core::battle::{BattlePhase, BattleResult, BattleStatus};
 use pal_core::script::{ScriptAction, ScriptEvent, ScriptOpcode, ScriptRuntime};
 use pal_desktop::audio::{validate_midi_output, validate_sound_font};
 use pal_desktop::window::{
@@ -98,6 +98,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut fbp_script_references = 0usize;
     let mut fbp_black_fallbacks = 0usize;
     let mut enemy_turn_jumps = 0usize;
+    let mut player_confusion_scripts = 0usize;
+    let mut player_haste_scripts = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -105,6 +107,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             .entry(entry_index)
             .expect("script entry index disappeared");
         enemy_turn_jumps += usize::from(entry.opcode == ScriptOpcode::JumpIfEnemyTurn.raw());
+        if entry.opcode == ScriptOpcode::SetPlayerStatus.raw() {
+            player_confusion_scripts +=
+                usize::from(entry.operands[0] == BattleStatus::Confused as u16);
+            player_haste_scripts += usize::from(entry.operands[0] == BattleStatus::Haste as u16);
+        }
         if let Some(
             ScriptOpcode::ShowFbp | ScriptOpcode::ScrollFbp | ScriptOpcode::ShowFbpWithSprite,
         ) = ScriptOpcode::from_raw(entry.opcode)
@@ -151,6 +158,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(
         enemy_turn_jumps > 0,
         "scripts do not exercise the enemy-turn condition"
+    );
+    assert!(
+        player_confusion_scripts > 0 && player_haste_scripts > 0,
+        "scripts do not exercise player confusion and haste statuses"
     );
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
     let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
@@ -875,7 +886,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
 
     let mut battle_feedback_pixels = 0;
     for _ in 0..1024 {
-        game.advance_battle_resolution();
+        let events = game.advance_battle_resolution();
         assert!(
             game.take_battle_script().is_none(),
             "the first-battle baseline unexpectedly queued a lifecycle script"
@@ -885,6 +896,47 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             Some(BattlePhase::AwaitingCommand)
         ) {
             break;
+        }
+        if battle_feedback_pixels == 0 {
+            if let Some(event) = events.iter().copied().find(|event| {
+                matches!(
+                    event,
+                    pal_core::battle::BattleEvent::PlayerAttack { .. }
+                        | pal_core::battle::BattleEvent::PlayerMagic { .. }
+                        | pal_core::battle::BattleEvent::EnemyAttack { .. }
+                        | pal_core::battle::BattleEvent::EnemyMagic { .. }
+                        | pal_core::battle::BattleEvent::EnemyConfusedAttack { .. }
+                        | pal_core::battle::BattleEvent::PlayerConfusedAttack { .. }
+                )
+            }) {
+                let battle = game
+                    .battle()
+                    .expect("first battle disappeared during action feedback");
+                render_battle(
+                    &mut renderer,
+                    battle,
+                    BattleRenderResources {
+                        enemy_sprites: &enemy_battle_sprites,
+                        player_sprites: &player_battle_sprites,
+                        backgrounds: &battle_backgrounds,
+                        text: &text,
+                        font: &font,
+                    },
+                    BattleRenderState {
+                        selected_enemy: battle.first_living_enemy().unwrap_or(0),
+                        selected_command: 0,
+                        ticks: 4,
+                        event: Some(event),
+                        event_ticks: 4,
+                    },
+                );
+                battle_feedback_pixels = renderer
+                    .screen()
+                    .chunks_exact(4)
+                    .zip(battle_idle_frame.chunks_exact(4))
+                    .filter(|(feedback, idle)| feedback != idle)
+                    .count();
+            }
         }
         if game
             .battle()
@@ -908,56 +960,17 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 .map(|(index, _)| index);
             (target, magic)
         };
-        let events = if let Some(magic) = magic {
+        let committed = if let Some(magic) = magic {
             game.battle_mut()
                 .and_then(|battle| battle.cast_magic(magic, target))
         } else {
             game.battle_mut().and_then(|battle| battle.attack(target))
         }
         .expect("headless first-battle action was rejected");
-        if battle_feedback_pixels == 0 {
-            let event = events
-                .iter()
-                .copied()
-                .find(|event| {
-                    matches!(
-                        event,
-                        pal_core::battle::BattleEvent::PlayerAttack { .. }
-                            | pal_core::battle::BattleEvent::PlayerMagic { .. }
-                            | pal_core::battle::BattleEvent::EnemyAttack { .. }
-                            | pal_core::battle::BattleEvent::EnemyMagic { .. }
-                            | pal_core::battle::BattleEvent::EnemyConfusedAttack { .. }
-                    )
-                })
-                .expect("first battle action produced no presentation event");
-            let battle = game
-                .battle()
-                .expect("first battle disappeared during action feedback");
-            render_battle(
-                &mut renderer,
-                battle,
-                BattleRenderResources {
-                    enemy_sprites: &enemy_battle_sprites,
-                    player_sprites: &player_battle_sprites,
-                    backgrounds: &battle_backgrounds,
-                    text: &text,
-                    font: &font,
-                },
-                BattleRenderState {
-                    selected_enemy: target,
-                    selected_command: usize::from(magic.is_some()),
-                    ticks: 4,
-                    event: Some(event),
-                    event_ticks: 4,
-                },
-            );
-            battle_feedback_pixels = renderer
-                .screen()
-                .chunks_exact(4)
-                .zip(battle_idle_frame.chunks_exact(4))
-                .filter(|(feedback, idle)| feedback != idle)
-                .count();
-        }
+        assert!(
+            committed.is_empty(),
+            "commands should resolve through the action queue"
+        );
     }
     assert!(
         battle_feedback_pixels > 0,
@@ -1142,7 +1155,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!("store data passed: {} items in store 0", first_store.len());
     println!(
         "battle data passed: {} enemies, {} teams, {} battlefields, {enemy_attack_items} \
-         attack-equivalent item definitions",
+         attack-equivalent item definitions, {player_confusion_scripts} player-confusion and \
+         {player_haste_scripts} player-haste scripts",
         battle_data.enemies.len(),
         battle_data.enemy_teams.len(),
         battle_data.battlefields.len(),
