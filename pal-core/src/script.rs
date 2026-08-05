@@ -207,7 +207,7 @@ define_script_opcodes! {
     SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite; only the leader slot is currently applied.", Stub;
     ThrowWeapon = 0x0066, "THROW_WEAPON", "Throw a weapon at an enemy.", Unsupported;
     EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Set the magic and casting rate used by an enemy.", Implemented;
-    JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Unsupported;
+    JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Implemented;
     EnemyEscape = 0x0069, "ENEMY_FLEE", "Make the enemy party escape and terminate the battle.", Implemented;
     StealEnemy = 0x006A, "STEAL", "Steal from an enemy.", Unsupported;
     BlowEnemiesAway = 0x006B, "BLOW_ENEMIES", "Apply a battlefield displacement to enemies.", Unsupported;
@@ -728,6 +728,9 @@ pub enum ScriptCondition {
     },
     EnemyNotFirstKind {
         enemy_index: u16,
+        target_entry: u16,
+    },
+    EnemyTurn {
         target_entry: u16,
     },
 }
@@ -1657,6 +1660,13 @@ impl ScriptRuntime {
                         target_entry: entry.operands[0],
                     }));
                 }
+                JumpIfEnemyTurn => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::EnemyTurn {
+                        target_entry: entry.operands[0],
+                    }));
+                }
                 SetPlayerSprite if entry.operands[0] == 0 => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2088,7 +2098,6 @@ impl ScriptRuntime {
                 | PauseEnemyChase
                 | SpeedUpEnemyChase
                 | ThrowWeapon
-                | JumpIfEnemyTurn
                 | StealEnemy
                 | BlowEnemiesAway
                 | JumpIfObjectOutsideZone
@@ -2224,7 +2233,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [139, 1, 25]);
+        assert_eq!(support_counts, [140, 1, 24]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2754,6 +2763,7 @@ mod tests {
             [ScriptOpcode::JumpIfPlayerNotPoisoned.raw(), 93, 0, 0],
             [ScriptOpcode::JumpIfEnemyHpAbove.raw(), 60, 95, 0],
             [ScriptOpcode::JumpIfEnemyNotFirstKind.raw(), 96, 0, 0],
+            [ScriptOpcode::JumpIfEnemyTurn.raw(), 97, 0, 0],
             [ScriptOpcode::Stop.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
@@ -2862,6 +2872,12 @@ mod tests {
             Some(ScriptEvent::Condition(ScriptCondition::EnemyNotFirstKind {
                 enemy_index: 7,
                 target_entry: 96,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::EnemyTurn {
+                target_entry: 97,
             }))
         );
         assert!(matches!(

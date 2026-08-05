@@ -59,6 +59,10 @@ pub fn render_battle(
                     enemy: target,
                     defeated: true,
                     ..
+                } | BattleEvent::EnemyConfusedAttack {
+                    target,
+                    defeated: true,
+                    ..
                 }
             ) if target == index
         );
@@ -91,6 +95,9 @@ pub fn render_battle(
             Some(BattleEvent::EnemyMagic { enemy, .. }) if enemy == index => {
                 action_offset(event_ticks) / 2
             }
+            Some(BattleEvent::EnemyConfusedAttack { enemy, .. }) if enemy == index => {
+                action_offset(event_ticks)
+            }
             _ => 0,
         };
         let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2 + enemy_offset;
@@ -99,8 +106,11 @@ pub fn render_battle(
         renderer.blit_rle(&bitmap, x, y);
         let is_hit = matches!(
             event,
-            Some(BattleEvent::PlayerAttack { enemy, .. } | BattleEvent::PlayerMagic { enemy, .. })
-                if enemy == index
+            Some(
+                BattleEvent::PlayerAttack { enemy, .. }
+                    | BattleEvent::PlayerMagic { enemy, .. }
+                    | BattleEvent::EnemyConfusedAttack { target: enemy, .. }
+            ) if enemy == index
         );
         if is_hit && event_ticks.is_multiple_of(2) {
             stroke_rect(
@@ -210,6 +220,16 @@ fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: Bat
         | BattleEvent::EnemyMagic { player, damage, .. } => {
             let (x, y) = player_position(battle.players.len(), player);
             (x + 12, y - 34, damage)
+        }
+        BattleEvent::EnemyConfusedAttack { target, damage, .. } => {
+            let Some(enemy) = battle.enemies.get(target) else {
+                return;
+            };
+            (
+                i32::from(enemy.position.x) + 12,
+                i32::from(enemy.position.y) - 24,
+                damage,
+            )
         }
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => return,
     };

@@ -226,6 +226,7 @@ pub enum BattleScriptSource {
     EnemyPoison { enemy: usize, poison_id: u16 },
     EnemyMagicUse { enemy: usize, magic_object: u16 },
     EnemyMagicSuccess { enemy: usize, magic_object: u16 },
+    EnemyAttackItem { enemy: usize, item_object: u16 },
 }
 
 /// A battle-owned script invocation consumed by a platform script driver.
@@ -251,6 +252,10 @@ enum BattleFlow {
         magic: BattleMagic,
         phase: EnemyMagicPhase,
         use_succeeded: bool,
+    },
+    EnemyAttackItem {
+        enemy: usize,
+        action: u8,
     },
     RoundScripts,
     TurnStartScripts,
@@ -357,6 +362,7 @@ pub struct BattleEnemy {
     pub magic: Option<BattleMagic>,
     pub attack_equivalent_item: u16,
     pub attack_equivalent_item_rate: u16,
+    pub attack_equivalent_item_script: u16,
     pub steal_item: u16,
     pub steal_item_count: u16,
     pub dual_move: bool,
@@ -403,6 +409,12 @@ pub enum BattleEvent {
         enemy: usize,
         player: usize,
         magic_object: u16,
+        damage: u16,
+        defeated: bool,
+    },
+    EnemyConfusedAttack {
+        enemy: usize,
+        target: usize,
         damage: u16,
         defeated: bool,
     },
@@ -472,9 +484,14 @@ impl BattleState {
                     0 | u16::MAX => None,
                     object_id => Some(battle_magic(object_id, objects, magics)?),
                 };
-                Some(battle_enemy(
-                    slot, position, object_id, enemy_id, enemy, object, magic,
-                ))
+                let attack_item_script = match enemy.attack_equivalent_item {
+                    0 => 0,
+                    object_id => objects.get(object_id)?.item_use_script(),
+                };
+                let mut actor =
+                    battle_enemy(slot, position, object_id, enemy_id, enemy, object, magic);
+                actor.attack_equivalent_item_script = attack_item_script;
+                Some(actor)
             })
             .collect::<Option<Vec<_>>>()?;
         if enemies.is_empty() {
@@ -549,6 +566,14 @@ impl BattleState {
             && self.active_script.is_none())
         .then_some(self.active_player)
         .flatten()
+    }
+
+    pub fn is_enemy_turn(&self) -> bool {
+        self.phase == BattlePhase::AwaitingCommand
+            && matches!(
+                self.flow,
+                BattleFlow::EnemyMagic { .. } | BattleFlow::EnemyAttackItem { .. }
+            )
     }
 
     pub fn refresh_player_effects(&mut self) {
@@ -701,6 +726,15 @@ impl BattleState {
                     magic.success_script = next_entry;
                 }
             }
+            BattleScriptSource::EnemyAttackItem { enemy, item_object } => {
+                if let Some(actor) = self
+                    .enemies
+                    .get_mut(enemy)
+                    .filter(|actor| actor.attack_equivalent_item == item_object)
+                {
+                    actor.attack_equivalent_item_script = next_entry;
+                }
+            }
         }
         self.detect_script_outcome();
         true
@@ -754,6 +788,17 @@ impl BattleState {
                         };
                         return events;
                     }
+                    if actor.statuses.is_active(BattleStatus::Confused) {
+                        self.flow = BattleFlow::EnemyRound {
+                            enemy,
+                            action: action + 1,
+                            ready_complete: false,
+                        };
+                        if let Some(event) = self.perform_confused_enemy_action(enemy) {
+                            events.push(event);
+                        }
+                        return events;
+                    }
                     let magic_object = actor.magic_object;
                     let magic_rate = actor.magic_rate;
                     let silenced = actor.statuses.is_active(BattleStatus::Silence);
@@ -802,15 +847,42 @@ impl BattleState {
                             continue;
                         }
                     }
-                    self.flow = BattleFlow::EnemyRound {
-                        enemy,
-                        action: action + 1,
-                        ready_complete: false,
-                    };
-                    if let Some(event) = self.perform_enemy_action(enemy) {
+                    if let Some(event @ BattleEvent::EnemyAttack { player, .. }) =
+                        self.perform_enemy_action(enemy)
+                    {
+                        let actor = &self.enemies[enemy];
+                        let item_object = actor.attack_equivalent_item;
+                        let item_rate = actor.attack_equivalent_item_rate;
+                        let item_script = actor.attack_equivalent_item_script;
+                        let poison_resistance = self.players[player].poison_resistance;
+                        let item_triggered = item_object != 0
+                            && self.random(10) < u32::from(item_rate)
+                            && self.random(100) + 1 > u32::from(poison_resistance);
+                        if item_triggered && item_script != 0 {
+                            self.pending_scripts.push_back(BattleScriptRequest {
+                                source: BattleScriptSource::EnemyAttackItem { enemy, item_object },
+                                entry: item_script,
+                                object_id: self.players[player].role_id,
+                            });
+                            self.flow = BattleFlow::EnemyAttackItem { enemy, action };
+                        } else {
+                            self.flow = BattleFlow::EnemyRound {
+                                enemy,
+                                action: action + 1,
+                                ready_complete: false,
+                            };
+                        }
                         events.push(event);
+                    } else {
+                        self.flow = BattleFlow::EnemyRound {
+                            enemy,
+                            action: action + 1,
+                            ready_complete: false,
+                        };
                     }
-                    if self.players.iter().all(|player| !player.is_combat_active()) {
+                    if !self.has_script_work()
+                        && self.players.iter().all(|player| !player.is_combat_active())
+                    {
                         self.flow = BattleFlow::Outcome(BattleResult::Lost);
                     }
                     return events;
@@ -875,6 +947,14 @@ impl BattleState {
                         return events;
                     }
                 },
+                BattleFlow::EnemyAttackItem { enemy, action } => {
+                    self.flow = BattleFlow::EnemyRound {
+                        enemy,
+                        action: action + 1,
+                        ready_complete: false,
+                    };
+                    return events;
+                }
                 BattleFlow::RoundScripts => {
                     for player in &mut self.players {
                         player.statuses.decrement_round();
@@ -1314,6 +1394,30 @@ impl BattleState {
         })
     }
 
+    fn perform_confused_enemy_action(&mut self, enemy: usize) -> Option<BattleEvent> {
+        let living_enemies = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, actor)| actor.is_alive().then_some(index))
+            .collect::<Vec<_>>();
+        let target = living_enemies
+            .get(self.random(living_enemies.len() as u32) as usize)
+            .copied()?;
+        if target == enemy {
+            return None;
+        }
+        let damage = self.confused_enemy_damage(enemy, target);
+        let actor = &mut self.enemies[target];
+        actor.hp = actor.hp.saturating_sub(damage);
+        Some(BattleEvent::EnemyConfusedAttack {
+            enemy,
+            target,
+            damage,
+            defeated: !actor.is_alive(),
+        })
+    }
+
     fn perform_enemy_magic(
         &mut self,
         enemy: usize,
@@ -1498,6 +1602,25 @@ impl BattleState {
         u16::try_from(damage.max(1)).unwrap_or(u16::MAX)
     }
 
+    fn confused_enemy_damage(&self, enemy: usize, target: usize) -> u16 {
+        let attacker = &self.enemies[enemy];
+        let defender = &self.enemies[target];
+        let raw_attack = i32::from(attacker.attack_strength as i16)
+            + i32::from(attacker.level.saturating_add(6)) * 6;
+        let raw_defense =
+            i32::from(defender.defense as i16) + i32::from(defender.level.saturating_add(6)) * 4;
+        let base = physical_damage(
+            u32::try_from(raw_attack.max(0)).unwrap_or(0),
+            u32::try_from(raw_defense.max(0)).unwrap_or(0),
+            0,
+        )
+        .saturating_mul(2);
+        let damage = base
+            .checked_div(u32::from(defender.physical_resistance))
+            .unwrap_or(base);
+        u16::try_from(damage.max(1)).unwrap_or(u16::MAX)
+    }
+
     fn magic_damage(&mut self, player: usize, enemy: usize, magic: BattleMagic) -> u16 {
         let strength =
             u32::from(self.players[player].magic_strength).saturating_mul(10 + self.random(2)) / 10;
@@ -1618,6 +1741,7 @@ fn battle_enemy(
         magic,
         attack_equivalent_item: enemy.attack_equivalent_item,
         attack_equivalent_item_rate: enemy.attack_equivalent_item_rate,
+        attack_equivalent_item_script: 0,
         steal_item: enemy.steal_item,
         steal_item_count: enemy.steal_item_count,
         dual_move: enemy.dual_move,
@@ -1755,7 +1879,7 @@ mod tests {
             (15, enemy_magic),
             (16, magic_rate),
             (17, 9),
-            (18, 3),
+            (18, 0),
             (19, 8),
             (20, 2),
             (21, enemy_attack),
@@ -1778,15 +1902,11 @@ mod tests {
         chunks[14] = vec![0; 200];
         let battle_data = BattleData::parse(&make_mkf(&chunks)).unwrap();
 
-        let objects = GlobalObjects::parse(
-            &words(&[
-                0, 0, 0, 0, 0, 0, // object 0
-                0, 0, 11, 12, 13, 0, // enemy object 1 -> enemy definition 0
-                0, 0, 32, 31, 0, 0, // magic object 2 -> definition 0 and scripts
-            ]),
-            ObjectLayout::Dos,
-        )
-        .unwrap();
+        let mut object_words = vec![0; 10 * 6];
+        object_words[6..12].copy_from_slice(&[0, 0, 11, 12, 13, 0]);
+        object_words[12..18].copy_from_slice(&[0, 0, 32, 31, 0, 0]);
+        object_words[54..60].copy_from_slice(&[0, 0, 33, 0, 0, 0]);
+        let objects = GlobalObjects::parse(&words(&object_words), ObjectLayout::Dos).unwrap();
 
         let role = PlayerRole {
             avatar: 0,
@@ -2022,8 +2142,10 @@ mod tests {
         assert!(battle.advance_resolution().is_empty());
         let ready = battle.take_script_request().unwrap();
         assert_eq!(ready.source, BattleScriptSource::EnemyReady { enemy: 0 });
+        assert!(!battle.is_enemy_turn());
         assert!(battle.complete_script(ready.entry));
         assert!(battle.advance_resolution().is_empty());
+        assert!(battle.is_enemy_turn());
         let use_script = battle.take_script_request().unwrap();
         assert_eq!(
             use_script,
@@ -2051,6 +2173,7 @@ mod tests {
             }
         );
         assert!(battle.complete_script(42));
+        assert!(battle.is_enemy_turn());
         assert!(matches!(
             battle.advance_resolution().as_slice(),
             [BattleEvent::EnemyMagic {
@@ -2061,6 +2184,7 @@ mod tests {
                 ..
             }] if *damage > 0
         ));
+        assert!(!battle.is_enemy_turn());
         assert!(battle.players[0].hp < 200);
         assert_eq!(battle.enemies[0].magic.unwrap().use_script, 41);
         assert_eq!(battle.enemies[0].magic.unwrap().success_script, 42);
@@ -2153,6 +2277,104 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, BattleEvent::EnemyMagic { enemy: 0, .. })));
+    }
+
+    #[test]
+    fn confused_enemy_attacks_a_random_living_enemy_instead_of_the_party() {
+        let (data, objects, magics, role) = fixture(1000, 200, 500);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        battle.enemies[0]
+            .statuses
+            .set_for_enemy(BattleStatus::Confused, 1);
+        let seed = (1..100)
+            .find(|&seed| {
+                let mut candidate = battle.clone();
+                candidate.random_state = seed;
+                candidate.perform_confused_enemy_action(0).is_some()
+            })
+            .unwrap();
+        battle.random_state = seed;
+        battle.flow = BattleFlow::EnemyRound {
+            enemy: 0,
+            action: 0,
+            ready_complete: true,
+        };
+        let player_hp = battle.players[0].hp;
+        let target_hp = battle.enemies[1].hp;
+
+        assert!(matches!(
+            battle.advance_resolution().as_slice(),
+            [BattleEvent::EnemyConfusedAttack {
+                enemy: 0,
+                target: 1,
+                damage,
+                ..
+            }] if *damage > 0
+        ));
+        assert_eq!(battle.players[0].hp, player_hp);
+        assert!(battle.enemies[1].hp < target_hp);
+    }
+
+    #[test]
+    fn enemy_attack_item_runs_during_enemy_turn_and_obeys_poison_resistance() {
+        let (data, objects, magics, role) = fixture(1000, 20, 500);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        battle.enemies[0].attack_equivalent_item_rate = 10;
+        battle.enemies[1]
+            .statuses
+            .set_for_enemy(BattleStatus::Paralyzed, 2);
+        assert!(battle.attack(0).is_some());
+        assert!(battle.advance_resolution().is_empty());
+        let ready = battle.take_script_request().unwrap();
+        assert_eq!(ready.source, BattleScriptSource::EnemyReady { enemy: 0 });
+        assert!(!battle.is_enemy_turn());
+        assert!(battle.complete_script(ready.entry));
+
+        assert!(matches!(
+            battle.advance_resolution().as_slice(),
+            [BattleEvent::EnemyAttack { enemy: 0, .. }]
+        ));
+        assert!(battle.is_enemy_turn());
+        let item = battle.take_script_request().unwrap();
+        assert_eq!(
+            item,
+            BattleScriptRequest {
+                source: BattleScriptSource::EnemyAttackItem {
+                    enemy: 0,
+                    item_object: 9,
+                },
+                entry: 33,
+                object_id: 0,
+            }
+        );
+        assert!(battle.complete_script(34));
+        assert_eq!(battle.enemies[0].attack_equivalent_item_script, 34);
+        assert!(battle.is_enemy_turn());
+        assert!(battle.advance_resolution().is_empty());
+        assert!(!battle.is_enemy_turn());
+
+        let mut resisted =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut resisted);
+        resisted.enemies[0].attack_equivalent_item_rate = 10;
+        resisted.players[0].poison_resistance = 100;
+        resisted.enemies[1]
+            .statuses
+            .set_for_enemy(BattleStatus::Paralyzed, 2);
+        assert!(resisted.attack(0).is_some());
+        assert!(resisted.advance_resolution().is_empty());
+        let ready = resisted.take_script_request().unwrap();
+        assert!(resisted.complete_script(ready.entry));
+        assert!(matches!(
+            resisted.advance_resolution().as_slice(),
+            [BattleEvent::EnemyAttack { enemy: 0, .. }]
+        ));
+        assert!(!resisted.has_script_work());
+        assert!(!resisted.is_enemy_turn());
     }
 
     #[test]

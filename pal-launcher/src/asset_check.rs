@@ -97,12 +97,14 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(fbp_frame_count > 0, "FBP.MKF contains no pictures");
     let mut fbp_script_references = 0usize;
     let mut fbp_black_fallbacks = 0usize;
+    let mut enemy_turn_jumps = 0usize;
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
         let entry = script_table
             .entry(entry_index)
             .expect("script entry index disappeared");
+        enemy_turn_jumps += usize::from(entry.opcode == ScriptOpcode::JumpIfEnemyTurn.raw());
         if let Some(
             ScriptOpcode::ShowFbp | ScriptOpcode::ScrollFbp | ScriptOpcode::ShowFbpWithSprite,
         ) = ScriptOpcode::from_raw(entry.opcode)
@@ -145,6 +147,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(
         fbp_black_fallbacks > 0,
         "scripts do not exercise the FBP black-screen fallback"
+    );
+    assert!(
+        enemy_turn_jumps > 0,
+        "scripts do not exercise the enemy-turn condition"
     );
     assert!(validate_sound_font(&sound_font), "invalid SoundFont");
     let midi_archive = MkfArchive::new(&midi_mkf).expect("invalid MIDI.MKF archive");
@@ -294,6 +300,41 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         kind: pal_core::scene::TriggerKind::Search,
     };
     let script_count = script_table.len();
+    let mut enemy_attack_items = 0usize;
+    for index in 0..battle_data.enemies.len() {
+        let enemy_index = u16::try_from(index).expect("enemy table exceeds addressable range");
+        let enemy = battle_data
+            .enemies
+            .get(enemy_index)
+            .expect("enemy definition index disappeared");
+        if enemy.attack_equivalent_item == 0 || enemy.attack_equivalent_item_rate == 0 {
+            continue;
+        }
+        let item = global_objects
+            .get(enemy.attack_equivalent_item)
+            .unwrap_or_else(|| {
+                panic!(
+                    "enemy {index} references unavailable attack-equivalent item {}",
+                    enemy.attack_equivalent_item
+                )
+            });
+        let use_script = item.item_use_script();
+        assert_ne!(
+            use_script, 0,
+            "enemy {index} attack-equivalent item {} has no use script",
+            enemy.attack_equivalent_item
+        );
+        assert!(
+            script_table.entry(use_script).is_some(),
+            "enemy {index} attack-equivalent item {} references unavailable use script {use_script}",
+            enemy.attack_equivalent_item
+        );
+        enemy_attack_items += 1;
+    }
+    assert!(
+        enemy_attack_items > 0,
+        "battle data contains no attack-equivalent enemy items"
+    );
     let auto_scripts = script_table.clone();
     let mut scripts = ScriptRuntime::new(script_table);
     assert!(scripts.start(trigger));
@@ -885,6 +926,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                             | pal_core::battle::BattleEvent::PlayerMagic { .. }
                             | pal_core::battle::BattleEvent::EnemyAttack { .. }
                             | pal_core::battle::BattleEvent::EnemyMagic { .. }
+                            | pal_core::battle::BattleEvent::EnemyConfusedAttack { .. }
                     )
                 })
                 .expect("first battle action produced no presentation event");
@@ -1084,7 +1126,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         font.glyph_count(),
     );
     println!(
-        "script data passed: {} records, {script_messages} messages, {script_ticks} timed actions",
+        "script data passed: {} records, {script_messages} messages, {script_ticks} timed actions, \
+         {enemy_turn_jumps} enemy-turn branches",
         script_count,
     );
     println!("sound data passed: {sound_effect_count} PCM VOC effects");
@@ -1098,7 +1141,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     println!("store data passed: {} items in store 0", first_store.len());
     println!(
-        "battle data passed: {} enemies, {} teams, {} battlefields",
+        "battle data passed: {} enemies, {} teams, {} battlefields, {enemy_attack_items} \
+         attack-equivalent item definitions",
         battle_data.enemies.len(),
         battle_data.enemy_teams.len(),
         battle_data.battlefields.len(),

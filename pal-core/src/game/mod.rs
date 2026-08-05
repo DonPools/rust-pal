@@ -216,6 +216,12 @@ impl<M: CollisionMap> GameState<M> {
         self.active_battle.as_mut()
     }
 
+    pub fn is_enemy_turn(&self) -> bool {
+        self.active_battle
+            .as_ref()
+            .is_some_and(BattleState::is_enemy_turn)
+    }
+
     pub fn advance_battle_resolution(&mut self) -> Vec<BattleEvent> {
         self.active_battle
             .as_mut()
@@ -258,6 +264,9 @@ impl<M: CollisionMap> GameState<M> {
             }
             BattleScriptSource::EnemyMagicSuccess { magic_object, .. } => {
                 self.magic_success_scripts.insert(magic_object, next_entry);
+            }
+            BattleScriptSource::EnemyAttackItem { item_object, .. } => {
+                self.item_use_scripts.insert(item_object, next_entry);
             }
             BattleScriptSource::EnemyTurnStart { .. }
             | BattleScriptSource::EnemyReady { .. }
@@ -612,6 +621,11 @@ impl<M: CollisionMap> GameState<M> {
                     .copied()
                     .unwrap_or(magic.success_script);
             }
+            enemy.attack_equivalent_item_script = self
+                .item_use_scripts
+                .get(&enemy.attack_equivalent_item)
+                .copied()
+                .unwrap_or(enemy.attack_equivalent_item_script);
         }
         for player in &mut battle.players {
             let role_index = usize::from(player.role_id);

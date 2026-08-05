@@ -368,6 +368,7 @@ pub(super) fn advance_script<L>(
                     enemy_index,
                     target_entry,
                 } => (game.enemy_not_first_kind(enemy_index), target_entry),
+                ScriptCondition::EnemyTurn { target_entry } => (game.is_enemy_turn(), target_entry),
             };
             if matches {
                 scripts.branch_to(target_entry);
