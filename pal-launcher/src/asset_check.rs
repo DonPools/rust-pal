@@ -820,11 +820,23 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
 
     let mut battle_feedback_pixels = 0;
     for _ in 0..1024 {
+        game.advance_battle_resolution();
+        assert!(
+            game.take_battle_script().is_none(),
+            "the first-battle baseline unexpectedly queued a lifecycle script"
+        );
         if !matches!(
             game.battle().map(|battle| battle.phase()),
             Some(BattlePhase::AwaitingCommand)
         ) {
             break;
+        }
+        if game
+            .battle()
+            .and_then(|battle| battle.active_player())
+            .is_none()
+        {
+            continue;
         }
         let (target, magic) = {
             let battle = game.battle().expect("first battle disappeared");

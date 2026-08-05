@@ -206,9 +206,9 @@ define_script_opcodes! {
     JumpIfEnemyHpAbove = 0x0064, "JGT_ENEMY_HP", "Jump when enemy HP exceeds a percentage threshold.", Implemented;
     SetPlayerSprite = 0x0065, "PLAYER_SPRITE", "Set a player's scene sprite; only the leader slot is currently applied.", Stub;
     ThrowWeapon = 0x0066, "THROW_WEAPON", "Throw a weapon at an enemy.", Unsupported;
-    EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Make an enemy cast magic.", Unsupported;
+    EnemyCastMagic = 0x0067, "ENEMY_MAGIC", "Set the magic and casting rate used by an enemy.", Implemented;
     JumpIfEnemyTurn = 0x0068, "JENEMY_TURN", "Jump when it is currently an enemy's turn.", Unsupported;
-    EnemyEscape = 0x0069, "ENEMY_FLEE", "Make an enemy escape from battle.", Unsupported;
+    EnemyEscape = 0x0069, "ENEMY_FLEE", "Make the enemy party escape and terminate the battle.", Implemented;
     StealEnemy = 0x006A, "STEAL", "Steal from an enemy.", Unsupported;
     BlowEnemiesAway = 0x006B, "BLOW_ENEMIES", "Apply a battlefield displacement to enemies.", Unsupported;
     OffsetObjectAndAnimate = 0x006C, "OBJ_STEP", "Offset an event object and advance its animation.", Implemented;
@@ -239,7 +239,7 @@ define_script_opcodes! {
     JumpIfItemNotEquipped = 0x0086, "JNOT_EQUIPPED", "Jump when fewer than the requested item count are equipped.", Implemented;
     AnimateObject = 0x0087, "OBJ_ANIMATE", "Advance an event object's animation.", Implemented;
     ScaleMagicByCash = 0x0088, "MAGIC_SCALE_CASH", "Consume cash and derive magic base damage from it.", Unsupported;
-    SetBattleResult = 0x0089, "BATTLE_RESULT", "Set the current battle result.", Unsupported;
+    SetBattleResult = 0x0089, "BATTLE_RESULT", "Set the current battle result.", Implemented;
     EnableAutoBattle = 0x008A, "AUTO_BATTLE", "Enable automatic commands for the next battle.", Unsupported;
     SetPalette = 0x008B, "PALETTE_SET", "Change the current palette number.", Implemented;
     FadeColor = 0x008C, "COLOR_FADE", "Fade the screen from or to a palette color.", Implemented;
@@ -247,7 +247,7 @@ define_script_opcodes! {
     RestoreScreen = 0x008E, "SCREEN_RESTORE", "Restore the screen saved by a previous backup operation.", Implemented;
     HalveCash = 0x008F, "CASH_HALF", "Halve the party's cash.", Unsupported;
     SetObjectScript = 0x0090, "OBJECT_SCRIPT", "Replace one script field in a global object definition.", Unsupported;
-    JumpIfEnemyNotFirstKind = 0x0091, "JNOT_FIRST_ENEMY", "Jump when an enemy is not the first living instance of its kind.", Unsupported;
+    JumpIfEnemyNotFirstKind = 0x0091, "JNOT_FIRST_ENEMY", "Jump when an enemy is not the first living instance of its kind.", Implemented;
     PlayerMagicAnimation = 0x0092, "MAGIC_ANIM", "Show a player's battle magic-casting animation.", Unsupported;
     FadeSceneWithUpdate = 0x0093, "SCENE_FADE_UPDATE", "Fade the screen while rebuilding the scene.", Implemented;
     JumpIfObjectStateEquals = 0x0094, "JEQ_OBJ_STATE", "Jump when an event object's state equals operand 1.", Implemented;
@@ -587,6 +587,15 @@ pub enum ScriptAction {
     KillEnemy {
         enemy_index: u16,
     },
+    SetEnemyMagic {
+        enemy_index: u16,
+        magic_object: u16,
+        rate: u16,
+    },
+    EnemyEscape,
+    SetBattleResult {
+        result: u16,
+    },
     SetEquipmentEffect {
         role_id: u16,
         attribute: u16,
@@ -715,6 +724,10 @@ pub enum ScriptCondition {
     EnemyHpAbove {
         enemy_index: u16,
         percentage: u16,
+        target_entry: u16,
+    },
+    EnemyNotFirstKind {
+        enemy_index: u16,
         target_entry: u16,
     },
 }
@@ -899,7 +912,7 @@ impl ScriptRuntime {
             return false;
         };
         execution.entry = match result {
-            BattleResult::Won => execution.entry,
+            BattleResult::Won | BattleResult::Terminated => execution.entry,
             BattleResult::Lost if request.lost_entry != 0 => request.lost_entry,
             BattleResult::Fled if request.flee_entry != 0 => request.flee_entry,
             BattleResult::Lost | BattleResult::Fled => execution.entry,
@@ -1461,6 +1474,27 @@ impl ScriptRuntime {
                         enemy_index: execution.object_id,
                     }));
                 }
+                EnemyCastMagic => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetEnemyMagic {
+                        enemy_index: execution.object_id,
+                        magic_object: entry.operands[0],
+                        rate: entry.operands[1],
+                    }));
+                }
+                EnemyEscape => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::EnemyEscape));
+                }
+                SetBattleResult => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::SetBattleResult {
+                        result: entry.operands[0],
+                    }));
+                }
                 RemoveEquipment => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -1613,6 +1647,14 @@ impl ScriptRuntime {
                         enemy_index: execution.object_id,
                         percentage: entry.operands[0],
                         target_entry: entry.operands[1],
+                    }));
+                }
+                JumpIfEnemyNotFirstKind => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Condition(ScriptCondition::EnemyNotFirstKind {
+                        enemy_index: execution.object_id,
+                        target_entry: entry.operands[0],
                     }));
                 }
                 SetPlayerSprite if entry.operands[0] == 0 => {
@@ -2046,19 +2088,15 @@ impl ScriptRuntime {
                 | PauseEnemyChase
                 | SpeedUpEnemyChase
                 | ThrowWeapon
-                | EnemyCastMagic
                 | JumpIfEnemyTurn
-                | EnemyEscape
                 | StealEnemy
                 | BlowEnemiesAway
                 | JumpIfObjectOutsideZone
                 | ScaleMagicByCash
-                | SetBattleResult
                 | EnableAutoBattle
                 | LevelUpPlayer
                 | HalveCash
                 | SetObjectScript
-                | JumpIfEnemyNotFirstKind
                 | PlayerMagicAnimation
                 | PlayEndingAnimation
                 | DivideEnemy
@@ -2186,7 +2224,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [135, 1, 29]);
+        assert_eq!(support_counts, [139, 1, 25]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -2488,6 +2526,16 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Completed { .. })
         ));
+        assert!(runtime.start(trigger(1)));
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::StartBattle(_))
+        ));
+        assert!(runtime.resolve_battle(BattleResult::Terminated));
+        assert!(matches!(
+            runtime.advance(),
+            Some(ScriptEvent::Completed { .. })
+        ));
     }
 
     #[test]
@@ -2698,10 +2746,14 @@ mod tests {
             [ScriptOpcode::HalveEnemyHp.raw(), 50, 0, 0],
             [ScriptOpcode::KillPlayer.raw(), 0, 0, 0],
             [ScriptOpcode::KillEnemy.raw(), 0, 0, 0],
+            [ScriptOpcode::EnemyCastMagic.raw(), 88, 0, 0],
+            [ScriptOpcode::EnemyEscape.raw(), 0, 0, 0],
+            [ScriptOpcode::SetBattleResult.raw(), 0, 0, 0],
             [ScriptOpcode::JumpIfPlayerLacksPoison.raw(), 40, 91, 0],
             [ScriptOpcode::JumpIfEnemyLacksPoison.raw(), 41, 92, 0],
             [ScriptOpcode::JumpIfPlayerNotPoisoned.raw(), 93, 0, 0],
             [ScriptOpcode::JumpIfEnemyHpAbove.raw(), 60, 95, 0],
+            [ScriptOpcode::JumpIfEnemyNotFirstKind.raw(), 96, 0, 0],
             [ScriptOpcode::Stop.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
@@ -2763,6 +2815,13 @@ mod tests {
             },
             ScriptAction::KillPlayer { role_id: 7 },
             ScriptAction::KillEnemy { enemy_index: 7 },
+            ScriptAction::SetEnemyMagic {
+                enemy_index: 7,
+                magic_object: 88,
+                rate: 0,
+            },
+            ScriptAction::EnemyEscape,
+            ScriptAction::SetBattleResult { result: 0 },
         ];
         for action in expected {
             assert_eq!(runtime.advance(), Some(ScriptEvent::Action(action)));
@@ -2796,6 +2855,13 @@ mod tests {
                 enemy_index: 7,
                 percentage: 60,
                 target_entry: 95,
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Condition(ScriptCondition::EnemyNotFirstKind {
+                enemy_index: 7,
+                target_entry: 96,
             }))
         );
         assert!(matches!(

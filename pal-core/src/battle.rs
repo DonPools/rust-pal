@@ -1,5 +1,7 @@
 //! Deterministic, platform-independent battle state and minimum combat rules.
 
+use std::collections::VecDeque;
+
 use pal_assets::battle::{BattleData, BattlePosition, Enemy};
 use pal_assets::magic::Magics;
 use pal_assets::objects::{GlobalObject, GlobalObjects};
@@ -196,6 +198,8 @@ pub enum BattleResult {
     Won,
     Lost,
     Fled,
+    /// Script-controlled termination continues the caller without victory rewards.
+    Terminated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +214,39 @@ pub struct BattleRequest {
     pub lost_entry: u16,
     pub flee_entry: u16,
     pub is_boss: bool,
+}
+
+/// Persistent script entry owned by one battle actor or poison instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BattleScriptSource {
+    EnemyTurnStart { enemy: usize },
+    EnemyReady { enemy: usize },
+    EnemyBattleEnd { enemy: usize },
+    PlayerPoison { role_id: u16, poison_id: u16 },
+    EnemyPoison { enemy: usize, poison_id: u16 },
+}
+
+/// A battle-owned script invocation consumed by a platform script driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BattleScriptRequest {
+    pub source: BattleScriptSource,
+    pub entry: u16,
+    pub object_id: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BattleFlow {
+    Command,
+    EnemyRound {
+        enemy: usize,
+        action: u8,
+        ready_complete: bool,
+    },
+    RoundScripts,
+    TurnStartScripts,
+    Outcome(BattleResult),
+    BattleEndScripts(BattleResult),
+    Finished,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,6 +402,9 @@ pub struct BattleState {
     round: u32,
     random_state: u32,
     battlefield_magic_effect: [i16; pal_assets::battle::MAGIC_ELEMENT_COUNT],
+    flow: BattleFlow,
+    pending_scripts: VecDeque<BattleScriptRequest>,
+    active_script: Option<BattleScriptRequest>,
 }
 
 impl BattleState {
@@ -420,6 +460,21 @@ impl BattleState {
         } else {
             BattlePhase::Finished(BattleResult::Lost)
         };
+        let pending_scripts = if phase == BattlePhase::AwaitingCommand {
+            enemies
+                .iter()
+                .enumerate()
+                .filter_map(|(enemy, actor)| {
+                    (actor.turn_start_script != 0).then_some(BattleScriptRequest {
+                        source: BattleScriptSource::EnemyTurnStart { enemy },
+                        entry: actor.turn_start_script,
+                        object_id: u16::try_from(enemy).ok()?,
+                    })
+                })
+                .collect()
+        } else {
+            VecDeque::new()
+        };
         Some(Self {
             enemy_team: request.enemy_team,
             battlefield,
@@ -433,6 +488,13 @@ impl BattleState {
             round: 1,
             random_state: 0x6d2b_79f5,
             battlefield_magic_effect: battlefield_definition.magic_effect,
+            flow: if phase == BattlePhase::AwaitingCommand {
+                BattleFlow::Command
+            } else {
+                BattleFlow::Finished
+            },
+            pending_scripts,
+            active_script: None,
         })
     }
 
@@ -445,9 +507,12 @@ impl BattleState {
     }
 
     pub fn active_player(&self) -> Option<usize> {
-        (self.phase == BattlePhase::AwaitingCommand)
-            .then_some(self.active_player)
-            .flatten()
+        (self.phase == BattlePhase::AwaitingCommand
+            && self.flow == BattleFlow::Command
+            && self.pending_scripts.is_empty()
+            && self.active_script.is_none())
+        .then_some(self.active_player)
+        .flatten()
     }
 
     pub fn refresh_player_effects(&mut self) {
@@ -457,11 +522,19 @@ impl BattleState {
         } else {
             BattlePhase::Finished(BattleResult::Lost)
         };
+        if self.phase != BattlePhase::AwaitingCommand {
+            self.flow = BattleFlow::Finished;
+            self.pending_scripts.clear();
+            self.active_script = None;
+        }
     }
 
     /// Skip players disabled by sleep/paralysis and run an enemy-only round when needed.
     pub fn advance_automatic_turns(&mut self) -> Vec<BattleEvent> {
         if self.phase != BattlePhase::AwaitingCommand
+            || self.flow != BattleFlow::Command
+            || !self.pending_scripts.is_empty()
+            || self.active_script.is_some()
             || self
                 .active_player
                 .is_some_and(|index| self.players[index].can_act() && !self.acted[index])
@@ -476,15 +549,184 @@ impl BattleState {
         if self.active_player.is_some() {
             return Vec::new();
         }
+        self.flow = BattleFlow::EnemyRound {
+            enemy: 0,
+            action: 0,
+            ready_complete: false,
+        };
+        self.advance_resolution()
+    }
 
-        let mut events = Vec::new();
-        self.run_enemy_round(&mut events);
-        if self.players.iter().all(|player| !player.is_combat_active()) {
-            self.finish(BattleResult::Lost, &mut events);
-            return events;
+    pub fn has_script_work(&self) -> bool {
+        self.active_script.is_some() || !self.pending_scripts.is_empty()
+    }
+
+    /// Begin the next queued battle-owned script and retain its source until completion.
+    pub fn take_script_request(&mut self) -> Option<BattleScriptRequest> {
+        if self.active_script.is_some() {
+            return None;
         }
-        self.complete_round(&mut events);
-        events
+        let request = self.pending_scripts.pop_front()?;
+        self.active_script = Some(request);
+        Some(request)
+    }
+
+    /// Persist the next entry returned by a completed battle-owned script.
+    pub fn complete_script(&mut self, next_entry: u16) -> bool {
+        let Some(request) = self.active_script.take() else {
+            return false;
+        };
+        match request.source {
+            BattleScriptSource::EnemyTurnStart { enemy } => {
+                let Some(actor) = self.enemies.get_mut(enemy) else {
+                    return false;
+                };
+                actor.turn_start_script = next_entry;
+            }
+            BattleScriptSource::EnemyReady { enemy } => {
+                let Some(actor) = self.enemies.get_mut(enemy) else {
+                    return false;
+                };
+                actor.ready_script = next_entry;
+            }
+            BattleScriptSource::EnemyBattleEnd { enemy } => {
+                let Some(actor) = self.enemies.get_mut(enemy) else {
+                    return false;
+                };
+                actor.battle_end_script = next_entry;
+            }
+            BattleScriptSource::PlayerPoison { role_id, poison_id } => {
+                if let Some(poison) = self
+                    .players
+                    .iter_mut()
+                    .find(|player| player.role_id == role_id)
+                    .and_then(|player| {
+                        player
+                            .poisons
+                            .iter_mut()
+                            .find(|poison| poison.object_id == poison_id)
+                    })
+                {
+                    poison.script_entry = next_entry;
+                }
+            }
+            BattleScriptSource::EnemyPoison { enemy, poison_id } => {
+                if let Some(poison) = self.enemies.get_mut(enemy).and_then(|actor| {
+                    actor
+                        .poisons
+                        .iter_mut()
+                        .find(|poison| poison.object_id == poison_id)
+                }) {
+                    poison.script_entry = next_entry;
+                }
+            }
+        }
+        self.detect_script_outcome();
+        true
+    }
+
+    /// Advance one non-interactive battle resolution step.
+    pub fn advance_resolution(&mut self) -> Vec<BattleEvent> {
+        if self.phase != BattlePhase::AwaitingCommand || self.has_script_work() {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        loop {
+            match self.flow {
+                BattleFlow::Command | BattleFlow::Finished => return events,
+                BattleFlow::EnemyRound {
+                    enemy,
+                    action,
+                    ready_complete,
+                } => {
+                    let Some(actor) = self.enemies.get(enemy) else {
+                        self.queue_round_poison_scripts();
+                        self.flow = BattleFlow::RoundScripts;
+                        if self.has_script_work() {
+                            return events;
+                        }
+                        continue;
+                    };
+                    let action_count = if actor.dual_move { 2 } else { 1 };
+                    if !actor.can_act() || action >= action_count {
+                        self.flow = BattleFlow::EnemyRound {
+                            enemy: enemy + 1,
+                            action: 0,
+                            ready_complete: false,
+                        };
+                        continue;
+                    }
+                    if !ready_complete && actor.ready_script != 0 {
+                        let Some(object_id) = u16::try_from(enemy).ok() else {
+                            self.flow = BattleFlow::Outcome(BattleResult::Lost);
+                            continue;
+                        };
+                        self.pending_scripts.push_back(BattleScriptRequest {
+                            source: BattleScriptSource::EnemyReady { enemy },
+                            entry: actor.ready_script,
+                            object_id,
+                        });
+                        self.flow = BattleFlow::EnemyRound {
+                            enemy,
+                            action,
+                            ready_complete: true,
+                        };
+                        return events;
+                    }
+                    self.flow = BattleFlow::EnemyRound {
+                        enemy,
+                        action: action + 1,
+                        ready_complete: false,
+                    };
+                    if let Some(event) = self.perform_enemy_action(enemy) {
+                        events.push(event);
+                    }
+                    if self.players.iter().all(|player| !player.is_combat_active()) {
+                        self.flow = BattleFlow::Outcome(BattleResult::Lost);
+                    }
+                    return events;
+                }
+                BattleFlow::RoundScripts => {
+                    for player in &mut self.players {
+                        player.statuses.decrement_round();
+                    }
+                    for enemy in &mut self.enemies {
+                        enemy.statuses.decrement_round();
+                    }
+                    if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
+                        self.flow = BattleFlow::Outcome(BattleResult::Won);
+                        continue;
+                    }
+                    if self.players.iter().all(|player| !player.is_combat_active()) {
+                        self.flow = BattleFlow::Outcome(BattleResult::Lost);
+                        continue;
+                    }
+                    self.queue_turn_start_scripts();
+                    self.flow = BattleFlow::TurnStartScripts;
+                    if self.has_script_work() {
+                        return events;
+                    }
+                }
+                BattleFlow::TurnStartScripts => {
+                    self.round = self.round.saturating_add(1);
+                    self.acted.fill(false);
+                    self.active_player = next_player(&self.players, &self.acted, 0);
+                    self.flow = BattleFlow::Command;
+                    events.push(BattleEvent::RoundCompleted);
+                    return events;
+                }
+                BattleFlow::Outcome(result) => {
+                    self.finish(result, &mut events);
+                    return events;
+                }
+                BattleFlow::BattleEndScripts(result) => {
+                    self.phase = BattlePhase::Finished(result);
+                    self.flow = BattleFlow::Finished;
+                    events.push(BattleEvent::Finished(result));
+                    return events;
+                }
+            }
+        }
     }
 
     pub fn first_living_enemy(&self) -> Option<usize> {
@@ -507,9 +749,9 @@ impl BattleState {
         match self.phase {
             BattlePhase::AwaitingCommand => None,
             BattlePhase::Finished(BattleResult::Won) => Some(self.rewards()),
-            BattlePhase::Finished(BattleResult::Lost | BattleResult::Fled) => {
-                Some(BattleRewards::default())
-            }
+            BattlePhase::Finished(
+                BattleResult::Lost | BattleResult::Fled | BattleResult::Terminated,
+            ) => Some(BattleRewards::default()),
         }
     }
 
@@ -574,6 +816,45 @@ impl BattleState {
         )
     }
 
+    pub fn enemy_not_first_kind(&self, enemy_index: usize) -> Option<bool> {
+        let enemy = self.enemies.get(enemy_index)?;
+        Some(
+            self.enemies[..enemy_index]
+                .iter()
+                .any(|other| other.is_alive() && other.object_id == enemy.object_id),
+        )
+    }
+
+    pub fn set_enemy_magic(&mut self, enemy_index: usize, magic_object: u16, rate: u16) -> bool {
+        let Some(enemy) = self.enemies.get_mut(enemy_index) else {
+            return false;
+        };
+        enemy.magic_object = magic_object;
+        enemy.magic_rate = if rate == 0 { 10 } else { rate };
+        true
+    }
+
+    pub fn set_script_result(&mut self, raw_result: u16) -> bool {
+        let result = match raw_result {
+            0 => BattleResult::Terminated,
+            1 => BattleResult::Lost,
+            3 => BattleResult::Won,
+            u16::MAX => BattleResult::Fled,
+            _ => return false,
+        };
+        if self.phase != BattlePhase::AwaitingCommand {
+            return false;
+        }
+        self.pending_scripts.clear();
+        self.active_player = None;
+        self.flow = BattleFlow::Outcome(result);
+        true
+    }
+
+    pub fn enemy_escape(&mut self) -> bool {
+        self.set_script_result(0)
+    }
+
     pub fn poison_enemy(
         &mut self,
         enemy_index: usize,
@@ -594,9 +875,56 @@ impl BattleState {
         for target in targets {
             let resistance = self.enemies[target].sorcery_resistance.min(9);
             if self.random(10) >= u32::from(resistance) {
-                add_poison(&mut self.enemies[target].poisons, poison_id, script_entry);
+                let already_present = self.enemies[target]
+                    .poisons
+                    .iter()
+                    .any(|poison| poison.object_id == poison_id);
+                if add_poison(&mut self.enemies[target].poisons, poison_id, script_entry)
+                    && !already_present
+                    && script_entry != 0
+                {
+                    let Some(object_id) = u16::try_from(target).ok() else {
+                        return false;
+                    };
+                    self.pending_scripts.push_back(BattleScriptRequest {
+                        source: BattleScriptSource::EnemyPoison {
+                            enemy: target,
+                            poison_id,
+                        },
+                        entry: script_entry,
+                        object_id,
+                    });
+                }
             }
         }
+        true
+    }
+
+    pub fn queue_player_poison_script(
+        &mut self,
+        role_id: u16,
+        poison_id: u16,
+        script_entry: u16,
+    ) -> bool {
+        if script_entry == 0
+            || self
+                .players
+                .iter()
+                .find(|player| player.role_id == role_id)
+                .is_none_or(|player| {
+                    !player
+                        .poisons
+                        .iter()
+                        .any(|poison| poison.object_id == poison_id)
+                })
+        {
+            return false;
+        }
+        self.pending_scripts.push_back(BattleScriptRequest {
+            source: BattleScriptSource::PlayerPoison { role_id, poison_id },
+            entry: script_entry,
+            object_id: role_id,
+        });
         true
     }
 
@@ -644,7 +972,11 @@ impl BattleState {
 
     /// Execute a normal attack and, after every living player has acted, the enemy round.
     pub fn attack(&mut self, target: usize) -> Option<Vec<BattleEvent>> {
-        if self.phase != BattlePhase::AwaitingCommand || !self.enemies.get(target)?.is_alive() {
+        if self.phase != BattlePhase::AwaitingCommand
+            || self.flow != BattleFlow::Command
+            || self.has_script_work()
+            || !self.enemies.get(target)?.is_alive()
+        {
             return None;
         }
         let player_index = self.active_player?;
@@ -690,7 +1022,11 @@ impl BattleState {
     }
 
     pub fn cast_magic(&mut self, magic_index: usize, target: usize) -> Option<Vec<BattleEvent>> {
-        if self.phase != BattlePhase::AwaitingCommand || !self.enemies.get(target)?.is_alive() {
+        if self.phase != BattlePhase::AwaitingCommand
+            || self.flow != BattleFlow::Command
+            || self.has_script_work()
+            || !self.enemies.get(target)?.is_alive()
+        {
             return None;
         }
         let player_index = self.active_player?;
@@ -735,46 +1071,41 @@ impl BattleState {
     }
 
     pub fn flee(&mut self) -> Option<BattleEvent> {
-        if self.phase != BattlePhase::AwaitingCommand || self.is_boss {
+        if self.phase != BattlePhase::AwaitingCommand
+            || self.flow != BattleFlow::Command
+            || self.is_boss
+        {
             return None;
         }
         self.phase = BattlePhase::Finished(BattleResult::Fled);
+        self.flow = BattleFlow::Finished;
         self.active_player = None;
+        self.pending_scripts.clear();
         Some(BattleEvent::Finished(BattleResult::Fled))
     }
 
-    fn run_enemy_round(&mut self, events: &mut Vec<BattleEvent>) {
-        for enemy_index in 0..self.enemies.len() {
-            if !self.enemies[enemy_index].can_act() {
-                continue;
-            }
-            let action_count = if self.enemies[enemy_index].dual_move {
-                2
-            } else {
-                1
-            };
-            for _ in 0..action_count {
-                let living_players = self
-                    .players
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, player)| player.is_alive().then_some(index))
-                    .collect::<Vec<_>>();
-                if living_players.is_empty() {
-                    break;
-                }
-                let target = living_players[self.random(living_players.len() as u32) as usize];
-                let damage = self.enemy_damage(enemy_index, target);
-                let player = &mut self.players[target];
-                player.hp = player.hp.saturating_sub(damage);
-                events.push(BattleEvent::EnemyAttack {
-                    enemy: enemy_index,
-                    player: target,
-                    damage,
-                    defeated: !player.is_alive(),
-                });
-            }
+    fn perform_enemy_action(&mut self, enemy: usize) -> Option<BattleEvent> {
+        if !self.enemies.get(enemy)?.can_act() {
+            return None;
         }
+        let living_players = self
+            .players
+            .iter()
+            .enumerate()
+            .filter_map(|(index, player)| player.is_alive().then_some(index))
+            .collect::<Vec<_>>();
+        let player = living_players
+            .get(self.random(living_players.len() as u32) as usize)
+            .copied()?;
+        let damage = self.enemy_damage(enemy, player);
+        let target = &mut self.players[player];
+        target.hp = target.hp.saturating_sub(damage);
+        Some(BattleEvent::EnemyAttack {
+            enemy,
+            player,
+            damage,
+            defeated: !target.is_alive(),
+        })
     }
 
     fn end_player_action(&mut self, player_index: usize, events: &mut Vec<BattleEvent>) {
@@ -787,25 +1118,104 @@ impl BattleState {
         if self.active_player.is_some() {
             return;
         }
-        self.run_enemy_round(events);
-        if self.players.iter().all(|player| !player.is_combat_active()) {
-            self.finish(BattleResult::Lost, events);
-            return;
-        }
-        self.complete_round(events);
+        self.flow = BattleFlow::EnemyRound {
+            enemy: 0,
+            action: 0,
+            ready_complete: false,
+        };
     }
 
-    fn complete_round(&mut self, events: &mut Vec<BattleEvent>) {
-        for player in &mut self.players {
-            player.statuses.decrement_round();
+    fn queue_round_poison_scripts(&mut self) {
+        let player_scripts = self.players.iter().flat_map(|player| {
+            player.poisons.iter().filter_map(|poison| {
+                (poison.object_id != 0 && poison.script_entry != 0).then_some(BattleScriptRequest {
+                    source: BattleScriptSource::PlayerPoison {
+                        role_id: player.role_id,
+                        poison_id: poison.object_id,
+                    },
+                    entry: poison.script_entry,
+                    object_id: player.role_id,
+                })
+            })
+        });
+        let enemy_scripts = self.enemies.iter().enumerate().flat_map(|(enemy, actor)| {
+            actor.poisons.iter().filter_map(move |poison| {
+                let object_id = u16::try_from(enemy).ok()?;
+                (poison.object_id != 0 && poison.script_entry != 0).then_some(BattleScriptRequest {
+                    source: BattleScriptSource::EnemyPoison {
+                        enemy,
+                        poison_id: poison.object_id,
+                    },
+                    entry: poison.script_entry,
+                    object_id,
+                })
+            })
+        });
+        self.pending_scripts
+            .extend(player_scripts.chain(enemy_scripts));
+    }
+
+    fn queue_turn_start_scripts(&mut self) {
+        self.pending_scripts
+            .extend(
+                self.enemies
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(enemy, actor)| {
+                        if actor.is_alive() && actor.turn_start_script != 0 {
+                            Some(BattleScriptRequest {
+                                source: BattleScriptSource::EnemyTurnStart { enemy },
+                                entry: actor.turn_start_script,
+                                object_id: u16::try_from(enemy).ok()?,
+                            })
+                        } else {
+                            None
+                        }
+                    }),
+            );
+    }
+
+    fn queue_battle_end_scripts(&mut self) {
+        self.pending_scripts
+            .extend(
+                self.enemies
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(enemy, actor)| {
+                        if actor.battle_end_script != 0 {
+                            Some(BattleScriptRequest {
+                                source: BattleScriptSource::EnemyBattleEnd { enemy },
+                                entry: actor.battle_end_script,
+                                object_id: u16::try_from(enemy).ok()?,
+                            })
+                        } else {
+                            None
+                        }
+                    }),
+            );
+    }
+
+    fn detect_script_outcome(&mut self) {
+        if self.phase != BattlePhase::AwaitingCommand
+            || matches!(
+                self.flow,
+                BattleFlow::Outcome(_) | BattleFlow::BattleEndScripts(_) | BattleFlow::Finished
+            )
+        {
+            return;
         }
-        for enemy in &mut self.enemies {
-            enemy.statuses.decrement_round();
+        let result = if self.enemies.iter().all(|enemy| !enemy.is_alive()) {
+            Some(BattleResult::Won)
+        } else if self.players.iter().all(|player| !player.is_combat_active()) {
+            Some(BattleResult::Lost)
+        } else {
+            None
+        };
+        if let Some(result) = result {
+            self.pending_scripts.clear();
+            self.active_player = None;
+            self.flow = BattleFlow::Outcome(result);
         }
-        self.round = self.round.saturating_add(1);
-        self.acted.fill(false);
-        self.active_player = next_player(&self.players, &self.acted, 0);
-        events.push(BattleEvent::RoundCompleted);
     }
 
     fn player_damage(&mut self, player: usize, enemy: usize) -> u16 {
@@ -878,9 +1288,18 @@ impl BattleState {
     }
 
     fn finish(&mut self, result: BattleResult, events: &mut Vec<BattleEvent>) {
-        self.phase = BattlePhase::Finished(result);
         self.active_player = None;
-        events.push(BattleEvent::Finished(result));
+        self.pending_scripts.clear();
+        if result == BattleResult::Won {
+            self.queue_battle_end_scripts();
+        }
+        if self.pending_scripts.is_empty() {
+            self.phase = BattlePhase::Finished(result);
+            self.flow = BattleFlow::Finished;
+            events.push(BattleEvent::Finished(result));
+        } else {
+            self.flow = BattleFlow::BattleEndScripts(result);
+        }
     }
 }
 
@@ -1126,6 +1545,26 @@ mod tests {
         }
     }
 
+    fn complete_pending_scripts(battle: &mut BattleState) {
+        while let Some(request) = battle.take_script_request() {
+            assert!(battle.complete_script(request.entry));
+        }
+    }
+
+    fn resolve_until_input_or_finish(battle: &mut BattleState) -> Vec<BattleEvent> {
+        let mut events = Vec::new();
+        for _ in 0..128 {
+            complete_pending_scripts(battle);
+            events.extend(battle.advance_resolution());
+            if battle.phase() != BattlePhase::AwaitingCommand
+                || (battle.flow == BattleFlow::Command && !battle.has_script_work())
+            {
+                return events;
+            }
+        }
+        panic!("battle resolution did not settle");
+    }
+
     #[test]
     fn creates_enemy_instances_from_team_objects_and_positions() {
         let (data, objects, magics, role) = fixture(100, 10, 100);
@@ -1159,15 +1598,19 @@ mod tests {
         let (data, objects, magics, role) = fixture(1, 0, 100);
         let mut battle =
             BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
         let first = battle.attack(0).unwrap();
         assert!(matches!(
             first[0],
             BattleEvent::PlayerAttack { defeated: true, .. }
         ));
         assert_eq!(battle.phase(), BattlePhase::AwaitingCommand);
+        resolve_until_input_or_finish(&mut battle);
         let second = battle.attack(1).unwrap();
+        let mut finished = second;
+        finished.extend(resolve_until_input_or_finish(&mut battle));
         assert_eq!(
-            second.last(),
+            finished.last(),
             Some(&BattleEvent::Finished(BattleResult::Won))
         );
         assert_eq!(battle.phase(), BattlePhase::Finished(BattleResult::Won));
@@ -1187,7 +1630,9 @@ mod tests {
         role.attack_strength = 1;
         let mut battle =
             BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
-        let events = battle.attack(0).unwrap();
+        complete_pending_scripts(&mut battle);
+        let mut events = battle.attack(0).unwrap();
+        events.extend(resolve_until_input_or_finish(&mut battle));
         assert!(events
             .iter()
             .any(|event| matches!(event, BattleEvent::EnemyAttack { defeated: true, .. })));
@@ -1215,6 +1660,26 @@ mod tests {
     }
 
     #[test]
+    fn scripted_termination_continues_without_victory_rewards() {
+        let (data, objects, magics, role) = fixture(100, 10, 100);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
+        assert!(!battle.enemy_not_first_kind(0).unwrap());
+        assert!(battle.enemy_not_first_kind(1).unwrap());
+        assert!(battle.set_enemy_magic(0, 88, 0));
+        assert_eq!(battle.enemies[0].magic_object, 88);
+        assert_eq!(battle.enemies[0].magic_rate, 10);
+
+        assert!(battle.set_script_result(0));
+        assert_eq!(
+            battle.advance_resolution(),
+            vec![BattleEvent::Finished(BattleResult::Terminated)]
+        );
+        assert_eq!(battle.settled_rewards(), Some(BattleRewards::default()));
+    }
+
+    #[test]
     fn defeated_players_are_not_revived_when_battle_is_created() {
         let (data, objects, magics, mut role) = fixture(100, 10, 100);
         role.hp = 0;
@@ -1235,6 +1700,7 @@ mod tests {
         role.magic[0] = 2;
         let mut battle =
             BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
         assert_eq!(battle.players[0].magics.len(), 1);
         let events = battle.cast_magic(0, 0).unwrap();
         assert_eq!(battle.players[0].mp, 5);
@@ -1309,9 +1775,20 @@ mod tests {
         role.magic[0] = 2;
         let mut battle =
             BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
         assert!(battle.poison_enemy(0, 40, 77, false));
         assert_eq!(battle.enemies[0].poisons[0].object_id, 40);
         assert_eq!(battle.enemies[0].poisons[0].script_entry, 77);
+        let poison_script = battle.take_script_request().unwrap();
+        assert_eq!(
+            poison_script.source,
+            BattleScriptSource::EnemyPoison {
+                enemy: 0,
+                poison_id: 40,
+            }
+        );
+        assert!(battle.complete_script(78));
+        assert_eq!(battle.enemies[0].poisons[0].script_entry, 78);
         assert!(battle.cure_enemy_poison(0, 40, false));
         assert_eq!(battle.enemies[0].poisons[0], BattlePoison::default());
         assert!(
@@ -1338,7 +1815,8 @@ mod tests {
             .statuses
             .set_for_enemy(BattleStatus::Paralyzed, 1);
 
-        let events = battle.attack(0).unwrap();
+        let mut events = battle.attack(0).unwrap();
+        events.extend(resolve_until_input_or_finish(&mut battle));
         assert_eq!(
             events
                 .iter()
@@ -1362,10 +1840,110 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_and_round_poison_scripts_run_in_original_order() {
+        let (data, objects, magics, role) = fixture(1000, 0, 1000);
+        let mut battle =
+            BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+
+        for (enemy, next_entry) in [(0, 21), (1, 22)] {
+            let request = battle.take_script_request().unwrap();
+            assert_eq!(
+                request,
+                BattleScriptRequest {
+                    source: BattleScriptSource::EnemyTurnStart { enemy },
+                    entry: 11,
+                    object_id: enemy as u16,
+                }
+            );
+            assert!(battle.complete_script(next_entry));
+        }
+        assert_eq!(battle.active_player(), Some(0));
+
+        battle.players[0].poisons[0] = BattlePoison {
+            object_id: 40,
+            script_entry: 31,
+        };
+        battle.enemies[0].poisons[0] = BattlePoison {
+            object_id: 41,
+            script_entry: 32,
+        };
+        assert!(battle.attack(0).is_some());
+
+        let mut ready_entries = [13, 13];
+        for enemy in [0, 0, 1, 1] {
+            assert!(battle.advance_resolution().is_empty());
+            let request = battle.take_script_request().unwrap();
+            assert_eq!(request.source, BattleScriptSource::EnemyReady { enemy });
+            assert_eq!(request.entry, ready_entries[enemy]);
+            ready_entries[enemy] += 1;
+            assert!(battle.complete_script(ready_entries[enemy]));
+            assert!(matches!(
+                battle.advance_resolution().as_slice(),
+                [BattleEvent::EnemyAttack { enemy: actor, .. }] if *actor == enemy
+            ));
+        }
+
+        assert!(battle.advance_resolution().is_empty());
+        let player_poison = battle.take_script_request().unwrap();
+        assert_eq!(
+            player_poison.source,
+            BattleScriptSource::PlayerPoison {
+                role_id: 0,
+                poison_id: 40,
+            }
+        );
+        assert!(battle.complete_script(33));
+        let enemy_poison = battle.take_script_request().unwrap();
+        assert_eq!(
+            enemy_poison.source,
+            BattleScriptSource::EnemyPoison {
+                enemy: 0,
+                poison_id: 41,
+            }
+        );
+        assert!(battle.complete_script(34));
+
+        assert!(battle.advance_resolution().is_empty());
+        for (enemy, entry, next_entry) in [(0, 21, 23), (1, 22, 24)] {
+            let request = battle.take_script_request().unwrap();
+            assert_eq!(
+                request,
+                BattleScriptRequest {
+                    source: BattleScriptSource::EnemyTurnStart { enemy },
+                    entry,
+                    object_id: enemy as u16,
+                }
+            );
+            assert!(battle.complete_script(next_entry));
+        }
+        assert_eq!(
+            battle.advance_resolution(),
+            vec![BattleEvent::RoundCompleted]
+        );
+        assert_eq!(battle.round(), 2);
+        assert_eq!(battle.players[0].poisons[0].script_entry, 33);
+        assert_eq!(battle.enemies[0].poisons[0].script_entry, 34);
+
+        assert!(battle.set_script_result(3));
+        assert!(battle.advance_resolution().is_empty());
+        for (enemy, next_entry) in [(0, 25), (1, 26)] {
+            let request = battle.take_script_request().unwrap();
+            assert_eq!(request.source, BattleScriptSource::EnemyBattleEnd { enemy });
+            assert_eq!(request.entry, 12);
+            assert!(battle.complete_script(next_entry));
+        }
+        assert_eq!(
+            battle.advance_resolution(),
+            vec![BattleEvent::Finished(BattleResult::Won)]
+        );
+    }
+
+    #[test]
     fn fully_disabled_party_advances_rounds_without_being_declared_defeated() {
         let (data, objects, magics, role) = fixture(1000, 0, 1000);
         let mut battle =
             BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+        complete_pending_scripts(&mut battle);
         battle.players[0]
             .statuses
             .set_for_player(BattleStatus::Sleep, 2, true);
@@ -1373,11 +1951,13 @@ mod tests {
         assert_eq!(battle.phase(), BattlePhase::AwaitingCommand);
         assert_eq!(battle.active_player(), None);
 
-        let first = battle.advance_automatic_turns();
+        let mut first = battle.advance_automatic_turns();
+        first.extend(resolve_until_input_or_finish(&mut battle));
         assert!(matches!(first.last(), Some(BattleEvent::RoundCompleted)));
         assert_eq!(battle.phase(), BattlePhase::AwaitingCommand);
         assert_eq!(battle.active_player(), None);
-        let second = battle.advance_automatic_turns();
+        let mut second = battle.advance_automatic_turns();
+        second.extend(resolve_until_input_or_finish(&mut battle));
         assert!(matches!(second.last(), Some(BattleEvent::RoundCompleted)));
         assert_eq!(battle.active_player(), Some(0));
         assert_eq!(battle.players[0].statuses.duration(BattleStatus::Sleep), 0);

@@ -1,6 +1,7 @@
 use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleRewards};
 use pal_core::game::{GameInput, GameState};
 use pal_core::role::Direction;
+use pal_core::script::ScriptRuntime;
 
 use super::session::SessionState;
 
@@ -17,14 +18,20 @@ pub(super) fn update_battle(
     input: GameInput,
     game: &mut GameState,
     services: &mut SessionState,
+    battle_scripts: &mut ScriptRuntime,
 ) -> Option<FinishedBattle> {
     if advance_battle_events(game, services) {
         return None;
     }
-    let automatic_events = game
-        .battle_mut()
-        .map(|battle| battle.advance_automatic_turns())
-        .unwrap_or_default();
+    if battle_scripts.is_active() {
+        return None;
+    }
+    let mut automatic_events = game.advance_battle_resolution();
+    automatic_events.extend(
+        game.battle_mut()
+            .map(|battle| battle.advance_automatic_turns())
+            .unwrap_or_default(),
+    );
     if !automatic_events.is_empty() {
         services.battle_events.extend(automatic_events);
         let event = *services
@@ -33,6 +40,12 @@ pub(super) fn update_battle(
             .expect("a newly queued automatic battle event is available");
         services.battle_event_ticks = battle_event_duration(event);
         play_battle_event_sounds(game, services, event);
+        return None;
+    }
+    if let Some(request) = game.take_battle_script() {
+        if !battle_scripts.start(request) {
+            game.finish_battle_script(request.script_entry);
+        }
         return None;
     }
     if let Some(BattlePhase::Finished(_)) = game.battle().map(|battle| battle.phase()) {

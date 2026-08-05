@@ -213,6 +213,7 @@ fn render_settlement(renderer: &mut Renderer, battle: &BattleState, result: Batt
         BattleResult::Won => "VICTORY",
         BattleResult::Lost => "DEFEAT",
         BattleResult::Fled => "FLED",
+        BattleResult::Terminated => "ENDED",
     };
     draw_debug_text(
         renderer,

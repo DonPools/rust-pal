@@ -133,6 +133,7 @@ pub fn run_game_window<L>(
     let mut show_objects = false;
     let mut show_script = false;
     let auto_scripts = script_table.clone();
+    let mut battle_scripts = ScriptRuntime::new(script_table.clone());
     let mut scripts = ScriptRuntime::new(script_table);
     let mut dialog = None;
     let mut script_services = SessionState::new(auto_scripts, &voc_mkf, &midi_mkf, &sound_font);
@@ -459,8 +460,13 @@ pub fn run_game_window<L>(
                         if sampled.confirm || sampled.cancel || sampled.direction_pressed.is_some()
                         {
                             script_services.waiting_for_key = false;
+                            let active_scripts = if battle_scripts.is_active() {
+                                &mut battle_scripts
+                            } else {
+                                &mut scripts
+                            };
                             advance_script(
-                                &mut scripts,
+                                active_scripts,
                                 &mut game,
                                 &mut dialog,
                                 ScriptRenderResources {
@@ -498,8 +504,13 @@ pub fn run_game_window<L>(
                                 dialog = Some(pending);
                             } else {
                                 dialog = None;
+                                let active_scripts = if battle_scripts.is_active() {
+                                    &mut battle_scripts
+                                } else {
+                                    &mut scripts
+                                };
                                 advance_script(
-                                    &mut scripts,
+                                    active_scripts,
                                     &mut game,
                                     &mut dialog,
                                     ScriptRenderResources {
@@ -512,8 +523,13 @@ pub fn run_game_window<L>(
                                 );
                             }
                         } else if !awaiting_input {
+                            let active_scripts = if battle_scripts.is_active() {
+                                &mut battle_scripts
+                            } else {
+                                &mut scripts
+                            };
                             advance_script(
-                                &mut scripts,
+                                active_scripts,
                                 &mut game,
                                 &mut dialog,
                                 ScriptRenderResources {
@@ -527,7 +543,29 @@ pub fn run_game_window<L>(
                             changed = true;
                         }
                     } else if game.battle().is_some() {
-                        let outcome = update_battle(sampled, &mut game, &mut script_services);
+                        if battle_scripts.is_active() {
+                            advance_script(
+                                &mut battle_scripts,
+                                &mut game,
+                                &mut dialog,
+                                ScriptRenderResources {
+                                    text: &text,
+                                    role_sprites: &role_sprites,
+                                },
+                                &mut load_scene,
+                                &mut script_services,
+                                &mut |title| window.set_title(title),
+                            );
+                            changed = true;
+                            accumulator -= tick;
+                            continue;
+                        }
+                        let outcome = update_battle(
+                            sampled,
+                            &mut game,
+                            &mut script_services,
+                            &mut battle_scripts,
+                        );
                         changed = true;
                         if let Some(outcome) = outcome {
                             if !scripts.resolve_battle(outcome.result) {

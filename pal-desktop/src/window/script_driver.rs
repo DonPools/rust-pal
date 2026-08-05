@@ -367,6 +367,10 @@ pub(super) fn advance_script<L>(
                     percentage,
                     target_entry,
                 } => (game.enemy_hp_above(enemy_index, percentage), target_entry),
+                ScriptCondition::EnemyNotFirstKind {
+                    enemy_index,
+                    target_entry,
+                } => (game.enemy_not_first_kind(enemy_index), target_entry),
             };
             if matches {
                 scripts.branch_to(target_entry);
@@ -381,7 +385,12 @@ pub(super) fn advance_script<L>(
             next_entry,
             succeeded,
         }) => {
-            if trigger.kind == TriggerKind::Item {
+            if trigger.kind == TriggerKind::Battle {
+                if !game.finish_battle_script(next_entry) {
+                    set_title("Rust-PAL [battle script completion failed]");
+                }
+                return;
+            } else if trigger.kind == TriggerKind::Item {
                 if let Some(item_use) = services.item_use.take() {
                     game.finish_item_use(item_use.item_id, next_entry, succeeded);
                     let selected = item_use
@@ -505,6 +514,9 @@ pub(super) fn advance_script<L>(
             entry,
             opcode,
         }) => {
+            if trigger.kind == TriggerKind::Battle {
+                game.finish_battle_script(trigger.script_entry);
+            }
             resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!(
                 "Rust-PAL [unsupported script {entry} {}]",
@@ -512,10 +524,16 @@ pub(super) fn advance_script<L>(
             ));
         }
         Some(ScriptEvent::InvalidEntry { trigger, entry }) => {
+            if trigger.kind == TriggerKind::Battle {
+                game.finish_battle_script(trigger.script_entry);
+            }
             resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!("Rust-PAL [invalid script entry {entry}]"));
         }
         Some(ScriptEvent::InstructionLimit { trigger, entry }) => {
+            if trigger.kind == TriggerKind::Battle {
+                game.finish_battle_script(trigger.script_entry);
+            }
             resume_script_menu_after_error(game, services, trigger.kind);
             set_title(&format!("Rust-PAL [script loop at {entry}]"));
         }
@@ -595,7 +613,7 @@ pub(super) fn resume_script_menu_after_error(
                 });
             }
         }
-        TriggerKind::Search | TriggerKind::Touch => {}
+        TriggerKind::Search | TriggerKind::Touch | TriggerKind::Battle => {}
     }
 }
 
