@@ -7,6 +7,7 @@ use super::menu_state::{update_wrapping_selection, InventoryMenu, InventoryMode}
 use super::session::SessionState;
 
 pub(super) const ACTION_EVENT_TICKS: u16 = 8;
+pub(super) const PLAYER_MAGIC_ANIMATION_EVENT_TICKS: u16 = 22;
 const ROUND_EVENT_TICKS: u16 = 2;
 const FINISHED_EVENT_TICKS: u16 = 4;
 
@@ -34,13 +35,7 @@ pub(super) fn update_battle(
             .unwrap_or_default(),
     );
     if !automatic_events.is_empty() {
-        services.battle_events.extend(automatic_events);
-        let event = *services
-            .battle_events
-            .front()
-            .expect("a newly queued automatic battle event is available");
-        services.battle_event_ticks = battle_event_duration(event);
-        play_battle_event_sounds(game, services, event);
+        queue_battle_events(game, services, automatic_events);
         return None;
     }
     if let Some(request) = game.take_battle_script() {
@@ -81,13 +76,7 @@ pub(super) fn update_battle(
                 .unwrap_or_default()
         };
         if !events.is_empty() {
-            services.battle_events.extend(events);
-            let event = *services
-                .battle_events
-                .front()
-                .expect("a newly queued automatic battle event is available");
-            services.battle_event_ticks = battle_event_duration(event);
-            play_battle_event_sounds(game, services, event);
+            queue_battle_events(game, services, events);
         }
         return None;
     }
@@ -171,13 +160,7 @@ pub(super) fn update_battle(
         Vec::new()
     };
     if !events.is_empty() {
-        services.battle_events.extend(events);
-        let event = *services
-            .battle_events
-            .front()
-            .expect("a newly queued battle event is available");
-        services.battle_event_ticks = battle_event_duration(event);
-        play_battle_event_sounds(game, services, event);
+        queue_battle_events(game, services, events);
     }
 
     if let Some(target) = game
@@ -193,6 +176,23 @@ pub(super) fn update_battle(
     }
 
     None
+}
+
+pub(super) fn queue_battle_events(
+    game: &GameState,
+    services: &mut SessionState,
+    events: impl IntoIterator<Item = BattleEvent>,
+) {
+    let was_empty = services.battle_events.is_empty();
+    services.battle_events.extend(events);
+    if !was_empty {
+        return;
+    }
+    let Some(&event) = services.battle_events.front() else {
+        return;
+    };
+    services.battle_event_ticks = battle_event_duration(event);
+    play_battle_event_sounds(game, services, event);
 }
 
 fn update_battle_item_menu(
@@ -373,6 +373,7 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         | BattleEvent::PlayerUseItem { .. }
         | BattleEvent::PlayerThrowItem { .. }
         | BattleEvent::PlayerFlee { .. } => ACTION_EVENT_TICKS,
+        BattleEvent::PlayerMagicAnimation { .. } => PLAYER_MAGIC_ANIMATION_EVENT_TICKS,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -514,6 +515,13 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
                 Some(vec![Some(player.magic_sound), None, None])
             })
         }
+        BattleEvent::PlayerMagicAnimation {
+            player: Some(player),
+        } => game.battle().and_then(|battle| {
+            let player = battle.players.get(player)?;
+            Some(vec![Some(player.magic_sound), None, None])
+        }),
+        BattleEvent::PlayerMagicAnimation { player: None } => None,
         BattleEvent::PlayerFlee { .. } => Some(vec![Some(45), None, None]),
         BattleEvent::RoundCompleted | BattleEvent::Finished(_) => None,
     }
@@ -559,7 +567,9 @@ mod tests {
         });
         let finished = battle_event_duration(BattleEvent::Finished(BattleResult::Won));
         let round = battle_event_duration(BattleEvent::RoundCompleted);
-        assert_eq!((action, finished, round), (8, 4, 2));
+        let magic_animation =
+            battle_event_duration(BattleEvent::PlayerMagicAnimation { player: Some(0) });
+        assert_eq!((action, magic_animation, finished, round), (8, 22, 4, 2));
     }
 
     #[test]

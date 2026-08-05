@@ -517,6 +517,9 @@ pub enum BattleEvent {
         player: usize,
         succeeded: bool,
     },
+    PlayerMagicAnimation {
+        player: Option<usize>,
+    },
     RoundCompleted,
     Finished(BattleResult),
 }
@@ -2538,6 +2541,17 @@ impl BattleState {
             return false;
         }
         self.magic_blow = amount;
+        true
+    }
+
+    pub fn queue_player_magic_animation(&mut self, player: Option<usize>) -> bool {
+        if self.phase != BattlePhase::AwaitingCommand
+            || player.is_some_and(|player| player >= self.players.len())
+        {
+            return false;
+        }
+        self.pending_events
+            .push_back(BattleEvent::PlayerMagicAnimation { player });
         true
     }
 

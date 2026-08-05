@@ -248,7 +248,7 @@ define_script_opcodes! {
     HalveCash = 0x008F, "CASH_HALF", "Halve the party's cash.", Implemented;
     SetObjectScript = 0x0090, "OBJECT_SCRIPT", "Replace one script field in a global object definition.", Implemented;
     JumpIfEnemyNotFirstKind = 0x0091, "JNOT_FIRST_ENEMY", "Jump when an enemy is not the first living instance of its kind.", Implemented;
-    PlayerMagicAnimation = 0x0092, "MAGIC_ANIM", "Show a player's battle magic-casting animation.", Unsupported;
+    PlayerMagicAnimation = 0x0092, "MAGIC_ANIM", "Show a player's battle magic-casting animation.", Implemented;
     FadeSceneWithUpdate = 0x0093, "SCENE_FADE_UPDATE", "Fade the screen while rebuilding the scene.", Implemented;
     JumpIfObjectStateEquals = 0x0094, "JEQ_OBJ_STATE", "Jump when an event object's state equals operand 1.", Implemented;
     JumpIfSceneEquals = 0x0095, "JEQ_SCENE", "Jump when the current scene equals operand 0.", Implemented;
@@ -598,6 +598,10 @@ pub enum ScriptAction {
     },
     SetBattleBlow {
         amount: i16,
+    },
+    PlayerMagicAnimation {
+        /// Zero-based battle-party index; `None` only runs the party color shift.
+        player: Option<u16>,
     },
     EnableAutoBattle,
     DrainEnemyHp {
@@ -1624,6 +1628,13 @@ impl ScriptRuntime {
                         field: entry.operands[2],
                     }));
                 }
+                PlayerMagicAnimation => {
+                    execution.entry = execution.entry.wrapping_add(1);
+                    self.execution = Some(execution);
+                    return Some(ScriptEvent::Action(ScriptAction::PlayerMagicAnimation {
+                        player: entry.operands[0].checked_sub(1),
+                    }));
+                }
                 DrainEnemyHp => {
                     execution.entry = execution.entry.wrapping_add(1);
                     self.execution = Some(execution);
@@ -2350,8 +2361,7 @@ impl ScriptRuntime {
                     });
                 }
                 // Known original instructions that the trigger runtime does not implement yet.
-                SetEquipmentEffect | EquipItem | ChasePlayer | PlayerMagicAnimation
-                | PlayEndingAnimation => {
+                SetEquipmentEffect | EquipItem | ChasePlayer | PlayEndingAnimation => {
                     self.execution = None;
                     return Some(ScriptEvent::Unsupported {
                         trigger: execution.trigger,
@@ -2473,7 +2483,7 @@ mod tests {
                 counts[index] += 1;
                 counts
             });
-        assert_eq!(support_counts, [163, 0, 2]);
+        assert_eq!(support_counts, [164, 0, 1]);
 
         for hole in [0x0032, 0x0048, 0x0072, 0x009d] {
             assert_eq!(ScriptOpcode::from_raw(hole), None);
@@ -3873,7 +3883,7 @@ mod tests {
     fn reports_unsupported_and_invalid_entries() {
         let mut runtime = ScriptRuntime::new(table(&[
             [0, 0, 0, 0],
-            [ScriptOpcode::PlayerMagicAnimation.raw(), 0, 0, 0],
+            [ScriptOpcode::PlayEndingAnimation.raw(), 0, 0, 0],
         ]));
         runtime.start(trigger(1));
         assert_eq!(
@@ -3881,7 +3891,7 @@ mod tests {
             Some(ScriptEvent::Unsupported {
                 trigger: trigger(1),
                 entry: 1,
-                opcode: ScriptOpcode::PlayerMagicAnimation.raw(),
+                opcode: ScriptOpcode::PlayEndingAnimation.raw(),
             })
         );
 
@@ -3914,6 +3924,29 @@ mod tests {
             runtime.advance(),
             Some(ScriptEvent::Action(ScriptAction::SetBattleBlow {
                 amount: -3
+            }))
+        );
+    }
+
+    #[test]
+    fn yields_optional_player_magic_animation_target() {
+        let mut runtime = ScriptRuntime::new(table(&[
+            [0, 0, 0, 0],
+            [ScriptOpcode::PlayerMagicAnimation.raw(), 2, 0, 0],
+            [ScriptOpcode::PlayerMagicAnimation.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]));
+        runtime.start(trigger(1));
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlayerMagicAnimation {
+                player: Some(1),
+            }))
+        );
+        assert_eq!(
+            runtime.advance(),
+            Some(ScriptEvent::Action(ScriptAction::PlayerMagicAnimation {
+                player: None,
             }))
         );
     }

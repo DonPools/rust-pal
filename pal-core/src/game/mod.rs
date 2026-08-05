@@ -263,6 +263,7 @@ impl<M: CollisionMap> GameState<M> {
                 | BattleEvent::PlayerConfusedAttack { .. }
                 | BattleEvent::SimulatedMagic { .. }
                 | BattleEvent::PlayerFlee { .. }
+                | BattleEvent::PlayerMagicAnimation { .. }
                 | BattleEvent::RoundCompleted
                 | BattleEvent::Finished(_) => {}
             }
@@ -3020,6 +3021,13 @@ impl<M: CollisionMap> GameState<M> {
                     .as_mut()
                     .is_some_and(|battle| battle.set_magic_blow(amount));
             }
+            ScriptAction::PlayerMagicAnimation { player } => {
+                let player = player.map(usize::from);
+                return self
+                    .active_battle
+                    .as_mut()
+                    .is_some_and(|battle| battle.queue_player_magic_animation(player));
+            }
             ScriptAction::EnableAutoBattle => self.auto_battle = true,
             ScriptAction::DrainEnemyHp {
                 enemy_index,
@@ -5509,6 +5517,21 @@ mod tests {
         assert_eq!(state.battle().unwrap().enemies[2].hp, 993);
         assert_eq!(state.transform_enemy(1, 1), Some(true));
         assert_eq!(state.battle().unwrap().enemies[2].hp, 993);
+    }
+
+    #[test]
+    fn scripted_player_magic_animation_uses_zero_based_battle_party_indices() {
+        let mut state = battle_item_state(1);
+        assert!(!state.apply_script_action(ScriptAction::PlayerMagicAnimation { player: Some(1) }));
+        assert!(state.apply_script_action(ScriptAction::PlayerMagicAnimation { player: Some(0) }));
+        assert!(state.apply_script_action(ScriptAction::PlayerMagicAnimation { player: None }));
+        assert_eq!(
+            state.advance_battle_resolution(),
+            vec![
+                BattleEvent::PlayerMagicAnimation { player: Some(0) },
+                BattleEvent::PlayerMagicAnimation { player: None },
+            ]
+        );
     }
 
     #[test]

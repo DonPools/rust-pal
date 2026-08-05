@@ -4,6 +4,7 @@ use pal_core::role::RoleSprites;
 use pal_core::scene::TriggerKind;
 use pal_core::script::{ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
 
+use super::battle_update::queue_battle_events;
 use super::dialog::ActiveDialog;
 use super::dialog_text::dialog_body_lines;
 use super::menu_state::{
@@ -412,6 +413,16 @@ pub(super) fn advance_script<L>(
             if matches {
                 scripts.branch_to(target_entry);
             }
+        }
+        Some(ScriptEvent::Action(
+            action @ pal_core::script::ScriptAction::PlayerMagicAnimation { .. },
+        )) => {
+            if !game.apply_script_action(action) {
+                set_title("Rust-PAL [script target is unavailable]");
+                return;
+            }
+            let events = game.advance_battle_resolution();
+            queue_battle_events(game, services, events);
         }
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");

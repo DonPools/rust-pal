@@ -209,6 +209,34 @@ impl Renderer {
         self.blit_bitmap(&bitmap, dx, dy);
     }
 
+    /// Draw an RLE bitmap after shifting the low palette-index nibble.
+    /// PAL battle flashes clamp that nibble to `0..=15` and preserve its hue bank.
+    pub fn blit_rle_color_shift(&mut self, rle: &RleBitmap, dx: i32, dy: i32, shift: i16) {
+        for sy in 0..i32::from(rle.height) {
+            let y = dy + sy;
+            if y < 0 || y >= self.height as i32 {
+                continue;
+            }
+            for sx in 0..i32::from(rle.width) {
+                let source = sy as usize * usize::from(rle.width) + sx as usize;
+                if !rle.opaque[source] {
+                    continue;
+                }
+                let x = dx + sx;
+                if x < 0 || x >= self.width as i32 {
+                    continue;
+                }
+                let index = rle.pixels[source];
+                let low = (i16::from(index & 0x0f) + shift).clamp(0, 0x0f) as u8;
+                let shifted = (index & 0xf0) | low;
+                let (r, g, b) = self.palette.get_rgb(shifted);
+                let destination = (y as usize * self.width + x as usize) * 4;
+                self.screen[destination..destination + 4].copy_from_slice(&[r, g, b, 255]);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Darken destination pixels under an RLE mask using PAL's palette-index rule.
     pub fn blit_rle_shadow(&mut self, rle: &RleBitmap, dx: i32, dy: i32) {
         for sy in 0..i32::from(rle.height) {
@@ -364,6 +392,21 @@ mod tests {
         assert_eq!(&renderer.screen()[9 * 4..10 * 4], &[252, 0, 0, 255]);
 
         renderer.draw_big5_text(&font, &[0xb8], 0, 0, 1);
+    }
+
+    #[test]
+    fn rle_color_shift_clamps_low_nibble_and_preserves_palette_bank() {
+        let mut palette = Palette::default();
+        palette.colors[0x1f] = PaletteColor { r: 63, g: 0, b: 0 };
+        palette.colors[0x10] = PaletteColor { r: 0, g: 63, b: 0 };
+        let mut renderer = Renderer::new(palette, 1, 1);
+        let high = RleBitmap::decode(&[1, 0, 1, 0, 1, 0x1e]).unwrap();
+        let low = RleBitmap::decode(&[1, 0, 1, 0, 1, 0x11]).unwrap();
+
+        renderer.blit_rle_color_shift(&high, 0, 0, 8);
+        assert_eq!(renderer.screen(), [252, 0, 0, 255]);
+        renderer.blit_rle_color_shift(&low, 0, 0, -8);
+        assert_eq!(renderer.screen(), [0, 252, 0, 255]);
     }
 
     #[test]

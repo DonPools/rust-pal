@@ -571,7 +571,7 @@ pub fn run_game_window<L>(
                             }
                         }
                     } else if game.battle().is_some() {
-                        if battle_scripts.is_active() {
+                        if battle_scripts.is_active() && script_services.battle_events.is_empty() {
                             advance_script(
                                 &mut battle_scripts,
                                 &mut game,

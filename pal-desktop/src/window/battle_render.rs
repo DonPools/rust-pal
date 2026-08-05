@@ -3,7 +3,7 @@ use pal_assets::bitmap::Bitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleState};
 
-use super::battle_update::ACTION_EVENT_TICKS;
+use super::battle_update::{ACTION_EVENT_TICKS, PLAYER_MAGIC_ANIMATION_EVENT_TICKS};
 use super::draw::{draw_debug_text, draw_number, fill_rect, stroke_rect};
 use crate::renderer::Renderer;
 
@@ -149,6 +149,10 @@ pub fn render_battle(
 
     for (index, player) in battle.players.iter().enumerate() {
         let (mut x, mut y) = player_position(battle.players.len(), index);
+        let (magic_x, magic_y, magic_frame, color_shift) =
+            player_magic_animation_state(event, index, event_ticks);
+        x += magic_x;
+        y += magic_y;
         if let Some(BattleEvent::EnemyMagic { blow, .. }) = event {
             let offset = magic_blow_offset(blow, event_ticks);
             x += offset;
@@ -178,15 +182,22 @@ pub fn render_battle(
         }
         let sprite = usize::from(player.battle_sprite_num);
         let available = resources.player_sprites.frame_count(sprite).unwrap_or(0);
-        let frame = if player.is_alive() {
-            0
-        } else {
-            2.min(available.saturating_sub(1))
-        };
+        let frame = magic_frame.unwrap_or_else(|| {
+            if player.is_alive() {
+                0
+            } else {
+                2.min(available.saturating_sub(1))
+            }
+        });
+        let frame = frame.min(available.saturating_sub(1));
         if let Some(bitmap) = resources.player_sprites.decode_frame(sprite, frame) {
             let left = x - i32::from(bitmap.width) / 2;
             let top = y - i32::from(bitmap.height);
-            renderer.blit_rle(&bitmap, left, top);
+            if color_shift == 0 {
+                renderer.blit_rle(&bitmap, left, top);
+            } else {
+                renderer.blit_rle_color_shift(&bitmap, left, top, color_shift);
+            }
             let is_hit = matches!(
                 event,
                 Some(
@@ -251,6 +262,37 @@ fn magic_blow_offset(amount: i16, ticks_remaining: u16) -> i32 {
     offset
 }
 
+fn player_magic_animation_state(
+    event: Option<BattleEvent>,
+    player_index: usize,
+    ticks_remaining: u16,
+) -> (i32, i32, Option<usize>, i16) {
+    let Some(BattleEvent::PlayerMagicAnimation { player }) = event else {
+        return (0, 0, None, 0);
+    };
+    let elapsed = PLAYER_MAGIC_ANIMATION_EVENT_TICKS
+        .saturating_sub(ticks_remaining.min(PLAYER_MAGIC_ANIMATION_EVENT_TICKS));
+    let color_shift = if elapsed >= 17 {
+        i16::try_from((elapsed - 17).min(4) * 2).unwrap_or(8)
+    } else {
+        0
+    };
+    if player != Some(player_index) {
+        return (0, 0, None, color_shift);
+    }
+    let movement_steps = usize::from(elapsed.saturating_add(1).min(4));
+    let x = -[4, 3, 2, 1][..movement_steps].iter().sum::<i32>();
+    let y = -[2, 1, 1, 0][..movement_steps].iter().sum::<i32>();
+    let frame = if elapsed >= 17 {
+        6
+    } else if elapsed >= 6 {
+        5
+    } else {
+        0
+    };
+    (x, y, Some(frame), color_shift)
+}
+
 fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: BattleEvent) {
     let (x, y, damage) = match event {
         BattleEvent::PlayerAttack { enemy, damage, .. }
@@ -288,6 +330,7 @@ fn render_battle_event(renderer: &mut Renderer, battle: &BattleState, event: Bat
         BattleEvent::PlayerUseItem { .. }
         | BattleEvent::PlayerThrowItem { .. }
         | BattleEvent::PlayerFlee { .. }
+        | BattleEvent::PlayerMagicAnimation { .. }
         | BattleEvent::RoundCompleted
         | BattleEvent::Finished(_) => return,
     };
@@ -449,6 +492,32 @@ mod tests {
         assert!(negative.last().is_some_and(|&offset| offset < 0));
         assert!(positive.last().is_some_and(|&offset| offset > 0));
         assert_eq!(magic_blow_offset(0, 1), 0);
+    }
+
+    #[test]
+    fn scripted_magic_animation_moves_selected_player_then_shifts_entire_party() {
+        let event = Some(BattleEvent::PlayerMagicAnimation { player: Some(1) });
+        assert_eq!(
+            player_magic_animation_state(event, 1, 22),
+            (-4, -2, Some(0), 0)
+        );
+        assert_eq!(
+            player_magic_animation_state(event, 1, 16),
+            (-10, -4, Some(5), 0)
+        );
+        assert_eq!(
+            player_magic_animation_state(event, 1, 5),
+            (-10, -4, Some(6), 0)
+        );
+        assert_eq!(player_magic_animation_state(event, 0, 1), (0, 0, None, 8));
+        assert_eq!(
+            player_magic_animation_state(
+                Some(BattleEvent::PlayerMagicAnimation { player: None }),
+                0,
+                1,
+            ),
+            (0, 0, None, 8)
+        );
     }
 
     #[test]

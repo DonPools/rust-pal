@@ -123,6 +123,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     let mut steal_enemy_scripts = 0usize;
     let mut auto_battle_scripts = 0usize;
     let mut battle_blow_amounts = Vec::new();
+    let mut player_magic_animation_players = Vec::new();
     let mut ending_sprite_references = std::collections::BTreeSet::new();
     for index in 0..script_table.len() {
         let entry_index = u16::try_from(index).expect("script table exceeds addressable range");
@@ -232,6 +233,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         auto_battle_scripts += usize::from(entry.opcode == ScriptOpcode::EnableAutoBattle.raw());
         if entry.opcode == ScriptOpcode::BlowEnemiesAway.raw() {
             battle_blow_amounts.push(entry.operands[0] as i16);
+        }
+        if entry.opcode == ScriptOpcode::PlayerMagicAnimation.raw() {
+            player_magic_animation_players.push(entry.operands[0]);
         }
         if entry.opcode == ScriptOpcode::TransformEnemy.raw()
             || (entry.opcode == ScriptOpcode::SummonEnemy.raw()
@@ -367,6 +371,11 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         battle_blow_amounts,
         [-3, -2],
         "real scripts no longer match signed magic-blow coverage"
+    );
+    assert_eq!(
+        player_magic_animation_players,
+        [2],
+        "real scripts no longer match player magic-animation coverage"
     );
     let (usable_item_definitions, throwable_item_definitions) = (0..global_objects.len())
         .filter_map(|index| global_objects.get(u16::try_from(index).ok()?))
@@ -1158,6 +1167,62 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         battle_blow_pixels > 0,
         "signed magic blow did not displace rendered enemies"
     );
+    render_battle(
+        &mut renderer,
+        battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+        },
+        BattleRenderState {
+            selected_enemy: 0,
+            selected_command: 0,
+            ticks: 0,
+            event: Some(pal_core::battle::BattleEvent::PlayerMagicAnimation { player: None }),
+            event_ticks: 1,
+        },
+    );
+    let magic_color_shift_pixels = renderer
+        .screen()
+        .chunks_exact(4)
+        .zip(battle_idle_frame.chunks_exact(4))
+        .filter(|(shifted, idle)| shifted != idle)
+        .count();
+    assert!(
+        magic_color_shift_pixels > 0,
+        "scripted magic animation did not color-shift the party"
+    );
+    render_battle(
+        &mut renderer,
+        battle,
+        BattleRenderResources {
+            enemy_sprites: &enemy_battle_sprites,
+            player_sprites: &player_battle_sprites,
+            backgrounds: &battle_backgrounds,
+            text: &text,
+            font: &font,
+        },
+        BattleRenderState {
+            selected_enemy: 0,
+            selected_command: 0,
+            ticks: 0,
+            event: Some(pal_core::battle::BattleEvent::PlayerMagicAnimation { player: Some(1) }),
+            event_ticks: 5,
+        },
+    );
+    let pre_magic_pixels = renderer
+        .screen()
+        .chunks_exact(4)
+        .zip(battle_idle_frame.chunks_exact(4))
+        .filter(|(casting, idle)| casting != idle)
+        .count();
+    assert!(
+        pre_magic_pixels > 0,
+        "scripted player magic animation did not change the caster frame"
+    );
 
     let mut battle_feedback_pixels = 0;
     for _ in 0..1024 {
@@ -1446,7 +1511,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     println!(
         "battle graphics passed: {} ABC slots, {} F slots, {} screen pixels, {} feedback pixels, \
-         {battle_blow_pixels} blow pixels, {} settlement pixels",
+         {battle_blow_pixels} blow pixels, {magic_color_shift_pixels} color-shift pixels, \
+         {pre_magic_pixels} pre-magic pixels, {} settlement pixels",
         enemy_battle_sprites.len(),
         player_battle_sprites.len(),
         battle_sprite_pixels,
@@ -1490,8 +1556,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     println!(
         "M6 battle command data passed: {collect_enemy_scripts} collection, \
          {transmute_scripts} transmutation, {hide_battle_scripts} hiding, \
-         {steal_enemy_scripts} stealing, {auto_battle_scripts} auto-battle, {} signed magic blows",
+         {steal_enemy_scripts} stealing, {auto_battle_scripts} auto-battle, {} signed magic blows, \
+         {} player magic animation",
         battle_blow_amounts.len(),
+        player_magic_animation_players.len(),
     );
     println!(
         "asset check passed: {visible_pixels} visible pixels, \
