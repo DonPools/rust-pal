@@ -705,6 +705,16 @@ pub fn run_game_window<L>(
                             }
                         }
                     }
+                    let script_is_paused = (!scripts.is_active() && !battle_scripts.is_active())
+                        || dialog.is_some()
+                        || script_services.waiting_for_key
+                        || script_services.field_menu.is_some()
+                        || script_services.inventory_menu.is_some()
+                        || script_services.confirmation_menu.is_some()
+                        || script_services.shop_menu.is_some();
+                    if script_is_paused && script_services.visual.queue_automatic_scene_fade_in() {
+                        changed = true;
+                    }
                     accumulator -= tick;
                 }
                 if dialog.is_none()

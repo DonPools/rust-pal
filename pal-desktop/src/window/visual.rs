@@ -20,6 +20,7 @@ pub(super) struct VisualState {
     brightness: u8,
     tint_color: (u8, u8, u8),
     tint_amount: u8,
+    needs_scene_fade_in: bool,
     screen_wave: i32,
     wave_progression: i16,
     wave_phase: i16,
@@ -93,6 +94,7 @@ impl VisualState {
             brightness: 64,
             tint_color: (0, 0, 0),
             tint_amount: 0,
+            needs_scene_fade_in: false,
             screen_wave: 0,
             wave_progression: 0,
             wave_phase: 0,
@@ -130,6 +132,21 @@ impl VisualState {
             )
     }
 
+    /// Start the implicit fade performed by the original scene renderer after
+    /// opcode 0x0050. Explicit script effects get the first chance to consume
+    /// the pending fade; this path runs only once script execution pauses.
+    pub(super) fn queue_automatic_scene_fade_in(&mut self) -> bool {
+        if !self.needs_scene_fade_in || self.is_blocking() {
+            return false;
+        }
+        self.needs_scene_fade_in = false;
+        self.indexed_screen = None;
+        self.rgba_screen = None;
+        self.ending_effect_sprite = 0;
+        self.pending = Some(ScriptVisual::FadeIn { speed: 1 });
+        true
+    }
+
     pub(super) fn restore_original_environment(&mut self, night: bool, screen_wave: u16) {
         self.pending = None;
         self.effect = None;
@@ -140,6 +157,7 @@ impl VisualState {
         self.backup_screen = None;
         self.brightness = 64;
         self.tint_amount = 0;
+        self.needs_scene_fade_in = false;
         self.screen_wave = i32::from(screen_wave);
         self.wave_progression = 0;
         self.wave_phase = 0;
@@ -202,6 +220,7 @@ impl VisualState {
                 end_frame,
                 speed,
             } => {
+                self.needs_scene_fade_in = false;
                 let animation_index = usize::from(animation);
                 let animation_data = rng
                     .animation(animation_index)
@@ -233,6 +252,7 @@ impl VisualState {
                 });
             }
             ScriptVisual::FadeOut { speed } => {
+                self.needs_scene_fade_in = true;
                 self.effect = Some(VisualEffect::Fade {
                     start: self.brightness,
                     end: 0,
@@ -242,6 +262,7 @@ impl VisualState {
                 });
             }
             ScriptVisual::FadeIn { speed } => {
+                self.needs_scene_fade_in = false;
                 self.brightness = 0;
                 self.effect = Some(VisualEffect::Fade {
                     start: 0,
@@ -284,6 +305,7 @@ impl VisualState {
                 from_color,
                 delay,
             } => {
+                self.needs_scene_fade_in = false;
                 let color = self.palette(palettes)?.get_rgb(color);
                 let (start, end) = if from_color { (64, 0) } else { (0, 64) };
                 self.tint_color = color;
@@ -305,6 +327,7 @@ impl VisualState {
                 self.rgba_screen = Some(backup);
             }
             ScriptVisual::FadeSceneWithUpdate { step } => {
+                self.needs_scene_fade_in = step < 0;
                 self.indexed_screen = None;
                 self.rgba_screen = None;
                 let magnitude = u32::from(step.unsigned_abs().max(1));
@@ -321,6 +344,7 @@ impl VisualState {
                 });
             }
             ScriptVisual::FadeToCurrentScene { speed } => {
+                self.needs_scene_fade_in = false;
                 self.indexed_screen = None;
                 self.rgba_screen = None;
                 self.effect = Some(VisualEffect::CrossFade {
@@ -331,6 +355,7 @@ impl VisualState {
                 });
             }
             ScriptVisual::ScrollFbp { index, speed } => {
+                self.needs_scene_fade_in = false;
                 let target = fbp
                     .frame(usize::from(index))
                     .ok_or_else(|| format!("FBP picture {index} is unavailable"))?;
@@ -360,6 +385,7 @@ impl VisualState {
                 self.start_fbp(index, fade, current_screen, fbp)?;
             }
             ScriptVisual::PlayEndingAnimation => {
+                self.needs_scene_fade_in = false;
                 let upper = fbp
                     .frame(61)
                     .ok_or_else(|| "ending FBP picture 61 is unavailable".to_owned())?;
@@ -1073,6 +1099,7 @@ mod tests {
         }
         assert_eq!(ticks, 12);
         assert_eq!(visual.brightness, 0);
+        assert!(visual.needs_scene_fade_in);
 
         assert!(visual.queue(ScriptVisual::FadeIn { speed: 1 }));
         while visual.is_blocking() {
@@ -1081,6 +1108,37 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(visual.brightness, 64);
+        assert!(!visual.needs_scene_fade_in);
+    }
+
+    #[test]
+    fn completed_fade_out_automatically_reveals_the_next_scene() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![0; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+        assert!(visual.queue(ScriptVisual::ShowFbp { index: 0, fade: 0 }));
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+        assert!(visual.indexed_screen.is_some());
+        assert!(visual.queue(ScriptVisual::FadeOut { speed: 1 }));
+        while visual.is_blocking() {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+        }
+        assert_eq!(visual.brightness, 0);
+
+        assert!(visual.queue_automatic_scene_fade_in());
+        assert!(visual.indexed_screen.is_none());
+        while visual.is_blocking() {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+        }
+        assert_eq!(visual.brightness, 64);
+        assert!(!visual.needs_scene_fade_in);
+        assert!(!visual.queue_automatic_scene_fade_in());
     }
 
     #[test]
