@@ -314,6 +314,12 @@ impl Renderer {
         self.dirty = true;
     }
 
+    /// Draw one opaque palette-colored pixel, including palette index zero.
+    pub fn put_opaque_pixel(&mut self, x: i32, y: i32, palette_index: u8) {
+        let (r, g, b) = self.palette.get_rgb(palette_index);
+        self.put_rgba(x, y, [r, g, b, 255]);
+    }
+
     /// Draw one debug pixel in a fixed RGBA color, clipped to the framebuffer.
     pub fn put_rgba(&mut self, x: i32, y: i32, color: [u8; 4]) {
         let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {

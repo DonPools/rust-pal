@@ -1350,6 +1350,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: battle.first_living_enemy().unwrap_or(0),
@@ -1393,6 +1394,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: 0,
@@ -1419,6 +1421,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: 0,
@@ -1478,6 +1481,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: 0,
@@ -1513,6 +1517,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: 0,
@@ -1548,6 +1553,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: 0,
@@ -1613,6 +1619,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                         text: &text,
                         font: &font,
                         ui_sprites: &ui_sprites,
+                        cash: game.cash,
                     },
                     BattleRenderState {
                         selected_enemy: battle.first_living_enemy().unwrap_or(0),
@@ -1699,6 +1706,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             text: &text,
             font: &font,
             ui_sprites: &ui_sprites,
+            cash: game.cash,
         },
         BattleRenderState {
             selected_enemy: 0,
@@ -1712,13 +1720,19 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             kept_effects: &[],
         },
     );
-    let settlement_border_pixels = renderer
+    let settlement_overlay_pixels = renderer
         .screen()
         .chunks_exact(4)
-        .filter(|pixel| *pixel == [224, 216, 168, 255])
+        .zip(background_only.chunks_exact(4))
+        .enumerate()
+        .filter(|(index, (settlement, background))| {
+            let x = index % 320;
+            let y = index / 320;
+            (50..270).contains(&x) && (55..140).contains(&y) && settlement != background
+        })
         .count();
     assert!(
-        settlement_border_pixels > 0,
+        settlement_overlay_pixels > 0,
         "battle settlement overlay did not render"
     );
     let cash_before_battle = game.cash;
@@ -1976,7 +1990,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         player_battle_sprites.len(),
         battle_sprite_pixels,
         battle_feedback_pixels,
-        settlement_border_pixels,
+        settlement_overlay_pixels,
     );
     println!("SoundFont data passed: {} bytes", sound_font.len());
     println!(

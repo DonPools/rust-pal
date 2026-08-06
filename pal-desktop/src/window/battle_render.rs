@@ -5,7 +5,7 @@ use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::{
     BattleEvent, BattleMagic, BattleMagicVisual, BattlePhase, BattleResult, BattleState,
-    BattleTarget,
+    BattleStatus, BattleTarget,
 };
 
 use super::battle_timing::{
@@ -14,7 +14,10 @@ use super::battle_timing::{
     MagicEventTimeline,
 };
 use super::battle_update::{ACTION_EVENT_TICKS, PLAYER_MAGIC_ANIMATION_EVENT_TICKS};
-use super::draw::{draw_number, fill_rect, stroke_rect};
+use super::draw::draw_number;
+use super::menu_render::{
+    draw_cursor, draw_single_line_box, draw_slash, draw_ui_box_with_shadow, selected_color,
+};
 use crate::renderer::Renderer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,7 @@ pub struct BattleRenderResources<'a> {
     pub text: &'a TextLibrary,
     pub font: &'a BitmapFont,
     pub ui_sprites: &'a [RleBitmap],
+    pub cash: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -80,7 +84,6 @@ pub struct BattleRenderState<'a> {
 #[derive(Clone)]
 pub(super) enum BattleSettlementPage {
     LevelUp {
-        role_id: u16,
         before: Box<PlayerRole>,
         after: Box<PlayerRole>,
     },
@@ -100,6 +103,7 @@ pub(super) struct PostBattlePresentation {
     pub(super) result: BattleResult,
     pub(super) pages: Vec<BattleSettlementPage>,
     pub(super) page: usize,
+    pub(super) ticks_remaining: u16,
 }
 
 impl PostBattlePresentation {
@@ -544,6 +548,7 @@ pub fn render_battle(
             resources.text,
             resources.font,
             ticks,
+            resources.cash,
         );
     }
     if event.is_none() {
@@ -1103,36 +1108,48 @@ fn render_settlement(
         return;
     }
     let rewards = battle.rewards();
-    fill_rect(renderer, 76, 58, 168, 74, [8, 16, 32, 245]);
-    stroke_rect(renderer, 76, 58, 168, 74, [224, 216, 168, 255]);
-    if let Some(label) = text.word(30) {
-        renderer.draw_big5_text_shadowed(font, label, 94, 70, 0x4f);
+    if rewards.experience == 0 {
+        return;
+    }
+    let experience_label = text.word(30);
+    let experience_box_length = experience_label.map_or(7, |label| text_columns(label) + 3);
+    let experience_offset = (i32::try_from(experience_box_length).unwrap_or(8) - 8) * 8;
+    draw_single_line_box(
+        renderer,
+        ui_sprites,
+        83 - experience_offset,
+        60,
+        experience_box_length,
+    );
+    draw_single_line_box(renderer, ui_sprites, 65, 105, 10);
+    if let Some(label) = experience_label {
+        renderer.draw_big5_text(font, label, 95 - experience_offset, 70, 0);
     }
     draw_ui_number(
         renderer,
         ui_sprites,
         rewards.experience,
         5,
-        182,
+        182 + experience_offset,
         74,
         19,
         [240, 224, 96, 255],
     );
     if let Some(label) = text.word(9) {
-        renderer.draw_big5_text_shadowed(font, label, 78, 108, 0x4f);
+        renderer.draw_big5_text(font, label, 77, 115, 0);
     }
-    draw_ui_number(
+    draw_ui_number_mid(
         renderer,
         ui_sprites,
         rewards.cash,
         5,
-        144,
-        112,
+        162,
+        119,
         19,
         [240, 224, 96, 255],
     );
     if let Some(label) = text.word(10) {
-        renderer.draw_big5_text_shadowed(font, label, 198, 108, 0x4f);
+        renderer.draw_big5_text(font, label, 197, 115, 0);
     }
 }
 
@@ -1147,92 +1164,202 @@ pub(super) fn render_post_battle_page(
         return;
     };
     match page {
-        BattleSettlementPage::LevelUp {
-            role_id,
-            before,
-            after,
-        } => {
-            fill_rect(renderer, 70, 4, 180, 188, [8, 16, 32, 250]);
-            stroke_rect(renderer, 70, 4, 180, 188, [224, 216, 168, 255]);
-            if let Some(name) = text.word(usize::from(after.name_word_id)) {
-                renderer.draw_big5_text_shadowed(font, name, 86, 12, 0x4f);
-            }
-            if let Some(level) = text.word(48) {
-                renderer.draw_big5_text_shadowed(font, level, 142, 12, 0xbb);
-            }
-            if let Some(label) = text.word(32) {
-                renderer.draw_big5_text_shadowed(font, label, 192, 12, 0x2d);
-            }
-            let rows = [
-                (48usize, before.level, after.level),
-                (49, before.max_hp, after.max_hp),
-                (50, before.max_mp, after.max_mp),
-                (51, before.attack_strength, after.attack_strength),
-                (52, before.magic_strength, after.magic_strength),
-                (53, before.defense, after.defense),
-                (54, before.dexterity, after.dexterity),
-                (55, before.flee_rate, after.flee_rate),
-            ];
-            for (row, (label, old, new)) in rows.into_iter().enumerate() {
-                let y = 40 + i32::try_from(row).unwrap_or(0) * 18;
-                if let Some(label) = text.word(label) {
-                    renderer.draw_big5_text_shadowed(font, label, 86, y, 0xbb);
+        BattleSettlementPage::LevelUp { before, after } => {
+            let property_length = (48usize..=55)
+                .filter_map(|word| text.word(word))
+                .map(text_columns)
+                .max()
+                .unwrap_or(2)
+                .saturating_sub(2);
+            let offset_x = -8 * i32::try_from(property_length).unwrap_or(0);
+            draw_single_line_box(renderer, ui_sprites, offset_x + 80, 0, property_length + 10);
+            draw_ui_box_with_shadow(
+                renderer,
+                ui_sprites,
+                offset_x + 82,
+                32,
+                7,
+                property_length + 8,
+                1,
+                6,
+            );
+            let mut title_x = 110;
+            for word in [usize::from(after.name_word_id), 48, 32] {
+                if let Some(label) = text.word(word) {
+                    renderer.draw_big5_text(font, label, title_x, 10, 0);
+                    title_x += i32::try_from(big5_text_width(label)).unwrap_or(0);
                 }
+            }
+            for (row, label) in (48usize..=55).enumerate() {
+                let y = 44 + i32::try_from(row).unwrap_or(0) * 18;
+                if let Some(label) = text.word(label) {
+                    renderer.draw_big5_text_shadowed(font, label, offset_x + 100, y, 0xbb);
+                }
+                if let Some(arrow) = ui_sprites.get(47) {
+                    renderer.blit_rle(arrow, 180 - offset_x, 48 + row as i32 * 18);
+                }
+            }
+
+            draw_ui_number(
+                renderer,
+                ui_sprites,
+                u32::from(before.level),
+                4,
+                133 - offset_x,
+                47,
+                19,
+                [240, 224, 96, 255],
+            );
+            draw_ui_number(
+                renderer,
+                ui_sprites,
+                u32::from(after.level),
+                4,
+                195 - offset_x,
+                47,
+                19,
+                [240, 224, 96, 255],
+            );
+            for (row, (old_current, old_max, new_current, new_max)) in [
+                (before.hp, before.max_hp, after.hp, after.max_hp),
+                (before.mp, before.max_mp, after.mp, after.max_mp),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let current_y = 64 + row as i32 * 18;
+                let max_y = 68 + row as i32 * 18;
+                draw_ui_number(
+                    renderer,
+                    ui_sprites,
+                    u32::from(old_current),
+                    4,
+                    133 - offset_x,
+                    current_y,
+                    19,
+                    [240, 224, 96, 255],
+                );
+                draw_ui_number(
+                    renderer,
+                    ui_sprites,
+                    u32::from(old_max),
+                    4,
+                    154 - offset_x,
+                    max_y,
+                    29,
+                    [144, 184, 240, 255],
+                );
+                draw_slash(renderer, ui_sprites, 156 - offset_x, 66 + row as i32 * 18);
+                draw_ui_number(
+                    renderer,
+                    ui_sprites,
+                    u32::from(new_current),
+                    4,
+                    195 - offset_x,
+                    current_y,
+                    19,
+                    [240, 224, 96, 255],
+                );
+                draw_ui_number(
+                    renderer,
+                    ui_sprites,
+                    u32::from(new_max),
+                    4,
+                    216 - offset_x,
+                    max_y,
+                    29,
+                    [144, 184, 240, 255],
+                );
+                draw_slash(renderer, ui_sprites, 218 - offset_x, 66 + row as i32 * 18);
+            }
+            for (row, (old, new)) in [
+                (before.attack_strength, after.attack_strength),
+                (before.magic_strength, after.magic_strength),
+                (before.defense, after.defense),
+                (before.dexterity, after.dexterity),
+                (before.flee_rate, after.flee_rate),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let y = 101 + row as i32 * 18;
                 draw_ui_number(
                     renderer,
                     ui_sprites,
                     u32::from(old),
                     4,
-                    140,
-                    y + 3,
+                    133 - offset_x,
+                    y,
                     19,
                     [240, 224, 96, 255],
                 );
-                if let Some(arrow) = ui_sprites.get(47) {
-                    renderer.blit_rle(arrow, 174, y + 1);
-                }
                 draw_ui_number(
                     renderer,
                     ui_sprites,
                     u32::from(new),
                     4,
-                    196,
-                    y + 3,
+                    195 - offset_x,
+                    y,
                     19,
                     [240, 224, 96, 255],
                 );
             }
-            let _ = role_id;
         }
         BattleSettlementPage::AttributeGrowth {
             role_id,
             label,
             amount,
         } => {
-            fill_rect(renderer, 72, 60, 176, 52, [8, 16, 32, 250]);
-            stroke_rect(renderer, 72, 60, 176, 52, [224, 216, 168, 255]);
             let name_word = presentation
                 .battle
                 .players
                 .iter()
                 .find(|player| player.role_id == *role_id)
                 .map(|player| player.name_word_id);
-            if let Some(name) = name_word.and_then(|word| text.word(usize::from(word))) {
-                renderer.draw_big5_text_shadowed(font, name, 84, 72, 0x4f);
-            }
-            if let Some(label) = text.word(*label) {
-                renderer.draw_big5_text_shadowed(font, label, 132, 72, 0xbb);
-            }
-            if let Some(up) = text.word(32) {
-                renderer.draw_big5_text_shadowed(font, up, 184, 72, 0x2d);
+            let max_name_width = presentation
+                .battle
+                .players
+                .iter()
+                .filter_map(|player| text.word(usize::from(player.name_word_id)))
+                .map(text_columns)
+                .max()
+                .unwrap_or(3);
+            let max_property_width = (48usize..=55)
+                .filter_map(|word| text.word(word))
+                .map(text_columns)
+                .max()
+                .unwrap_or(2)
+                .saturating_sub(1);
+            let property_length = max_property_width.saturating_sub(1);
+            let offset_x = -8 * i32::try_from(property_length).unwrap_or(0);
+            let up_width = text.word(32).map_or(1, |up| big5_text_width(up) / 32);
+            draw_single_line_box(
+                renderer,
+                ui_sprites,
+                offset_x + 78,
+                60,
+                max_name_width + max_property_width + up_width + 4,
+            );
+            let mut message_x = offset_x + 90;
+            for word in [name_word.map(usize::from), Some(*label), Some(32)]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(part) = text.word(word) {
+                    renderer.draw_big5_text(font, part, message_x, 70, 0);
+                    message_x += i32::try_from(big5_text_width(part)).unwrap_or(0);
+                }
             }
             draw_ui_number(
                 renderer,
                 ui_sprites,
                 u32::from(*amount),
                 3,
-                190,
-                94,
+                183 + i32::try_from(max_name_width + max_property_width)
+                    .unwrap_or(3)
+                    .saturating_sub(3)
+                    * 8,
+                74,
                 19,
                 [240, 224, 96, 255],
             );
@@ -1241,22 +1368,41 @@ pub(super) fn render_post_battle_page(
             role_id,
             magic_object,
         } => {
-            fill_rect(renderer, 54, 94, 212, 42, [8, 16, 32, 250]);
-            stroke_rect(renderer, 54, 94, 212, 42, [224, 216, 168, 255]);
             let name_word = presentation
                 .battle
                 .players
                 .iter()
                 .find(|player| player.role_id == *role_id)
                 .map(|player| player.name_word_id);
-            if let Some(name) = name_word.and_then(|word| text.word(usize::from(word))) {
-                renderer.draw_big5_text_shadowed(font, name, 66, 108, 0x4f);
+            let name = name_word.and_then(|word| text.word(usize::from(word)));
+            let learned = text.word(33);
+            let magic = text.word(usize::from(*magic_object));
+            let name_width = name.map_or(3, text_columns).max(3);
+            let learned_width = learned.map_or(2, text_columns).max(2);
+            let magic_width = magic.map_or(5, text_columns).max(5);
+            let total_width = name_width + learned_width + magic_width;
+            let offset = (i32::try_from(total_width).unwrap_or(10) - 10) * 8;
+            draw_single_line_box(renderer, ui_sprites, 65 - offset, 105, total_width);
+            if let Some(name) = name {
+                renderer.draw_big5_text(font, name, 75 - offset, 115, 0);
             }
-            if let Some(label) = text.word(33) {
-                renderer.draw_big5_text_shadowed(font, label, 118, 108, 0x4f);
+            if let Some(learned) = learned {
+                renderer.draw_big5_text(
+                    font,
+                    learned,
+                    75 + i32::try_from(name_width).unwrap_or(3) * 16 - offset,
+                    115,
+                    0,
+                );
             }
-            if let Some(magic) = text.word(usize::from(*magic_object)) {
-                renderer.draw_big5_text_shadowed(font, magic, 174, 108, 0x1b);
+            if let Some(magic) = magic {
+                renderer.draw_big5_text(
+                    font,
+                    magic,
+                    75 + i32::try_from(name_width + learned_width).unwrap_or(5) * 16 - offset,
+                    115,
+                    0x1b,
+                );
             }
         }
     }
@@ -1273,6 +1419,7 @@ fn render_status(
     text: &TextLibrary,
     font: &BitmapFont,
     ticks: u64,
+    cash: u32,
 ) {
     for (index, player) in battle.players.iter().enumerate() {
         let x = 91 + i32::try_from(index).unwrap_or(0) * 77;
@@ -1337,7 +1484,6 @@ fn render_status(
             [96, 224, 240, 255],
         );
         if player.is_alive() {
-            use pal_core::battle::BattleStatus;
             for (status, word, dx, dy, color) in [
                 (BattleStatus::Confused, 0x1d, 35, 19, 0x5f),
                 (BattleStatus::Paralyzed, 0x1b, 44, 12, 0xbf),
@@ -1377,49 +1523,99 @@ fn render_status(
         }
     }
 
+    let magic_enabled = battle.active_player().is_some_and(|active| {
+        !battle.players[active]
+            .statuses
+            .is_active(BattleStatus::Silence)
+    });
     let cooperative_magic_enabled = battle.can_use_cooperative_magic();
     for (index, (sprite_index, x, y)) in BATTLE_COMMAND_ICONS.into_iter().enumerate() {
         let Some(sprite) = ui_sprites.get(sprite_index) else {
             continue;
         };
-        let enabled = index != 2 || cooperative_magic_enabled;
-        if matches!(menu, BattleMenuState::Main) && index == selected_command && enabled {
+        if matches!(menu, BattleMenuState::TargetEnemy { .. }) {
+            continue;
+        }
+        let enabled = match index {
+            1 => magic_enabled,
+            2 => cooperative_magic_enabled,
+            _ => true,
+        };
+        if !matches!(menu, BattleMenuState::TargetPlayer { .. })
+            && index == selected_command
+            && enabled
+        {
             renderer.blit_rle(sprite, x, y);
-        } else {
+        } else if enabled {
             renderer.blit_rle_mono(sprite, x, y, 0, -4);
+        } else {
+            renderer.blit_rle_mono(sprite, x, y, 0x10, -4);
         }
     }
 
     match menu {
         BattleMenuState::Main | BattleMenuState::TargetEnemy { .. } => {}
         BattleMenuState::Magic { selected } => {
-            fill_rect(renderer, 5, 42, 310, 96, [8, 16, 32, 235]);
-            stroke_rect(renderer, 5, 42, 310, 96, [184, 196, 224, 255]);
+            draw_ui_box_with_shadow(renderer, ui_sprites, 10, 42, 4, 16, 1, 0);
+            draw_single_line_box(renderer, ui_sprites, 0, 0, 5);
+            if let Some(label) = text.word(21) {
+                renderer.draw_big5_text(font, label, 10, 10, 0);
+            }
+            draw_ui_number(
+                renderer,
+                ui_sprites,
+                cash,
+                6,
+                49,
+                14,
+                19,
+                [240, 224, 96, 255],
+            );
+            draw_single_line_box(renderer, ui_sprites, 215, 0, 5);
             let Some(player) = battle
                 .active_player()
                 .and_then(|active| battle.players.get(active))
             else {
                 return;
             };
-            for (index, magic) in player.magics.iter().enumerate() {
-                let column = index % 3;
-                let row = (index / 3) % 5;
-                let page = selected / 15;
-                if index / 15 != page {
-                    continue;
-                }
-                let x = 18 + i32::try_from(column).unwrap_or(0) * 100;
-                let y = 51 + i32::try_from(row).unwrap_or(0) * 17;
+            if let Some(magic) = player
+                .magics
+                .get(selected.min(player.magics.len().saturating_sub(1)))
+            {
+                draw_ui_number(
+                    renderer,
+                    ui_sprites,
+                    u32::from(magic.mp_cost),
+                    4,
+                    230,
+                    14,
+                    19,
+                    [240, 224, 96, 255],
+                );
+            }
+            draw_slash(renderer, ui_sprites, 260, 14);
+            draw_ui_number(
+                renderer,
+                ui_sprites,
+                u32::from(player.mp),
+                4,
+                265,
+                14,
+                56,
+                [96, 224, 240, 255],
+            );
+
+            let first = selected.saturating_div(3).saturating_sub(2) * 3;
+            for (visible_index, magic) in player.magics.iter().skip(first).take(15).enumerate() {
+                let index = first + visible_index;
+                let column = visible_index % 3;
+                let row = visible_index / 3;
+                let x = 35 + i32::try_from(column).unwrap_or(0) * 87;
+                let y = 54 + i32::try_from(row).unwrap_or(0) * 18;
                 if let Some(name) = text.word(usize::from(magic.object_id)) {
-                    let enabled = player.mp >= magic.mp_cost;
+                    let enabled = magic_enabled && player.mp >= magic.mp_cost;
                     let color = match (index == selected, enabled) {
-                        (true, true) => {
-                            if ticks & 1 == 0 {
-                                0x2d
-                            } else {
-                                0x4f
-                            }
-                        }
+                        (true, true) => selected_color(ticks),
                         (true, false) => 0x1c,
                         (false, true) => 0x4f,
                         (false, false) => 0x18,
@@ -1427,22 +1623,14 @@ fn render_status(
                     renderer.draw_big5_text_shadowed(font, name, x, y, color);
                 }
                 if index == selected {
-                    draw_ui_number(
-                        renderer,
-                        ui_sprites,
-                        u32::from(magic.mp_cost),
-                        3,
-                        276,
-                        127,
-                        19,
-                        [240, 224, 96, 255],
-                    );
+                    draw_cursor(renderer, ui_sprites, x + 25, y + 10);
                 }
             }
         }
         BattleMenuState::Misc { selected } => {
             render_word_menu(
                 renderer,
+                ui_sprites,
                 text,
                 font,
                 &[56, 57, 58, 59, 60],
@@ -1453,7 +1641,17 @@ fn render_status(
             );
         }
         BattleMenuState::ItemSubmenu { selected } => {
-            render_word_menu(renderer, text, font, &[23, 24], selected, 30, 50, ticks);
+            render_word_menu(
+                renderer,
+                ui_sprites,
+                text,
+                font,
+                &[23, 24],
+                selected,
+                30,
+                50,
+                ticks,
+            );
         }
         BattleMenuState::TargetPlayer { command, selected } => {
             if let BattlePendingCommand::Magic(magic) = command {
@@ -1468,15 +1666,14 @@ fn render_status(
             }
             let _ = selected;
         }
-        BattleMenuState::Status { selected } => {
-            render_battle_player_status(renderer, battle, text, font, ui_sprites, selected);
-        }
+        BattleMenuState::Status { .. } => {}
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_word_menu(
     renderer: &mut Renderer,
+    ui_sprites: &[RleBitmap],
     text: &TextLibrary,
     font: &BitmapFont,
     words: &[usize],
@@ -1485,19 +1682,30 @@ fn render_word_menu(
     y: i32,
     ticks: u64,
 ) {
-    let height = i32::try_from(words.len()).unwrap_or(0) * 18 + 12;
-    fill_rect(renderer, x, y, 96, height, [8, 16, 32, 240]);
-    stroke_rect(renderer, x, y, 96, height, [184, 196, 224, 255]);
+    let columns = words
+        .iter()
+        .filter_map(|&word| text.word(word))
+        .map(big5_text_width)
+        .max()
+        .unwrap_or(16)
+        .saturating_add(8)
+        / 16;
+    draw_ui_box_with_shadow(
+        renderer,
+        ui_sprites,
+        x,
+        y,
+        words.len().saturating_sub(1),
+        columns.saturating_sub(1),
+        0,
+        6,
+    );
     for (index, &word) in words.iter().enumerate() {
         let Some(label) = text.word(word) else {
             continue;
         };
         let color = if index == selected {
-            if ticks & 1 == 0 {
-                0x2d
-            } else {
-                0x4f
-            }
+            selected_color(ticks)
         } else {
             0x4f
         };
@@ -1505,56 +1713,31 @@ fn render_word_menu(
             font,
             label,
             x + 14,
-            y + 7 + i32::try_from(index).unwrap_or(0) * 18,
+            y + 12 + i32::try_from(index).unwrap_or(0) * 18,
             color,
         );
     }
 }
 
-fn render_battle_player_status(
-    renderer: &mut Renderer,
-    battle: &BattleState,
-    text: &TextLibrary,
-    font: &BitmapFont,
-    ui_sprites: &[RleBitmap],
-    selected: usize,
-) {
-    let Some(player) = battle.players.get(selected) else {
-        return;
-    };
-    fill_rect(renderer, 62, 12, 196, 142, [8, 16, 32, 248]);
-    stroke_rect(renderer, 62, 12, 196, 142, [240, 224, 96, 255]);
-    if let Some(name) = text.word(usize::from(player.name_word_id)) {
-        renderer.draw_big5_text_shadowed(font, name, 82, 23, 0x4f);
-    }
-    for (row, (label, value)) in [
-        (48usize, player.level),
-        (49, player.hp),
-        (50, player.mp),
-        (51, player.attack_strength),
-        (52, player.magic_strength),
-        (53, player.defense),
-        (54, player.dexterity),
-        (55, player.flee_rate),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let y = 43 + i32::try_from(row).unwrap_or(0) * 13;
-        if let Some(label) = text.word(label) {
-            renderer.draw_big5_text_shadowed(font, label, 84, y, 0xbb);
+fn big5_text_width(text: &[u8]) -> usize {
+    let mut width = 0usize;
+    let mut index = 0usize;
+    while index < text.len() {
+        if text[index] < 0x80 {
+            width = width.saturating_add(8);
+            index += 1;
+        } else if index + 1 < text.len() {
+            width = width.saturating_add(16);
+            index += 2;
+        } else {
+            break;
         }
-        draw_ui_number(
-            renderer,
-            ui_sprites,
-            u32::from(value),
-            4,
-            220,
-            y + 2,
-            19,
-            [240, 224, 96, 255],
-        );
     }
+    width
+}
+
+fn text_columns(text: &[u8]) -> usize {
+    big5_text_width(text).saturating_add(8) >> 4
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1582,6 +1765,39 @@ fn draw_ui_number(
             y,
         );
         draw_x += 6;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ui_number_mid(
+    renderer: &mut Renderer,
+    ui_sprites: &[RleBitmap],
+    value: u32,
+    length: usize,
+    x: i32,
+    y: i32,
+    sprite_base: usize,
+    fallback: [u8; 4],
+) {
+    let digits = value.to_string();
+    let visible = &digits[digits.len().saturating_sub(length)..];
+    let draw_x = x + i32::try_from(length.saturating_sub(visible.len())).unwrap_or(0) * 3;
+    if ui_sprites.get(sprite_base + 9).is_none() {
+        draw_number(
+            renderer,
+            value,
+            draw_x + i32::try_from(visible.len()).unwrap_or(0) * 6,
+            y,
+            fallback,
+        );
+        return;
+    }
+    for (index, digit) in visible.bytes().enumerate() {
+        renderer.blit_rle(
+            &ui_sprites[sprite_base + usize::from(digit - b'0')],
+            draw_x + i32::try_from(index).unwrap_or(0) * 6,
+            y,
+        );
     }
 }
 

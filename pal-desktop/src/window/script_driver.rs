@@ -180,6 +180,7 @@ fn advance_script_with_budget<L>(
                 services.battle_kept_effects.clear();
                 services.battle_effect_sound_count = 0;
                 services.battle_feedback_sound_played = false;
+                services.battle_settlement_ticks = None;
                 if game.current_battle_music == 0 {
                     services.music.stop();
                 } else if !services.music.play(game.current_battle_music, true, 0) {

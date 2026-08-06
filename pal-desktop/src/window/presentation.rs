@@ -17,7 +17,7 @@ use super::debug_render::{focused_debug_object, render_collision_overlay, render
 use super::dialog::{render_dialog, ActiveDialog};
 use super::menu_render::{
     render_confirmation_menu, render_field_menu, render_inventory_menu, render_opening_menu,
-    render_shop_menu,
+    render_shop_menu, render_status_menu,
 };
 use super::menu_state::{ConfirmationMenu, FieldMenu, InventoryMenu, OpeningMenu, ShopMenu};
 use super::opening_intro::OpeningIntro;
@@ -132,6 +132,7 @@ pub(super) fn render_game(
                     text: ui.text,
                     font: ui.font,
                     ui_sprites: ui.ui_sprites,
+                    cash: game.cash,
                 },
                 BattleRenderState {
                     selected_enemy: ui.battle_selected_enemy,
@@ -155,6 +156,19 @@ pub(super) fn render_game(
             );
             if let Some(presentation) = ui.post_battle {
                 render_post_battle_page(renderer, presentation, ui.ui_sprites, ui.text, ui.font);
+            } else if let BattleMenuState::Status { selected } = ui.battle_menu {
+                render_status_menu(
+                    renderer,
+                    game,
+                    ui.text,
+                    ui.font,
+                    ui.dialog_faces,
+                    ui.ui_sprites,
+                    ui.item_sprites,
+                    ui.status_background,
+                    selected,
+                    Some(battle),
+                );
             }
         } else {
             let viewport = Viewport::from(game.camera);

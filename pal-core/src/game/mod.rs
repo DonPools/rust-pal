@@ -415,6 +415,20 @@ impl<M: CollisionMap> GameState<M> {
         self.role_experience.get(usize::from(role_id)).copied()
     }
 
+    pub fn player_next_level_experience(&self, role_id: u16) -> Option<u32> {
+        let level = self.player_role(role_id)?.level;
+        self.battle_data
+            .as_ref()?
+            .level_up_experience
+            .for_level(level)
+            .map(u32::from)
+    }
+
+    pub fn poison_level_and_color(&self, poison_id: u16) -> Option<(u16, u16)> {
+        let poison = self.global_objects.as_ref()?.get(poison_id)?;
+        Some((poison.poison_level(), poison.poison_color()))
+    }
+
     pub fn player_status_duration(&self, role_id: u16, status: BattleStatus) -> Option<u16> {
         if let Some(player) = self.active_battle.as_ref().and_then(|battle| {
             battle

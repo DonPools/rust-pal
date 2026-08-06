@@ -74,6 +74,7 @@ pub(super) struct SessionState {
     pub(super) battle_kept_effects: Vec<BattleEvent>,
     pub(super) battle_effect_sound_count: u16,
     pub(super) battle_feedback_sound_played: bool,
+    pub(super) battle_settlement_ticks: Option<u16>,
     pub(super) magic_effect_frame_counts: Vec<Option<usize>>,
     pub(super) player_battle_frame_counts: Vec<Option<usize>>,
     pub(super) post_battle: Option<PostBattlePresentation>,
@@ -129,6 +130,7 @@ impl SessionState {
             battle_kept_effects: Vec::new(),
             battle_effect_sound_count: 0,
             battle_feedback_sound_played: false,
+            battle_settlement_ticks: None,
             magic_effect_frame_counts: (0..magic_effect_sprites.len())
                 .map(|index| magic_effect_sprites.frame_count(index))
                 .collect(),

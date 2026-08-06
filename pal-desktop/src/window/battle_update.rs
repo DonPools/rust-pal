@@ -1,4 +1,4 @@
-use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleTarget};
+use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleStatus, BattleTarget};
 use pal_core::game::{GameInput, GameState};
 use pal_core::role::Direction;
 use pal_core::script::ScriptRuntime;
@@ -18,6 +18,9 @@ pub(super) const ACTION_EVENT_TICKS: u16 = 8;
 pub(super) const PLAYER_MAGIC_ANIMATION_EVENT_TICKS: u16 = 22;
 const ROUND_EVENT_TICKS: u16 = 2;
 const FINISHED_EVENT_TICKS: u16 = 4;
+const SETTLEMENT_TICKS: u16 = 60;
+const BOSS_SETTLEMENT_TICKS: u16 = 110;
+const POST_BATTLE_PAGE_TICKS: u16 = 60;
 
 pub(super) struct FinishedBattle {
     pub(super) result: BattleResult,
@@ -25,6 +28,7 @@ pub(super) struct FinishedBattle {
 
 pub(super) fn update_battle(
     input: GameInput,
+    any_pressed: bool,
     game: &mut GameState,
     services: &mut SessionState,
     battle_scripts: &mut ScriptRuntime,
@@ -51,16 +55,45 @@ pub(super) fn update_battle(
         }
         return None;
     }
-    if let Some(BattlePhase::Finished(_)) = game.battle().map(|battle| battle.phase()) {
-        if !input.confirm {
+    if let Some(BattlePhase::Finished(result)) = game.battle().map(|battle| battle.phase()) {
+        let wait_ticks = game.battle().map_or(0, |battle| {
+            if result == BattleResult::Won && battle.rewards().experience > 0 {
+                if battle.is_boss {
+                    BOSS_SETTLEMENT_TICKS
+                } else {
+                    SETTLEMENT_TICKS
+                }
+            } else {
+                0
+            }
+        });
+        if !wait_elapsed(
+            &mut services.battle_settlement_ticks,
+            wait_ticks,
+            any_pressed,
+        ) {
             return None;
         }
+        services.battle_settlement_ticks = None;
         services.inventory_menu = None;
         let battle = game.battle()?.clone();
         let before = battle
             .players
             .iter()
-            .filter_map(|player| Some((player.role_id, game.player_role(player.role_id)?.clone())))
+            .filter_map(|player| {
+                let mut role = game.effective_player_role(player.role_id)?;
+                role.level = player.level;
+                role.hp = player.hp;
+                role.max_hp = player.max_hp;
+                role.mp = player.mp;
+                role.max_mp = player.max_mp;
+                role.attack_strength = player.attack_strength;
+                role.magic_strength = player.magic_strength;
+                role.defense = player.defense;
+                role.dexterity = player.dexterity;
+                role.flee_rate = player.flee_rate;
+                Some((player.role_id, role))
+            })
             .collect::<Vec<_>>();
         let (result, _) = game.settle_battle()?;
         let pages = settlement_pages(game, &before);
@@ -70,6 +103,7 @@ pub(super) fn update_battle(
                 result,
                 pages,
                 page: 0,
+                ticks_remaining: POST_BATTLE_PAGE_TICKS,
             });
             return None;
         }
@@ -107,9 +141,7 @@ pub(super) fn update_battle(
         return None;
     }
     if input.battle_status {
-        services.battle_menu = BattleMenuState::Status {
-            selected: game.battle()?.active_player().unwrap_or_default(),
-        };
+        services.battle_menu = BattleMenuState::Status { selected: 0 };
     }
     if input.battle_flee {
         let committed = game
@@ -177,15 +209,16 @@ pub(super) fn update_battle(
 }
 
 pub(super) fn advance_post_battle(
-    input: GameInput,
+    any_pressed: bool,
     services: &mut SessionState,
 ) -> Option<FinishedBattle> {
-    if !input.confirm && !input.cancel {
+    let presentation = services.post_battle.as_mut()?;
+    if !advance_countdown(&mut presentation.ticks_remaining, any_pressed) {
         return None;
     }
-    let presentation = services.post_battle.as_mut()?;
     presentation.page += 1;
     if presentation.page < presentation.pages.len() {
+        presentation.ticks_remaining = POST_BATTLE_PAGE_TICKS;
         return None;
     }
     let presentation = services.post_battle.take()?;
@@ -200,12 +233,11 @@ fn settlement_pages(
 ) -> Vec<BattleSettlementPage> {
     let mut pages = Vec::new();
     for (role_id, previous) in before {
-        let Some(current) = game.player_role(*role_id).cloned() else {
+        let Some(current) = game.effective_player_role(*role_id) else {
             continue;
         };
         if current.level > previous.level {
             pages.push(BattleSettlementPage::LevelUp {
-                role_id: *role_id,
                 before: Box::new(previous.clone()),
                 after: Box::new(current.clone()),
             });
@@ -241,6 +273,23 @@ fn settlement_pages(
         }
     }
     pages
+}
+
+fn wait_elapsed(ticks: &mut Option<u16>, duration: u16, skip: bool) -> bool {
+    if duration == 0 || skip {
+        return true;
+    }
+    let ticks = ticks.get_or_insert(duration);
+    advance_countdown(ticks, false)
+}
+
+fn advance_countdown(ticks: &mut u16, skip: bool) -> bool {
+    if skip {
+        *ticks = 0;
+        return true;
+    }
+    *ticks = ticks.saturating_sub(1);
+    *ticks == 0
 }
 
 fn commit_battle_action(
@@ -349,19 +398,16 @@ fn update_battle_menu(
                             .and_then(|battle| battle.attempt_flee_all());
                         commit_battle_action(game, services, committed);
                     }
-                    _ => {
-                        services.battle_menu = BattleMenuState::Status {
-                            selected: game
-                                .battle()
-                                .and_then(|battle| battle.active_player())
-                                .unwrap_or_default(),
-                        }
-                    }
+                    _ => services.battle_menu = BattleMenuState::Status { selected: 0 },
                 }
             }
         }
         BattleMenuState::ItemSubmenu { mut selected } => {
-            update_wrapping_selection(&mut selected, input.direction_pressed, 2);
+            match input.direction_pressed {
+                Some(Direction::North | Direction::West) => selected = 0,
+                Some(Direction::South | Direction::East) => selected = 1,
+                None => selected = selected.min(1),
+            }
             services.battle_menu = BattleMenuState::ItemSubmenu { selected };
             if input.cancel {
                 services.battle_menu = BattleMenuState::Misc { selected: 1 };
@@ -426,7 +472,7 @@ fn update_battle_menu(
             mut selected,
         } => {
             let player_count = game.battle().map_or(0, |battle| battle.players.len());
-            update_wrapping_selection(&mut selected, input.direction_pressed, player_count);
+            selected = select_player(player_count, selected, input.direction_pressed);
             services.battle_menu = BattleMenuState::TargetPlayer { command, selected };
             if input.cancel {
                 services.battle_menu = match command {
@@ -452,10 +498,42 @@ fn update_battle_menu(
         }
         BattleMenuState::Status { mut selected } => {
             let player_count = game.battle().map_or(0, |battle| battle.players.len());
-            update_wrapping_selection(&mut selected, input.direction_pressed, player_count);
-            services.battle_menu = BattleMenuState::Status { selected };
-            if input.cancel || input.confirm {
+            selected = selected.min(player_count.saturating_sub(1));
+            let leave = if input.cancel {
+                true
+            } else {
+                match input.direction_pressed {
+                    Some(Direction::North | Direction::West) => {
+                        if selected == 0 {
+                            true
+                        } else {
+                            selected -= 1;
+                            false
+                        }
+                    }
+                    Some(Direction::South | Direction::East) => {
+                        if selected + 1 >= player_count {
+                            true
+                        } else {
+                            selected += 1;
+                            false
+                        }
+                    }
+                    None if input.confirm => {
+                        if selected + 1 >= player_count {
+                            true
+                        } else {
+                            selected += 1;
+                            false
+                        }
+                    }
+                    None => false,
+                }
+            };
+            if leave || player_count == 0 {
                 services.battle_menu = BattleMenuState::Main;
+            } else {
+                services.battle_menu = BattleMenuState::Status { selected };
             }
         }
     }
@@ -507,13 +585,18 @@ fn update_battle_item_menu(
                             return true;
                         }
                     } else {
-                        let selected = services.item_target_selected.min(
-                            game.battle()
-                                .map_or(0, |battle| battle.players.len().saturating_sub(1)),
-                        );
+                        let player_count = game.battle().map_or(0, |battle| battle.players.len());
+                        if player_count == 1 {
+                            if game.battle_use_item(item.item_id, Some(0)).is_some() {
+                                services.battle_menu = BattleMenuState::Main;
+                                return true;
+                            }
+                            services.inventory_menu = Some(menu);
+                            return true;
+                        }
                         services.battle_menu = BattleMenuState::TargetPlayer {
                             command: BattlePendingCommand::UseItem(item.item_id),
-                            selected,
+                            selected: 0,
                         };
                         return true;
                     }
@@ -944,13 +1027,40 @@ fn play_battle_event_sounds(game: &GameState, services: &mut SessionState, event
     }
 }
 
-fn select_battle_command(current: usize, direction: Option<Direction>) -> usize {
-    match direction {
+fn select_battle_command(
+    current: usize,
+    direction: Option<Direction>,
+    magic_enabled: bool,
+    cooperative_magic_enabled: bool,
+) -> usize {
+    let current = if battle_command_enabled(current, magic_enabled, cooperative_magic_enabled) {
+        current
+    } else {
+        0
+    };
+    let proposed = match direction {
         Some(Direction::North) => 0,
         Some(Direction::West) => 1,
         Some(Direction::East) => 2,
         Some(Direction::South) => 3,
         None => current.min(3),
+    };
+    if battle_command_enabled(proposed, magic_enabled, cooperative_magic_enabled) {
+        proposed
+    } else {
+        current
+    }
+}
+
+fn battle_command_enabled(
+    command: usize,
+    magic_enabled: bool,
+    cooperative_magic_enabled: bool,
+) -> bool {
+    match command {
+        1 => magic_enabled,
+        2 => cooperative_magic_enabled,
+        _ => true,
     }
 }
 
@@ -960,8 +1070,24 @@ fn update_battle_main_menu(
     services: &mut SessionState,
     living: &[usize],
 ) {
-    services.battle_command_selected =
-        select_battle_command(services.battle_command_selected, input.direction_pressed);
+    let (magic_enabled, cooperative_magic_enabled) = game
+        .battle()
+        .and_then(|battle| {
+            let active = battle.active_player()?;
+            Some((
+                !battle.players[active]
+                    .statuses
+                    .is_active(BattleStatus::Silence),
+                battle.can_use_cooperative_magic(),
+            ))
+        })
+        .unwrap_or((false, false));
+    services.battle_command_selected = select_battle_command(
+        services.battle_command_selected,
+        input.direction_pressed,
+        magic_enabled,
+        cooperative_magic_enabled,
+    );
     if input.cancel {
         let _ = game
             .battle_mut()
@@ -1040,11 +1166,13 @@ fn begin_magic_selection(
     }) else {
         return;
     };
-    let enough_mp = game
+    let can_cast = game
         .battle()
         .and_then(|battle| battle.players.get(active_player))
-        .is_some_and(|player| player.mp >= magic.mp_cost);
-    if !enough_mp {
+        .is_some_and(|player| {
+            player.mp >= magic.mp_cost && !player.statuses.is_active(BattleStatus::Silence)
+        });
+    if !can_cast {
         return;
     }
     services.magic_selected = selected;
@@ -1075,7 +1203,7 @@ fn begin_magic_selection(
         (false, false) => {
             services.battle_menu = BattleMenuState::TargetPlayer {
                 command: BattlePendingCommand::Magic(selected),
-                selected: active_player,
+                selected: 0,
             };
             return;
         }
@@ -1092,11 +1220,21 @@ fn update_grid_selection(current: &mut usize, direction: Option<Direction>, coun
     match direction {
         Some(Direction::North) => *current = current.saturating_sub(3),
         Some(Direction::South) => *current = (*current + 3).min(count - 1),
-        Some(Direction::West) => {
-            *current = current.checked_sub(1).unwrap_or(count - 1);
-        }
-        Some(Direction::East) => *current = (*current + 1) % count,
+        Some(Direction::West) => *current = current.saturating_sub(1),
+        Some(Direction::East) => *current = (*current + 1).min(count - 1),
         None => {}
+    }
+}
+
+fn select_player(count: usize, current: usize, direction: Option<Direction>) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let current = current.min(count - 1);
+    match direction {
+        Some(Direction::West | Direction::South) => current.checked_sub(1).unwrap_or(count - 1),
+        Some(Direction::East | Direction::North) => (current + 1) % count,
+        None => current,
     }
 }
 
@@ -1131,11 +1269,72 @@ mod tests {
 
     #[test]
     fn battle_commands_follow_the_original_cross_directions() {
-        assert_eq!(select_battle_command(3, Some(Direction::North)), 0);
-        assert_eq!(select_battle_command(0, Some(Direction::West)), 1);
-        assert_eq!(select_battle_command(0, Some(Direction::East)), 2);
-        assert_eq!(select_battle_command(0, Some(Direction::South)), 3);
-        assert_eq!(select_battle_command(9, None), 3);
+        assert_eq!(
+            select_battle_command(3, Some(Direction::North), true, true),
+            0
+        );
+        assert_eq!(
+            select_battle_command(0, Some(Direction::West), true, true),
+            1
+        );
+        assert_eq!(
+            select_battle_command(0, Some(Direction::East), true, true),
+            2
+        );
+        assert_eq!(
+            select_battle_command(0, Some(Direction::South), true, true),
+            3
+        );
+        assert_eq!(select_battle_command(9, None, true, true), 3);
+    }
+
+    #[test]
+    fn battle_commands_do_not_select_disabled_magic_actions() {
+        assert_eq!(
+            select_battle_command(0, Some(Direction::West), false, true),
+            0
+        );
+        assert_eq!(
+            select_battle_command(0, Some(Direction::East), true, false),
+            0
+        );
+        assert_eq!(select_battle_command(1, None, false, true), 0);
+        assert_eq!(select_battle_command(2, None, true, false), 0);
+    }
+
+    #[test]
+    fn magic_grid_clamps_at_both_ends() {
+        let mut selected = 0;
+        update_grid_selection(&mut selected, Some(Direction::West), 7);
+        assert_eq!(selected, 0);
+        update_grid_selection(&mut selected, Some(Direction::North), 7);
+        assert_eq!(selected, 0);
+        selected = 6;
+        update_grid_selection(&mut selected, Some(Direction::East), 7);
+        assert_eq!(selected, 6);
+        update_grid_selection(&mut selected, Some(Direction::South), 7);
+        assert_eq!(selected, 6);
+    }
+
+    #[test]
+    fn player_target_directions_match_the_classic_battle_ui() {
+        assert_eq!(select_player(3, 0, Some(Direction::West)), 2);
+        assert_eq!(select_player(3, 0, Some(Direction::South)), 2);
+        assert_eq!(select_player(3, 2, Some(Direction::East)), 0);
+        assert_eq!(select_player(3, 2, Some(Direction::North)), 0);
+    }
+
+    #[test]
+    fn settlement_waits_for_the_classic_timeout_or_any_key() {
+        let mut ticks = None;
+        for _ in 0..SETTLEMENT_TICKS - 1 {
+            assert!(!wait_elapsed(&mut ticks, SETTLEMENT_TICKS, false));
+        }
+        assert!(wait_elapsed(&mut ticks, SETTLEMENT_TICKS, false));
+
+        let mut skipped = None;
+        assert!(wait_elapsed(&mut skipped, SETTLEMENT_TICKS, true));
+        assert_eq!(skipped, None);
     }
 
     #[test]

@@ -78,6 +78,7 @@ pub use types::{GameResources, LoadedScene, Viewport};
 
 const OPENING_MENU_MUSIC: u16 = 4;
 const OPENING_INTRO_UPDATE_MS: u64 = 10;
+const DIALOG_POLL_INTERVAL_MS: u64 = 8;
 
 pub fn run_game_window<L>(
     mut renderer: Renderer,
@@ -424,12 +425,37 @@ pub fn run_game_window<L>(
             Event::AboutToWait => {
                 script_services.music.poll();
                 let now = Instant::now();
-                accumulator += now
+                let frame_elapsed = now
                     .duration_since(last_update)
                     .min(Duration::from_millis(250));
+                accumulator += frame_elapsed;
                 last_update = now;
 
                 let mut changed = false;
+                // Dialog glyphs use the original 8 ms timing quantum. Advance their
+                // clock independently so the 50 ms game simulation step does not
+                // reveal two default-speed glyphs in one rendered frame.
+                if opening_intro.is_none()
+                    && opening_menu.is_none()
+                    && !script_services.visual.is_blocking()
+                    && !script_services.waiting_for_key
+                    && dialog.as_ref().is_some_and(|active| !active.awaiting_input)
+                {
+                    let before = dialog
+                        .as_ref()
+                        .map(|active| (active.revealed_glyphs, active.awaiting_input));
+                    let _ = advance_dialog_playback(
+                        &text,
+                        dialog.as_mut().expect("dialog was checked above"),
+                        &mut script_services.dialog_delay_ms,
+                        u32::try_from(frame_elapsed.as_millis()).unwrap_or(u32::MAX),
+                        false,
+                    );
+                    let after = dialog
+                        .as_ref()
+                        .map(|active| (active.revealed_glyphs, active.awaiting_input));
+                    changed |= before != after;
+                }
                 let update_tick = if opening_intro.is_some() {
                     Duration::from_millis(OPENING_INTRO_UPDATE_MS)
                 } else {
@@ -814,7 +840,7 @@ pub fn run_game_window<L>(
                                 &text,
                                 dialog.as_mut().expect("dialog was checked above"),
                                 &mut script_services.dialog_delay_ms,
-                                UPDATE_INTERVAL_MS as u32,
+                                0,
                                 sampled.confirm || sampled.cancel,
                             );
                             changed = true;
@@ -845,7 +871,7 @@ pub fn run_game_window<L>(
                             }
                         }
                     } else if script_services.post_battle.is_some() {
-                        let outcome = advance_post_battle(sampled, &mut script_services);
+                        let outcome = advance_post_battle(any_pressed, &mut script_services);
                         changed = true;
                         if let Some(outcome) = outcome {
                             if !scripts.resolve_battle(outcome.result) {
@@ -890,6 +916,7 @@ pub fn run_game_window<L>(
                         }
                         let outcome = update_battle(
                             sampled,
+                            any_pressed,
                             &mut game,
                             &mut script_services,
                             &mut battle_scripts,
@@ -1082,7 +1109,14 @@ pub fn run_game_window<L>(
                 if renderer.is_dirty() {
                     window.request_redraw();
                 }
-                target.set_control_flow(ControlFlow::WaitUntil(now + (update_tick - accumulator)));
+                let simulation_wait = update_tick.saturating_sub(accumulator);
+                let dialog_wait = dialog
+                    .as_ref()
+                    .is_some_and(|active| !active.awaiting_input)
+                    .then_some(Duration::from_millis(DIALOG_POLL_INTERVAL_MS));
+                target.set_control_flow(ControlFlow::WaitUntil(
+                    now + dialog_wait.map_or(simulation_wait, |wait| simulation_wait.min(wait)),
+                ));
             }
             _ => {}
         })

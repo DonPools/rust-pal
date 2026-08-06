@@ -5,6 +5,7 @@
 use pal_assets::bitmap::Bitmap;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_core::battle::BattleState;
 use pal_core::game::GameState;
 
 use super::draw::{draw_number, fill_rect, stroke_rect};
@@ -27,7 +28,7 @@ fn draw_ui_box(
     draw_ui_box_with_shadow(renderer, sprites, x, y, rows, columns, style, 6);
 }
 
-fn draw_ui_box_with_shadow(
+pub(super) fn draw_ui_box_with_shadow(
     renderer: &mut Renderer,
     sprites: &[RleBitmap],
     x: i32,
@@ -97,7 +98,7 @@ fn draw_ui_box_with_shadow(
     }
 }
 
-fn draw_single_line_box(
+pub(super) fn draw_single_line_box(
     renderer: &mut Renderer,
     sprites: &[RleBitmap],
     x: i32,
@@ -155,7 +156,7 @@ pub(super) fn draw_single_line_box_with_shadow(
     renderer.blit_rle(right, draw_x, y);
 }
 
-fn selected_color(ui_ticks: u64) -> u8 {
+pub(super) fn selected_color(ui_ticks: u64) -> u8 {
     0xf9 + ((ui_ticks / 10) % 6) as u8
 }
 
@@ -199,7 +200,7 @@ fn draw_ui_number(
     }
 }
 
-fn draw_slash(renderer: &mut Renderer, sprites: &[RleBitmap], x: i32, y: i32) {
+pub(super) fn draw_slash(renderer: &mut Renderer, sprites: &[RleBitmap], x: i32, y: i32) {
     if let Some(slash) = sprites.get(39) {
         renderer.blit_rle(slash, x, y);
     }
@@ -223,7 +224,7 @@ fn draw_item_bitmap(
     renderer.blit_rle(bitmap, x, y);
 }
 
-fn draw_cursor(renderer: &mut Renderer, sprites: &[RleBitmap], x: i32, y: i32) {
+pub(super) fn draw_cursor(renderer: &mut Renderer, sprites: &[RleBitmap], x: i32, y: i32) {
     if let Some(cursor) = sprites.get(69) {
         renderer.blit_rle(cursor, x, y);
     }
@@ -451,6 +452,7 @@ pub(super) fn render_field_menu(
             item_sprites,
             status_background,
             selected,
+            None,
         ),
         FieldMenu::MagicCaster { selected } => render_role_selection(
             renderer, game, text, font, sprites, selected, "Magic", ui_ticks,
@@ -638,13 +640,40 @@ pub(super) fn render_status_menu(
     item_sprites: &[Option<RleBitmap>],
     background: &Bitmap,
     selected: usize,
+    battle: Option<&BattleState>,
 ) {
-    let Some(member) = game.party.members().get(selected) else {
+    let role_id = battle
+        .and_then(|battle| battle.players.get(selected))
+        .map(|player| player.role_id)
+        .or_else(|| {
+            game.party
+                .members()
+                .get(selected)
+                .map(|member| member.role_id)
+        });
+    let Some(role_id) = role_id else {
         return;
     };
-    let Some(role) = game.effective_player_role(member.role_id) else {
+    let Some(mut role) = game.effective_player_role(role_id) else {
         return;
     };
+    if let Some(player) = battle.and_then(|battle| {
+        battle
+            .players
+            .iter()
+            .find(|player| player.role_id == role_id)
+    }) {
+        role.level = player.level;
+        role.hp = player.hp;
+        role.max_hp = player.max_hp;
+        role.mp = player.mp;
+        role.max_mp = player.max_mp;
+        role.attack_strength = player.attack_strength;
+        role.magic_strength = player.magic_strength;
+        role.defense = player.defense;
+        role.dexterity = player.dexterity;
+        role.flee_rate = player.flee_rate;
+    }
     renderer.blit_bitmap(background, 0, 0);
     if let Some(avatar) = faces.get(usize::from(role.avatar)).and_then(Option::as_ref) {
         renderer.blit_rle(avatar, 110, 30);
@@ -668,6 +697,25 @@ pub(super) fn render_status_menu(
             renderer.draw_big5_text_shadowed(font, label, x, y, 0x4f);
         }
     }
+    draw_ui_number(
+        renderer,
+        sprites,
+        game.player_experience(role_id).unwrap_or_default(),
+        5,
+        58,
+        6,
+        NumberColor::Yellow,
+    );
+    draw_ui_number(
+        renderer,
+        sprites,
+        game.player_next_level_experience(role_id)
+            .unwrap_or_default(),
+        5,
+        58,
+        15,
+        NumberColor::Cyan,
+    );
     draw_ui_number(
         renderer,
         sprites,
@@ -771,6 +819,34 @@ pub(super) fn render_status_menu(
                 EQUIP_NAMES[slot].1,
                 0xbe,
             );
+        }
+    }
+
+    const POISON_NAMES: [(i32, i32); 8] = [
+        (185, 58),
+        (185, 76),
+        (185, 94),
+        (185, 112),
+        (185, 130),
+        (185, 148),
+        (185, 166),
+        (185, 184),
+    ];
+    let poisons = game
+        .player_poisons(role_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|poison| {
+            let poison_id = poison.object_id;
+            if poison_id == 0 {
+                return None;
+            }
+            let (level, color) = game.poison_level_and_color(poison_id)?;
+            (level <= 3).then_some((poison_id, u8::try_from(color.saturating_add(10)).ok()?))
+        });
+    for ((poison_id, color), (x, y)) in poisons.zip(POISON_NAMES) {
+        if let Some(name) = text.word(usize::from(poison_id)) {
+            renderer.draw_big5_text_shadowed(font, name, x, y, color);
         }
     }
 }

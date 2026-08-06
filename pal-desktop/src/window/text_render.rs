@@ -179,10 +179,18 @@ fn dialog_glyph_color(palette_index: u8, mode: DialogTextMode) -> u8 {
 }
 
 fn draw_ascii_pixels(renderer: &mut Renderer, byte: u8, x: i32, y: i32, color: u8) {
-    for (row, bits) in glyph(char::from(byte)).iter().enumerate() {
-        for column in 0..5 {
-            if bits & (0b1_0000 >> column) != 0 {
-                put_palette_pixel(renderer, x + column, y + row as i32 + 4, color);
+    const SOURCE_WIDTH: usize = 5;
+    const SOURCE_HEIGHT: usize = 7;
+    const DRAW_WIDTH: usize = 7;
+    const DRAW_HEIGHT: usize = 11;
+    let source = glyph(char::from(byte));
+    for row in 0..DRAW_HEIGHT {
+        let source_row = row * SOURCE_HEIGHT / DRAW_HEIGHT;
+        let bits = source[source_row];
+        for column in 0..DRAW_WIDTH {
+            let source_column = column * SOURCE_WIDTH / DRAW_WIDTH;
+            if bits & (0b1_0000 >> source_column) != 0 {
+                put_palette_pixel(renderer, x + column as i32, y + row as i32 + 2, color);
             }
         }
     }
@@ -210,10 +218,7 @@ pub(super) fn draw_dialog_wait_icon(
 }
 
 fn put_palette_pixel(renderer: &mut Renderer, x: i32, y: i32, palette_index: u8) {
-    let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
-        return;
-    };
-    renderer.put_pixel(x, y, palette_index);
+    renderer.put_opaque_pixel(x, y, palette_index);
 }
 
 #[cfg(test)]
@@ -284,5 +289,25 @@ mod tests {
 
         assert_eq!(pixel(&renderer, 0, 0), [0, 0, 0, 255]);
         assert_eq!(pixel(&renderer, 1, 0), [40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn ascii_dialog_glyphs_fill_an_eight_by_fifteen_cell() {
+        let mut renderer = Renderer::new(Palette::default(), 8, 15);
+        renderer.clear(40, 50, 60);
+
+        draw_dialog_ascii(
+            &mut renderer,
+            &[],
+            b'E',
+            0,
+            0,
+            0x4f,
+            DialogTextMode::CenterWindow,
+        );
+
+        assert_eq!(pixel(&renderer, 6, 2), [0, 0, 0, 255]);
+        assert_eq!(pixel(&renderer, 7, 2), [40, 50, 60, 255]);
+        assert_eq!(pixel(&renderer, 6, 12), [0, 0, 0, 255]);
     }
 }
