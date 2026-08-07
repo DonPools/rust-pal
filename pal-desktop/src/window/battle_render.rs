@@ -619,7 +619,7 @@ pub fn render_battle(
         }
     }
 
-    if event.is_none() && battle.phase() == BattlePhase::AwaitingCommand {
+    if battle_status_visible(battle.phase(), event.is_some(), battle.has_script_work()) {
         render_status(
             renderer,
             battle,
@@ -669,6 +669,14 @@ pub fn render_battle(
             renderer.apply_shake(x, y);
         }
     }
+}
+
+fn battle_status_visible(
+    phase: BattlePhase,
+    event_active: bool,
+    battle_script_active: bool,
+) -> bool {
+    phase == BattlePhase::AwaitingCommand && !event_active && !battle_script_active
 }
 
 fn render_shared_battle_effect(
@@ -2452,6 +2460,30 @@ mod tests {
         assert_eq!(battle_animation_ticks(3), 0);
         assert_eq!(battle_animation_ticks(4), 1);
         assert_eq!(battle_animation_ticks(8), 2);
+    }
+
+    #[test]
+    fn battle_lifecycle_scripts_suppress_the_command_hud() {
+        assert!(battle_status_visible(
+            BattlePhase::AwaitingCommand,
+            false,
+            false
+        ));
+        assert!(!battle_status_visible(
+            BattlePhase::AwaitingCommand,
+            false,
+            true
+        ));
+        assert!(!battle_status_visible(
+            BattlePhase::AwaitingCommand,
+            true,
+            false
+        ));
+        assert!(!battle_status_visible(
+            BattlePhase::Finished(BattleResult::Won),
+            false,
+            false
+        ));
     }
 
     #[test]

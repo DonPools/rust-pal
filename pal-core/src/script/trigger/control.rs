@@ -1,0 +1,122 @@
+//! Control trigger-opcode handling.
+
+use pal_assets::script::ScriptEntry;
+
+use super::decode::{delay_80ms_ticks, selected_object};
+use super::{CallFrame, Execution, InstructionFlow, ScriptRuntime};
+use crate::script::{ScriptEvent, ScriptOpcode};
+
+impl ScriptRuntime {
+    pub(super) fn dispatch_control(
+        &mut self,
+        mut execution: Execution,
+        entry: ScriptEntry,
+        opcode: ScriptOpcode,
+    ) -> InstructionFlow {
+        use ScriptOpcode::*;
+        match opcode {
+            Stop => {
+                if let Some(frame) = self.call_stack.pop() {
+                    execution.object_id = frame.object_id;
+                    execution.entry = frame.return_entry;
+                    return InstructionFlow::Continue(execution);
+                }
+                return InstructionFlow::Halt(ScriptEvent::Completed {
+                    trigger: execution.trigger,
+                    next_entry: execution.next_entry,
+                    succeeded: execution.succeeded,
+                });
+            }
+            StopAndAdvance => {
+                let next_entry = execution.entry.wrapping_add(1);
+                if let Some(frame) = self.call_stack.pop() {
+                    execution.object_id = frame.object_id;
+                    execution.entry = frame.return_entry;
+                    return InstructionFlow::Continue(execution);
+                }
+                execution.next_entry = next_entry;
+                return InstructionFlow::Halt(ScriptEvent::Completed {
+                    trigger: execution.trigger,
+                    next_entry: execution.next_entry,
+                    succeeded: execution.succeeded,
+                });
+            }
+            StopAndReplace => {
+                if self.idle_branch(execution.object_id, entry.operands[1]) {
+                    let next_entry = entry.operands[0];
+                    if let Some(frame) = self.call_stack.pop() {
+                        execution.object_id = frame.object_id;
+                        execution.entry = frame.return_entry;
+                        return InstructionFlow::Continue(execution);
+                    }
+                    execution.next_entry = next_entry;
+                    return InstructionFlow::Halt(ScriptEvent::Completed {
+                        trigger: execution.trigger,
+                        next_entry,
+                        succeeded: execution.succeeded,
+                    });
+                }
+                execution.advance();
+            }
+            Jump => {
+                execution.entry = if self.idle_branch(execution.object_id, entry.operands[1]) {
+                    entry.operands[0]
+                } else {
+                    execution.entry.wrapping_add(1)
+                };
+            }
+            Call => {
+                self.call_stack.push(CallFrame {
+                    object_id: execution.object_id,
+                    return_entry: execution.entry.wrapping_add(1),
+                });
+                execution.object_id = selected_object(entry.operands[1], execution.object_id);
+                execution.entry = entry.operands[0];
+            }
+            AdvanceEntry => {
+                execution.advance();
+                execution.next_entry = execution.entry;
+            }
+            WaitFrames => {
+                execution.advance();
+                execution.wait_frames = entry.operands[0].max(1) - 1;
+                execution.wait_updates_auto_scripts = true;
+                return InstructionFlow::Yield(execution, ScriptEvent::Waiting);
+            }
+            JumpByChance => {
+                let roll = self.next_random_percent();
+                execution.entry = if roll >= entry.operands[0] {
+                    entry.operands[1]
+                } else {
+                    execution.entry.wrapping_add(1)
+                };
+            }
+            NoOp => execution.entry = execution.entry.wrapping_add(1),
+            RandomSelect if entry.operands[0] != 0 => {
+                let choices = entry.operands[0];
+                let choice = self.next_random_percent().wrapping_sub(1) % choices;
+                execution.entry = execution.entry.wrapping_add(choice).wrapping_add(1);
+            }
+            AutoScriptNoOp => execution.entry = execution.entry.wrapping_add(1),
+            MarkScriptFailed => {
+                execution.succeeded = false;
+                execution.advance();
+            }
+            Delay => {
+                execution.advance();
+                execution.wait_frames = delay_80ms_ticks(entry.operands[0]).saturating_sub(1);
+                execution.wait_updates_auto_scripts = false;
+                return InstructionFlow::Yield(execution, ScriptEvent::Delay);
+            }
+            RandomSelect => {
+                return InstructionFlow::Halt(ScriptEvent::Unsupported {
+                    trigger: execution.trigger,
+                    entry: execution.entry,
+                    opcode: opcode.raw(),
+                });
+            }
+            _ => unreachable!("opcode {opcode} is not a control instruction"),
+        }
+        InstructionFlow::Continue(execution)
+    }
+}

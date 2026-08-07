@@ -356,12 +356,26 @@ fn commit_battle_action(
     committed: Option<Vec<BattleEvent>>,
 ) {
     if let Some(events) = committed {
-        services.battle.battle_menu = BattleMenuState::Main;
-        services.battle.battle_targeting_enemy = false;
+        let battle = &mut services.battle;
+        reset_battle_command_ui(
+            &mut battle.battle_menu,
+            &mut battle.battle_command_selected,
+            &mut battle.battle_targeting_enemy,
+        );
         if !events.is_empty() {
             queue_battle_events(game, services, events);
         }
     }
+}
+
+fn reset_battle_command_ui(
+    menu: &mut BattleMenuState,
+    selected_command: &mut usize,
+    targeting_enemy: &mut bool,
+) {
+    *menu = BattleMenuState::Main;
+    *selected_command = 0;
+    *targeting_enemy = false;
 }
 
 fn commit_normal_attack(game: &mut GameState, services: &mut DesktopSession) {
@@ -922,15 +936,17 @@ fn update_battle_item_menu(
             if input.confirm {
                 if let Some(item) = inventory.get(menu.selected).copied() {
                     if item.apply_to_all {
-                        if game.battle_use_item(item.item_id, None).is_some() {
-                            services.battle.battle_menu = BattleMenuState::Main;
+                        let committed = game.battle_use_item(item.item_id, None);
+                        if committed.is_some() {
+                            commit_battle_action(game, services, committed);
                             return true;
                         }
                     } else {
                         let player_count = game.battle().map_or(0, |battle| battle.players.len());
                         if player_count == 1 {
-                            if game.battle_use_item(item.item_id, Some(0)).is_some() {
-                                services.battle.battle_menu = BattleMenuState::Main;
+                            let committed = game.battle_use_item(item.item_id, Some(0));
+                            if committed.is_some() {
+                                commit_battle_action(game, services, committed);
                                 return true;
                             }
                             services.set_inventory_menu(menu);
@@ -957,8 +973,9 @@ fn update_battle_item_menu(
             if input.confirm {
                 if let Some(item) = inventory.get(menu.selected).copied() {
                     if item.apply_to_all {
-                        if game.battle_throw_item(item.item_id, None).is_some() {
-                            services.battle.battle_menu = BattleMenuState::Main;
+                        let committed = game.battle_throw_item(item.item_id, None);
+                        if committed.is_some() {
+                            commit_battle_action(game, services, committed);
                             return true;
                         }
                     } else {
@@ -1582,9 +1599,18 @@ fn update_battle_main_menu(
         cooperative_magic_enabled,
     );
     if input.cancel {
-        let _ = game
+        if game
             .battle_mut()
-            .and_then(|battle| battle.undo_last_command());
+            .and_then(|battle| battle.undo_last_command())
+            .is_some()
+        {
+            let battle = &mut services.battle;
+            reset_battle_command_ui(
+                &mut battle.battle_menu,
+                &mut battle.battle_command_selected,
+                &mut battle.battle_targeting_enemy,
+            );
+        }
         return;
     }
     if !input.confirm {
@@ -1606,9 +1632,7 @@ fn update_battle_main_menu(
             }
         }
         1 => {
-            services.battle.battle_menu = BattleMenuState::Magic {
-                selected: services.menus.magic_selected,
-            };
+            services.battle.battle_menu = classic_battle_magic_menu();
         }
         2 => {
             let Some((magic, enabled)) = game.battle().and_then(|battle| {
@@ -1668,7 +1692,6 @@ fn begin_magic_selection(
     if !can_cast {
         return;
     }
-    services.menus.magic_selected = selected;
     let committed = match (magic.usable_to_enemy(), magic.apply_to_all()) {
         (true, true) => game
             .battle_mut()
@@ -1702,6 +1725,12 @@ fn begin_magic_selection(
         }
     };
     commit_battle_action(game, services, committed);
+}
+
+fn classic_battle_magic_menu() -> BattleMenuState {
+    // Classic passes magic object 0 as the default every time it opens this menu. Since object 0
+    // is not a learned magic, the cursor always remains on the first entry.
+    BattleMenuState::Magic { selected: 0 }
 }
 
 fn update_grid_selection(current: &mut usize, direction: Option<Direction>, count: usize) {
@@ -1806,6 +1835,29 @@ mod tests {
         );
         assert_eq!(select_battle_command(1, None, false, true), 0);
         assert_eq!(select_battle_command(2, None, true, false), 0);
+    }
+
+    #[test]
+    fn each_classic_battle_magic_menu_starts_from_the_first_spell() {
+        assert_eq!(
+            classic_battle_magic_menu(),
+            BattleMenuState::Magic { selected: 0 }
+        );
+    }
+
+    #[test]
+    fn committed_or_reopened_player_commands_reset_to_attack() {
+        let mut menu = BattleMenuState::TargetEnemy {
+            command: BattlePendingCommand::Magic(4),
+        };
+        let mut selected_command = 1;
+        let mut targeting_enemy = true;
+
+        reset_battle_command_ui(&mut menu, &mut selected_command, &mut targeting_enemy);
+
+        assert_eq!(menu, BattleMenuState::Main);
+        assert_eq!(selected_command, 0);
+        assert!(!targeting_enemy);
     }
 
     #[test]

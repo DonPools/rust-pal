@@ -122,6 +122,46 @@ pub(super) struct BattlePresentationState {
     pub(super) player_battle_frame_counts: Vec<Option<usize>>,
     pub(super) enemy_battle_frame_widths: Vec<Option<u16>>,
     pub(super) post_battle: Option<PostBattlePresentation>,
+    last_battle_render_ticks: Option<u64>,
+    dialog_render_ticks: Option<u64>,
+}
+
+impl BattlePresentationState {
+    /// Keep the battlefield animation on the frame visible when a battle dialog starts.
+    pub(super) fn render_ticks(
+        &mut self,
+        current_ticks: u64,
+        battle_active: bool,
+        freeze_for_dialog: bool,
+    ) -> u64 {
+        battle_render_ticks(
+            &mut self.last_battle_render_ticks,
+            &mut self.dialog_render_ticks,
+            current_ticks,
+            battle_active,
+            freeze_for_dialog,
+        )
+    }
+}
+
+fn battle_render_ticks(
+    last_ticks: &mut Option<u64>,
+    frozen_ticks: &mut Option<u64>,
+    current_ticks: u64,
+    battle_active: bool,
+    freeze_for_dialog: bool,
+) -> u64 {
+    if !battle_active {
+        *last_ticks = None;
+        *frozen_ticks = None;
+        current_ticks
+    } else if freeze_for_dialog {
+        *frozen_ticks.get_or_insert(last_ticks.unwrap_or(current_ticks))
+    } else {
+        *frozen_ticks = None;
+        *last_ticks = Some(current_ticks);
+        current_ticks
+    }
 }
 
 pub(super) struct AudioSession {
@@ -232,6 +272,8 @@ impl DesktopSession {
         self.battle.battle_debug_hit = None;
         self.battle.battle_debug_item_start = None;
         self.battle.post_battle = None;
+        self.battle.last_battle_render_ticks = None;
+        self.battle.dialog_render_ticks = None;
     }
 
     pub(super) fn apply_original_restore(
@@ -332,6 +374,8 @@ impl DesktopSession {
                     })
                     .collect(),
                 post_battle: None,
+                last_battle_render_ticks: None,
+                dialog_render_ticks: None,
             },
             audio: AudioSession {
                 sound_effects: SoundEffects::new(voc_mkf)
@@ -351,7 +395,42 @@ impl DesktopSession {
 
 #[cfg(test)]
 mod tests {
-    use super::PendingSceneChange;
+    use super::{battle_render_ticks, PendingSceneChange};
+
+    #[test]
+    fn battle_dialog_keeps_the_first_render_tick_until_it_closes() {
+        let mut last = None;
+        let mut frozen = None;
+
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 10, false, false),
+            10
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 20, true, false),
+            20
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 30, true, true),
+            20
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 40, true, true),
+            20
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 50, true, false),
+            50
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 60, false, false),
+            60
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut frozen, 70, true, true),
+            70
+        );
+    }
 
     #[test]
     fn scene_change_keeps_the_loaded_source_while_updating_the_logical_target() {

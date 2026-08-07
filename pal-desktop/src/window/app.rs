@@ -108,6 +108,12 @@ where
     }
 
     pub(super) fn render_frame(&mut self, ui_ticks: u64) {
+        let battle_active = self.game.battle().is_some();
+        let freeze_battle_for_dialog = self.dialog.is_some() && battle_active;
+        let battle_render_ticks =
+            self.session
+                .battle
+                .render_ticks(ui_ticks, battle_active, freeze_battle_for_dialog);
         let resources = &self.resources;
         let session = &self.session;
         render_game(
@@ -147,6 +153,7 @@ where
                 status_background: &resources.status_background,
                 equip_background: &resources.equip_background,
                 ui_ticks,
+                battle_render_ticks,
                 palettes: &resources.palettes,
                 visual: &session.visual,
             },

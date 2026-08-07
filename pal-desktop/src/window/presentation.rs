@@ -57,6 +57,7 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) status_background: &'a Bitmap,
     pub(super) equip_background: &'a Bitmap,
     pub(super) ui_ticks: u64,
+    pub(super) battle_render_ticks: u64,
     pub(super) palettes: &'a [PaletteSet],
     pub(super) visual: &'a VisualState,
 }
@@ -134,7 +135,7 @@ pub(super) fn render_game(
                     targeting_enemy: ui.battle_targeting_enemy,
                     menu: ui.battle_menu,
                     auto_attack: ui.battle_auto_attack,
-                    ticks: ui.ui_ticks,
+                    ticks: ui.battle_render_ticks,
                     event: ui
                         .post_battle
                         .is_none()
