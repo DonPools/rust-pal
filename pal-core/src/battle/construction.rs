@@ -132,6 +132,11 @@ impl BattleState {
         self.phase
     }
 
+    /// Whether Classic is accepting player commands rather than performing the round.
+    pub fn is_command_phase(&self) -> bool {
+        self.phase == BattlePhase::AwaitingCommand && self.flow == BattleFlow::Command
+    }
+
     /// Return the next state of Classic's process-wide random sequence.
     pub fn random_state(&self) -> u32 {
         self.random_state

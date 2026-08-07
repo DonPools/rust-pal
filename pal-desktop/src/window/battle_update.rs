@@ -131,12 +131,6 @@ pub(super) fn update_battle(
         return None;
     }
 
-    if update_battle_item_menu(input, game, services) {
-        return None;
-    }
-
-    let input = prioritize_battle_shortcut_direction(input, &services.battle.battle_menu);
-
     let living = game
         .battle()?
         .enemies
@@ -144,6 +138,11 @@ pub(super) fn update_battle(
         .enumerate()
         .filter_map(|(index, enemy)| enemy.is_alive().then_some(index))
         .collect::<Vec<_>>();
+    if update_battle_item_menu(input, game, services, &living) {
+        return None;
+    }
+
+    let input = prioritize_battle_shortcut_direction(input, &services.battle.battle_menu);
     if input.battle_auto {
         services.battle.battle_auto_attack = !services.battle.battle_auto_attack;
         if let Some(battle) = game.battle_mut() {
@@ -776,14 +775,14 @@ fn latest_battle_debug_hit(game: &GameState, events: &[BattleEvent]) -> Option<B
             ),
             BattleEvent::SimulatedMagic {
                 enemy,
-                magic_object,
+                magic,
                 damage,
                 defeated,
                 ..
             } => (
                 "SIM.MAGIC",
                 0,
-                Some(magic_object),
+                Some(magic.object_id),
                 BattleDebugTarget::Enemy,
                 enemy,
                 damage,
@@ -919,6 +918,7 @@ fn update_battle_item_menu(
     input: GameInput,
     game: &mut GameState,
     services: &mut DesktopSession,
+    living: &[usize],
 ) -> bool {
     let Some(mut menu) = services.take_inventory_menu() else {
         return false;
@@ -972,13 +972,13 @@ fn update_battle_item_menu(
             }
             if input.confirm {
                 if let Some(item) = inventory.get(menu.selected).copied() {
-                    if item.apply_to_all {
-                        let committed = game.battle_throw_item(item.item_id, None);
+                    if let Some(target) = immediate_throw_target(item.apply_to_all, living) {
+                        let committed = game.battle_throw_item(item.item_id, target);
                         if committed.is_some() {
                             commit_battle_action(game, services, committed);
                             return true;
                         }
-                    } else {
+                    } else if !living.is_empty() {
                         services.battle.battle_menu = BattleMenuState::TargetEnemy {
                             command: BattlePendingCommand::ThrowItem(item.item_id),
                         };
@@ -995,6 +995,17 @@ fn update_battle_item_menu(
     }
     services.set_inventory_menu(menu);
     true
+}
+
+/// All-target throws and single living enemies do not need a target-selection screen.
+fn immediate_throw_target(apply_to_all: bool, living: &[usize]) -> Option<Option<usize>> {
+    if apply_to_all {
+        Some(None)
+    } else if let [target] = living {
+        Some(Some(*target))
+    } else {
+        None
+    }
 }
 
 fn advance_battle_events(game: &GameState, services: &mut DesktopSession) -> bool {
@@ -1800,6 +1811,14 @@ mod tests {
         assert_eq!(select_enemy(&living, 1, Some(Direction::South)), 4);
         assert_eq!(select_enemy(&living, 4, Some(Direction::North)), 1);
         assert_eq!(select_enemy(&living, 2, None), 1);
+    }
+
+    #[test]
+    fn throw_items_skip_target_selection_for_all_or_one_enemy() {
+        assert_eq!(immediate_throw_target(true, &[1, 3]), Some(None));
+        assert_eq!(immediate_throw_target(false, &[3]), Some(Some(3)));
+        assert_eq!(immediate_throw_target(false, &[1, 3]), None);
+        assert_eq!(immediate_throw_target(false, &[]), None);
     }
 
     #[test]

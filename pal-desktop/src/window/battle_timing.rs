@@ -120,18 +120,7 @@ pub(super) fn battle_magic_for_event(
             .iter()
             .copied()
             .find(|magic| magic.object_id == magic_object),
-        BattleEvent::SimulatedMagic { magic_object, .. } => battle
-            .players
-            .iter()
-            .flat_map(|player| {
-                player
-                    .magics
-                    .iter()
-                    .copied()
-                    .chain(player.cooperative_magic)
-            })
-            .chain(battle.enemies.iter().filter_map(|enemy| enemy.magic))
-            .find(|magic| magic.object_id == magic_object),
+        BattleEvent::SimulatedMagic { magic, .. } => Some(magic),
         _ => None,
     }
 }

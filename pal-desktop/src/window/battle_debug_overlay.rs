@@ -761,12 +761,12 @@ fn current_event_view(event: BattleEvent) -> EventView {
         },
         BattleEvent::SimulatedMagic {
             enemy,
-            magic_object,
+            magic,
             damage,
             defeated,
             ..
         } => EventView {
-            title: format!("脚本模拟仙术 {magic_object} → 敌人 E{enemy}"),
+            title: format!("脚本模拟仙术 {} → 敌人 E{enemy}", magic.object_id),
             detail: format!(
                 "伤害 raw {damage} / i16 {} · {}",
                 damage as i16,

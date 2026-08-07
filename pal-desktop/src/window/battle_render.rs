@@ -112,6 +112,49 @@ pub(super) struct PostBattlePresentation {
     pub(super) ticks_remaining: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BattleFighterDrawStyle {
+    Normal,
+    ColorShift(i16),
+    Dithered(u8),
+}
+
+#[derive(Debug, Clone)]
+struct BattleFighterSprite {
+    bitmap: RleBitmap,
+    left: i32,
+    top: i32,
+    depth_x: i32,
+    depth_y: i32,
+    style: BattleFighterDrawStyle,
+}
+
+fn sort_battle_fighter_sprites(sprites: &mut [BattleFighterSprite]) {
+    // Classic draws smaller Y first. On the same row, larger X is farther back.
+    sprites.sort_by(|left, right| {
+        left.depth_y
+            .cmp(&right.depth_y)
+            .then_with(|| right.depth_x.cmp(&left.depth_x))
+    });
+}
+
+fn draw_battle_fighter_sprites(renderer: &mut Renderer, sprites: &mut [BattleFighterSprite]) {
+    sort_battle_fighter_sprites(sprites);
+    for sprite in sprites {
+        match sprite.style {
+            BattleFighterDrawStyle::Normal => {
+                renderer.blit_rle(&sprite.bitmap, sprite.left, sprite.top)
+            }
+            BattleFighterDrawStyle::ColorShift(shift) => {
+                renderer.blit_rle_color_shift(&sprite.bitmap, sprite.left, sprite.top, shift)
+            }
+            BattleFighterDrawStyle::Dithered(visibility) => {
+                renderer.blit_rle_dithered(&sprite.bitmap, sprite.left, sprite.top, visibility)
+            }
+        }
+    }
+}
+
 impl PostBattlePresentation {
     pub(super) fn current_page(&self) -> Option<&BattleSettlementPage> {
         self.pages.get(self.page)
@@ -196,6 +239,8 @@ pub fn render_battle(
             true,
         );
     }
+
+    let mut fighter_sprites = Vec::with_capacity(battle.enemies.len() + battle.players.len());
 
     for (index, enemy) in battle.enemies.iter().enumerate() {
         let is_defeat_event = matches!(
@@ -326,17 +371,17 @@ pub fn render_battle(
             })
             .unwrap_or(64)
             .min(script_visibility);
-        if fade_visibility < 64 {
-            renderer.blit_rle_dithered(&bitmap, x, y, fade_visibility);
+        let style = if fade_visibility < 64 {
+            BattleFighterDrawStyle::Dithered(fade_visibility)
         } else if script_color_shift != 0 {
-            renderer.blit_rle_color_shift(&bitmap, x, y, script_color_shift);
+            BattleFighterDrawStyle::ColorShift(script_color_shift)
         } else if event.is_none()
             && targeting_enemy
             && index == selected_enemy
             && battle.phase() == BattlePhase::AwaitingCommand
             && battle_ticks & 1 != 0
         {
-            renderer.blit_rle_color_shift(&bitmap, x, y, 7);
+            BattleFighterDrawStyle::ColorShift(7)
         } else if is_hit
             && feedback_active
             && (if exact_attack_feedback {
@@ -345,10 +390,26 @@ pub fn render_battle(
                 exact_flash || event_ticks.is_multiple_of(2)
             })
         {
-            renderer.blit_rle_color_shift(&bitmap, x, y, 6);
+            BattleFighterDrawStyle::ColorShift(6)
         } else {
-            renderer.blit_rle(&bitmap, x, y);
-        }
+            BattleFighterDrawStyle::Normal
+        };
+        fighter_sprites.push(BattleFighterSprite {
+            bitmap,
+            left: x,
+            top: y,
+            depth_x: i32::from(enemy.position.x)
+                + enemy_offset
+                + enemy_action_x
+                + feedback_x
+                + script_x,
+            depth_y: i32::from(enemy.position.y)
+                + enemy_offset / 2
+                + enemy_action_y
+                + feedback_y
+                + script_y,
+            style,
+        });
     }
 
     for (index, player) in battle.players.iter().enumerate() {
@@ -556,11 +617,6 @@ pub fn render_battle(
         if let Some(bitmap) = resources.player_sprites.decode_frame(sprite, frame) {
             let left = x - i32::from(bitmap.width) / 2;
             let top = y - i32::from(bitmap.height);
-            if color_shift == 0 {
-                renderer.blit_rle(&bitmap, left, top);
-            } else {
-                renderer.blit_rle_color_shift(&bitmap, left, top, color_shift);
-            }
             let is_hit = match event {
                 Some(BattleEvent::EnemyAttack {
                     player,
@@ -575,11 +631,25 @@ pub fn render_battle(
                 Some(BattleEvent::PlayerConfusedAttack { target, .. }) => target == index,
                 _ => false,
             };
-            if is_hit && feedback_active && event_ticks.is_multiple_of(2) {
-                renderer.blit_rle_color_shift(&bitmap, left, top, 6);
-            }
+            let style = if is_hit && feedback_active && event_ticks.is_multiple_of(2) {
+                BattleFighterDrawStyle::ColorShift(6)
+            } else if color_shift != 0 {
+                BattleFighterDrawStyle::ColorShift(color_shift)
+            } else {
+                BattleFighterDrawStyle::Normal
+            };
+            fighter_sprites.push(BattleFighterSprite {
+                bitmap,
+                left,
+                top,
+                depth_x: x,
+                depth_y: y,
+                style,
+            });
         }
     }
+
+    draw_battle_fighter_sprites(renderer, &mut fighter_sprites);
 
     if let Some(event) = event {
         let _ = render_shared_battle_effect(
@@ -619,7 +689,11 @@ pub fn render_battle(
         }
     }
 
-    if battle_status_visible(battle.phase(), event.is_some(), battle.has_script_work()) {
+    if battle_status_visible(
+        battle.is_command_phase(),
+        event.is_some(),
+        battle.has_script_work(),
+    ) {
         render_status(
             renderer,
             battle,
@@ -672,11 +746,11 @@ pub fn render_battle(
 }
 
 fn battle_status_visible(
-    phase: BattlePhase,
+    command_phase: bool,
     event_active: bool,
     battle_script_active: bool,
 ) -> bool {
-    phase == BattlePhase::AwaitingCommand && !event_active && !battle_script_active
+    command_phase && !event_active && !battle_script_active
 }
 
 fn render_shared_battle_effect(
@@ -2454,6 +2528,18 @@ fn player_position(count: usize, index: usize) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pal_assets::palette::{Palette, PaletteColor};
+
+    fn fighter_sprite(color: u8, depth_x: i32, depth_y: i32) -> BattleFighterSprite {
+        BattleFighterSprite {
+            bitmap: RleBitmap::decode(&[1, 0, 1, 0, 1, color]).unwrap(),
+            left: 0,
+            top: 0,
+            depth_x,
+            depth_y,
+            style: BattleFighterDrawStyle::Normal,
+        }
+    }
 
     #[test]
     fn battle_animation_clock_uses_original_forty_millisecond_frames() {
@@ -2464,26 +2550,14 @@ mod tests {
 
     #[test]
     fn battle_lifecycle_scripts_suppress_the_command_hud() {
-        assert!(battle_status_visible(
-            BattlePhase::AwaitingCommand,
-            false,
-            false
-        ));
-        assert!(!battle_status_visible(
-            BattlePhase::AwaitingCommand,
-            false,
-            true
-        ));
-        assert!(!battle_status_visible(
-            BattlePhase::AwaitingCommand,
-            true,
-            false
-        ));
-        assert!(!battle_status_visible(
-            BattlePhase::Finished(BattleResult::Won),
-            false,
-            false
-        ));
+        assert!(battle_status_visible(true, false, false));
+        assert!(!battle_status_visible(true, false, true));
+        assert!(!battle_status_visible(true, true, false));
+    }
+
+    #[test]
+    fn battle_action_phase_suppresses_status_between_visual_events() {
+        assert!(!battle_status_visible(false, false, false));
     }
 
     #[test]
@@ -2493,6 +2567,38 @@ mod tests {
         assert_eq!(player_position(2, 1), (256, 152));
         assert_eq!(player_position(3, 2), (270, 146));
         assert_eq!(player_position(4, 3), (264, 153));
+    }
+
+    #[test]
+    fn fighter_depth_sort_matches_classic_y_then_reverse_x_order() {
+        let mut sprites = vec![
+            fighter_sprite(1, 10, 20),
+            fighter_sprite(2, 5, 10),
+            fighter_sprite(3, 20, 10),
+        ];
+
+        sort_battle_fighter_sprites(&mut sprites);
+
+        assert_eq!(
+            sprites
+                .iter()
+                .map(|sprite| (sprite.depth_x, sprite.depth_y))
+                .collect::<Vec<_>>(),
+            [(20, 10), (5, 10), (10, 20)]
+        );
+    }
+
+    #[test]
+    fn fighter_with_lower_screen_position_covers_overlapping_sprite() {
+        let mut palette = Palette::default();
+        palette.colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
+        palette.colors[2] = PaletteColor { r: 0, g: 63, b: 0 };
+        let mut renderer = Renderer::new(palette, 1, 1);
+        let mut sprites = vec![fighter_sprite(1, 0, 20), fighter_sprite(2, 0, 10)];
+
+        draw_battle_fighter_sprites(&mut renderer, &mut sprites);
+
+        assert_eq!(renderer.screen(), [252, 0, 0, 255]);
     }
 
     #[test]

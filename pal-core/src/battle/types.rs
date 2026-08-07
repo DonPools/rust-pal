@@ -678,7 +678,7 @@ pub enum BattleEvent {
     },
     SimulatedMagic {
         enemy: usize,
-        magic_object: u16,
+        magic: BattleMagic,
         blow: i16,
         damage: u16,
         visual: bool,

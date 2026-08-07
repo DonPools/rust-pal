@@ -1101,7 +1101,7 @@ impl BattleState {
             actor.hp = actor.hp.wrapping_sub(damage);
             self.pending_events.push_back(BattleEvent::SimulatedMagic {
                 enemy,
-                magic_object,
+                magic,
                 blow,
                 damage,
                 visual,

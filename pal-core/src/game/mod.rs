@@ -577,6 +577,17 @@ impl<M: CollisionMap> GameState<M> {
             .enemy_index_for_slot(usize::from(enemy_slot))
     }
 
+    /// Resolve the signed target used by Classic's simulated player magic.
+    /// `0xFFFF` is the script representation of `-1`; all-target magic ignores the
+    /// concrete index, while single-target magic falls back to a living enemy.
+    fn battle_simulated_magic_target(&self, enemy_slot: u16) -> Option<usize> {
+        if enemy_slot == u16::MAX {
+            self.active_battle.as_ref()?.first_living_enemy()
+        } else {
+            self.battle_enemy_index(enemy_slot)
+        }
+    }
+
     /// Transform a battle enemy selected by its original slot.
     ///
     /// Returns `Some(false)` when the instruction is valid but an active status suppresses it.
@@ -3937,7 +3948,7 @@ impl<M: CollisionMap> GameState<M> {
                 magic_object,
                 base_strength,
             } => {
-                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                let Some(enemy_index) = self.battle_simulated_magic_target(enemy_index) else {
                     return false;
                 };
                 let (Some(battle), Some(objects), Some(magics)) = (
@@ -3960,7 +3971,7 @@ impl<M: CollisionMap> GameState<M> {
                 magic_object,
                 multiplier,
             } => {
-                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
+                let Some(enemy_index) = self.battle_simulated_magic_target(enemy_index) else {
                     return false;
                 };
                 let (Some(battle), Some(objects), Some(magics)) = (
@@ -5768,6 +5779,7 @@ mod tests {
             [0, 0, 31, 0, 0, ITEM_FLAG_USABLE | ITEM_FLAG_CONSUMING],
             [0, 0, 32, 0, 0, ITEM_FLAG_USABLE],
             [0, 0, 0, 0, 41, ITEM_FLAG_THROWABLE],
+            [0, 0, 0, 0, 0, MAGIC_FLAG_APPLY_TO_ALL],
         ];
         let objects = GlobalObjects::parse(
             &object_words
@@ -6371,6 +6383,48 @@ mod tests {
         assert!(reusable.battle_use_item(3, Some(0)).is_some());
         assert_eq!(reusable.battle_usable_item(3).unwrap().amount, 1);
         assert!(reusable.battle_use_item(3, Some(1)).is_some());
+    }
+
+    #[test]
+    fn all_target_simulated_magic_accepts_classic_sentinel_and_carries_visual_data() {
+        let mut state = battle_item_state(1);
+        let mut second = state.battle().unwrap().enemies[0].clone();
+        second.slot = 1;
+        state.battle_mut().unwrap().enemies.push(second);
+        let hp_before = state
+            .battle()
+            .unwrap()
+            .enemies
+            .iter()
+            .map(|enemy| enemy.hp)
+            .collect::<Vec<_>>();
+
+        assert!(
+            state.apply_script_action(ScriptAction::SimulatePlayerMagic {
+                enemy_index: u16::MAX,
+                magic_object: 5,
+                base_strength: 100,
+            })
+        );
+
+        assert!(state
+            .battle()
+            .unwrap()
+            .enemies
+            .iter()
+            .zip(&hp_before)
+            .all(|(enemy, before)| enemy.hp < *before));
+        assert!(matches!(
+            state.advance_battle_resolution().as_slice(),
+            [
+                BattleEvent::SimulatedMagic {
+                    magic,
+                    visual: true,
+                    ..
+                },
+                BattleEvent::SimulatedMagic { visual: false, .. }
+            ] if magic.object_id == 5 && magic.attacks_all
+        ));
     }
 
     #[test]

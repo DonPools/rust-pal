@@ -205,6 +205,20 @@ fn creates_enemy_instances_from_team_objects_and_positions() {
 }
 
 #[test]
+fn command_phase_excludes_round_execution_while_public_phase_is_awaiting_command() {
+    let (data, objects, magics, role) = fixture(100, 10, 100);
+    let mut battle =
+        BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+    complete_pending_scripts(&mut battle);
+    assert!(battle.is_command_phase());
+
+    assert!(battle.attack(0).is_some());
+
+    assert_eq!(battle.phase(), BattlePhase::AwaitingCommand);
+    assert!(!battle.is_command_phase());
+}
+
+#[test]
 fn division_uses_free_slots_and_requested_health_divisor() {
     let (data, objects, magics, role) = fixture(100, 10, 100);
     let mut battle =
@@ -654,12 +668,12 @@ fn simulated_magic_retargets_and_queues_damage_feedback() {
         battle.advance_resolution().as_slice(),
         [BattleEvent::SimulatedMagic {
             enemy: 1,
-            magic_object: 2,
+            magic,
             blow: -2,
             damage,
             defeated: _,
             ..
-        }] if *damage > 0
+        }] if magic.object_id == 2 && *damage > 0
     ));
 }
 
@@ -1078,10 +1092,10 @@ fn thrown_weapon_script_uses_enemy_owner_and_acting_player_attack() {
         event,
         BattleEvent::SimulatedMagic {
             enemy: 0,
-            magic_object: 2,
+            magic,
             damage,
             ..
-        } if *damage > 0
+        } if magic.object_id == 2 && *damage > 0
     )));
     let feedback = battle.advance_resolution();
     assert!(feedback.iter().any(|event| matches!(
