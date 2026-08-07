@@ -10,9 +10,10 @@ use crate::audio::{BackgroundMusic, SoundEffects};
 use super::battle_render::{BattleMenuState, PostBattlePresentation};
 use super::dialog::ActiveDialog;
 use super::menu_state::{
-    ConfirmationMenu, EquipSession, FieldMenu, InventoryMenu, ItemUseSession, MagicSession,
-    ShopMenu,
+    ActiveMenu, ConfirmationMenu, EquipSession, FieldMenu, InventoryMenu, ItemUseSession,
+    MagicSession, ShopMenu,
 };
+use super::original_save::OriginalSaveEnvironment;
 use super::visual::VisualState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,11 +51,17 @@ impl PendingSceneChange {
     }
 }
 
-pub(super) struct SessionState {
+pub(super) struct ScriptSession {
     pub(super) pending_scene_change: Option<PendingSceneChange>,
     pub(super) pending_dialog: Option<ActiveDialog>,
     pub(super) pending_script_event: Option<ScriptEvent>,
-    pub(super) field_menu: Option<FieldMenu>,
+    pub(super) auto_scripts: ScriptTable,
+    pub(super) dialog_delay_ms: u16,
+    pub(super) waiting_for_key: bool,
+}
+
+pub(super) struct MenuSession {
+    pub(super) active_menu: Option<ActiveMenu>,
     pub(super) main_menu_selected: usize,
     pub(super) inventory_action_selected: usize,
     pub(super) inventory_selected: usize,
@@ -62,6 +69,13 @@ pub(super) struct SessionState {
     pub(super) magic_caster_selected: usize,
     pub(super) magic_selected: usize,
     pub(super) magic_target_selected: usize,
+    pub(super) system_selected: usize,
+    pub(super) item_use: Option<ItemUseSession>,
+    pub(super) equip: Option<EquipSession>,
+    pub(super) magic: Option<MagicSession>,
+}
+
+pub(super) struct BattlePresentationState {
     pub(super) battle_selected_enemy: usize,
     pub(super) battle_command_selected: usize,
     pub(super) battle_targeting_enemy: bool,
@@ -78,26 +92,132 @@ pub(super) struct SessionState {
     pub(super) magic_effect_frame_counts: Vec<Option<usize>>,
     pub(super) player_battle_frame_counts: Vec<Option<usize>>,
     pub(super) post_battle: Option<PostBattlePresentation>,
-    pub(super) system_selected: usize,
-    pub(super) confirmation_menu: Option<ConfirmationMenu>,
-    pub(super) shop_menu: Option<ShopMenu>,
-    pub(super) inventory_menu: Option<InventoryMenu>,
-    pub(super) item_use: Option<ItemUseSession>,
-    pub(super) equip: Option<EquipSession>,
-    pub(super) magic: Option<MagicSession>,
-    pub(super) auto_scripts: ScriptTable,
+}
+
+pub(super) struct AudioSession {
     pub(super) sound_effects: SoundEffects,
     pub(super) music: BackgroundMusic,
-    pub(super) visual: VisualState,
-    pub(super) dialog_delay_ms: u16,
-    pub(super) waiting_for_key: bool,
+}
+
+pub(super) struct PersistenceState {
     pub(super) load_last_save_requested: bool,
     pub(super) pending_load_slot: Option<u8>,
     pub(super) quit_requested: bool,
     pub(super) current_save_slot: Option<u8>,
 }
 
-impl SessionState {
+pub(super) struct DesktopSession {
+    pub(super) scripts: ScriptSession,
+    pub(super) menus: MenuSession,
+    pub(super) battle: BattlePresentationState,
+    pub(super) audio: AudioSession,
+    pub(super) visual: VisualState,
+    pub(super) persistence: PersistenceState,
+}
+
+impl DesktopSession {
+    pub(super) fn has_active_menu(&self) -> bool {
+        self.menus.active_menu.is_some()
+    }
+
+    pub(super) fn set_field_menu(&mut self, menu: FieldMenu) {
+        self.menus.active_menu = Some(ActiveMenu::Field(menu));
+    }
+
+    pub(super) fn set_inventory_menu(&mut self, menu: InventoryMenu) {
+        self.menus.active_menu = Some(ActiveMenu::Inventory(menu));
+    }
+
+    pub(super) fn set_confirmation_menu(&mut self, menu: ConfirmationMenu) {
+        self.menus.active_menu = Some(ActiveMenu::Confirmation(menu));
+    }
+
+    pub(super) fn set_shop_menu(&mut self, menu: ShopMenu) {
+        self.menus.active_menu = Some(ActiveMenu::Shop(menu));
+    }
+
+    pub(super) fn take_field_menu(&mut self) -> Option<FieldMenu> {
+        match self.menus.active_menu.take() {
+            Some(ActiveMenu::Field(menu)) => Some(menu),
+            other => {
+                self.menus.active_menu = other;
+                None
+            }
+        }
+    }
+
+    pub(super) fn take_inventory_menu(&mut self) -> Option<InventoryMenu> {
+        match self.menus.active_menu.take() {
+            Some(ActiveMenu::Inventory(menu)) => Some(menu),
+            other => {
+                self.menus.active_menu = other;
+                None
+            }
+        }
+    }
+
+    pub(super) fn take_confirmation_menu(&mut self) -> Option<ConfirmationMenu> {
+        match self.menus.active_menu.take() {
+            Some(ActiveMenu::Confirmation(menu)) => Some(menu),
+            other => {
+                self.menus.active_menu = other;
+                None
+            }
+        }
+    }
+
+    pub(super) fn take_shop_menu(&mut self) -> Option<ShopMenu> {
+        match self.menus.active_menu.take() {
+            Some(ActiveMenu::Shop(menu)) => Some(menu),
+            other => {
+                self.menus.active_menu = other;
+                None
+            }
+        }
+    }
+
+    pub(super) fn clear_active_menu(&mut self) {
+        self.menus.active_menu = None;
+    }
+
+    pub(super) fn clear_transient_interaction(&mut self) {
+        self.scripts.pending_scene_change = None;
+        self.scripts.pending_dialog = None;
+        self.scripts.pending_script_event = None;
+        self.persistence.pending_load_slot = None;
+        self.menus.active_menu = None;
+        self.scripts.waiting_for_key = false;
+        self.menus.item_use = None;
+        self.menus.equip = None;
+        self.menus.magic = None;
+        self.battle.battle_events.clear();
+        self.battle.battle_kept_effects.clear();
+        self.battle.post_battle = None;
+    }
+
+    pub(super) fn apply_original_restore(
+        &mut self,
+        environment: OriginalSaveEnvironment,
+        prepare_fade_in: bool,
+    ) {
+        self.persistence.current_save_slot = Some(environment.slot);
+        self.visual
+            .restore_original_environment(environment.night_palette, environment.screen_wave);
+        if prepare_fade_in {
+            self.visual.prepare_scene_fade_in();
+        }
+        self.clear_transient_interaction();
+    }
+
+    pub(super) fn sync_music(&mut self, music_id: Option<u16>) -> bool {
+        if let Some(music_id) = music_id {
+            self.audio.music.play(music_id, true, 0)
+        } else {
+            self.audio.music.stop();
+            true
+        }
+    }
+
     pub(super) fn new(
         auto_scripts: ScriptTable,
         voc_mkf: &[u8],
@@ -108,55 +228,63 @@ impl SessionState {
         player_battle_sprites: &BattleSpriteArchive,
     ) -> Self {
         Self {
-            pending_scene_change: None,
-            pending_dialog: None,
-            pending_script_event: None,
-            field_menu: None,
-            main_menu_selected: 0,
-            inventory_action_selected: 0,
-            inventory_selected: 0,
-            item_target_selected: 0,
-            magic_caster_selected: 0,
-            magic_selected: 0,
-            magic_target_selected: 0,
-            battle_selected_enemy: 0,
-            battle_command_selected: 0,
-            battle_targeting_enemy: false,
-            battle_menu: BattleMenuState::Main,
-            battle_auto_attack: false,
-            battle_force_all: false,
-            battle_repeat_all: false,
-            battle_events: VecDeque::new(),
-            battle_event_ticks: 0,
-            battle_kept_effects: Vec::new(),
-            battle_effect_sound_count: 0,
-            battle_feedback_sound_played: false,
-            battle_settlement_ticks: None,
-            magic_effect_frame_counts: (0..magic_effect_sprites.len())
-                .map(|index| magic_effect_sprites.frame_count(index))
-                .collect(),
-            player_battle_frame_counts: (0..player_battle_sprites.len())
-                .map(|index| player_battle_sprites.frame_count(index))
-                .collect(),
-            post_battle: None,
-            system_selected: 0,
-            confirmation_menu: None,
-            shop_menu: None,
-            inventory_menu: None,
-            item_use: None,
-            equip: None,
-            magic: None,
-            auto_scripts,
-            sound_effects: SoundEffects::new(voc_mkf).expect("failed to load VOC sound effects"),
-            music: BackgroundMusic::new(mus_mkf, midi_mkf, sound_font)
-                .expect("failed to load MUS.MKF RIX music"),
+            scripts: ScriptSession {
+                pending_scene_change: None,
+                pending_dialog: None,
+                pending_script_event: None,
+                auto_scripts,
+                dialog_delay_ms: 24,
+                waiting_for_key: false,
+            },
+            menus: MenuSession {
+                active_menu: None,
+                main_menu_selected: 0,
+                inventory_action_selected: 0,
+                inventory_selected: 0,
+                item_target_selected: 0,
+                magic_caster_selected: 0,
+                magic_selected: 0,
+                magic_target_selected: 0,
+                system_selected: 0,
+                item_use: None,
+                equip: None,
+                magic: None,
+            },
+            battle: BattlePresentationState {
+                battle_selected_enemy: 0,
+                battle_command_selected: 0,
+                battle_targeting_enemy: false,
+                battle_menu: BattleMenuState::Main,
+                battle_auto_attack: false,
+                battle_force_all: false,
+                battle_repeat_all: false,
+                battle_events: VecDeque::new(),
+                battle_event_ticks: 0,
+                battle_kept_effects: Vec::new(),
+                battle_effect_sound_count: 0,
+                battle_feedback_sound_played: false,
+                battle_settlement_ticks: None,
+                magic_effect_frame_counts: (0..magic_effect_sprites.len())
+                    .map(|index| magic_effect_sprites.frame_count(index))
+                    .collect(),
+                player_battle_frame_counts: (0..player_battle_sprites.len())
+                    .map(|index| player_battle_sprites.frame_count(index))
+                    .collect(),
+                post_battle: None,
+            },
+            audio: AudioSession {
+                sound_effects: SoundEffects::new(voc_mkf)
+                    .expect("failed to load VOC sound effects"),
+                music: BackgroundMusic::new(mus_mkf, midi_mkf, sound_font)
+                    .expect("failed to load MUS.MKF RIX music"),
+            },
             visual: VisualState::new(),
-            dialog_delay_ms: 24,
-            waiting_for_key: false,
-            load_last_save_requested: false,
-            pending_load_slot: None,
-            quit_requested: false,
-            current_save_slot: None,
+            persistence: PersistenceState {
+                load_last_save_requested: false,
+                pending_load_slot: None,
+                quit_requested: false,
+                current_save_slot: None,
+            },
         }
     }
 }

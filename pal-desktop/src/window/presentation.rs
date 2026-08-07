@@ -19,7 +19,7 @@ use super::menu_render::{
     render_confirmation_menu, render_field_menu, render_inventory_menu, render_opening_menu,
     render_shop_menu, render_status_menu,
 };
-use super::menu_state::{ConfirmationMenu, FieldMenu, InventoryMenu, OpeningMenu, ShopMenu};
+use super::menu_state::{ActiveMenu, OpeningMenu};
 use super::opening_intro::OpeningIntro;
 use super::scene_render::render_tile_map;
 use super::visual::VisualState;
@@ -32,10 +32,7 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) opening_menu: Option<&'a OpeningMenu>,
     pub(super) opening_background: &'a Bitmap,
     pub(super) dialog: Option<&'a ActiveDialog>,
-    pub(super) field_menu: Option<&'a FieldMenu>,
-    pub(super) inventory_menu: Option<&'a InventoryMenu>,
-    pub(super) confirmation_menu: Option<&'a ConfirmationMenu>,
-    pub(super) shop_menu: Option<&'a ShopMenu>,
+    pub(super) active_menu: Option<&'a ActiveMenu>,
     pub(super) text: &'a TextLibrary,
     pub(super) font: &'a BitmapFont,
     pub(super) dialog_faces: &'a [Option<RleBitmap>],
@@ -199,51 +196,50 @@ pub(super) fn render_game(
             ui.ui_sprites,
             dialog,
         );
-    } else if let Some(menu) = ui.confirmation_menu {
-        render_confirmation_menu(
-            renderer,
-            ui.text,
-            ui.font,
-            ui.ui_sprites,
-            *menu,
-            ui.ui_ticks,
-        );
-    } else if let Some(menu) = ui.field_menu {
-        render_field_menu(
-            renderer,
-            game,
-            ui.text,
-            ui.font,
-            ui.dialog_faces,
-            ui.ui_sprites,
-            ui.item_sprites,
-            ui.status_background,
-            *menu,
-            ui.ui_ticks,
-        );
-    } else if let Some(menu) = ui.shop_menu {
-        render_shop_menu(
-            renderer,
-            game,
-            ui.text,
-            ui.font,
-            ui.ui_sprites,
-            ui.item_sprites,
-            *menu,
-            ui.ui_ticks,
-        );
-    } else if let Some(menu) = ui.inventory_menu {
-        render_inventory_menu(
-            renderer,
-            game,
-            ui.text,
-            ui.font,
-            ui.ui_sprites,
-            ui.item_sprites,
-            ui.equip_background,
-            *menu,
-            ui.ui_ticks,
-        );
+    } else if let Some(menu) = ui.active_menu {
+        match *menu {
+            ActiveMenu::Confirmation(menu) => render_confirmation_menu(
+                renderer,
+                ui.text,
+                ui.font,
+                ui.ui_sprites,
+                menu,
+                ui.ui_ticks,
+            ),
+            ActiveMenu::Field(menu) => render_field_menu(
+                renderer,
+                game,
+                ui.text,
+                ui.font,
+                ui.dialog_faces,
+                ui.ui_sprites,
+                ui.item_sprites,
+                ui.status_background,
+                menu,
+                ui.ui_ticks,
+            ),
+            ActiveMenu::Shop(menu) => render_shop_menu(
+                renderer,
+                game,
+                ui.text,
+                ui.font,
+                ui.ui_sprites,
+                ui.item_sprites,
+                menu,
+                ui.ui_ticks,
+            ),
+            ActiveMenu::Inventory(menu) => render_inventory_menu(
+                renderer,
+                game,
+                ui.text,
+                ui.font,
+                ui.ui_sprites,
+                ui.item_sprites,
+                ui.equip_background,
+                menu,
+                ui.ui_ticks,
+            ),
+        }
     }
     ui.visual.apply_post_effects(renderer, role_sprites);
 }

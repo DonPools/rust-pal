@@ -58,6 +58,20 @@ pal-launcher -> pal-desktop -> pal-core -> pal-assets
 | `pal-desktop` | 窗口、输入、音频与 framebuffer 呈现 | 将平台事件转换为 core 可理解的命令 |
 | `pal-launcher` | 数据路径、启动参数和各层装配 | 不承载长期游戏状态或规则 |
 
+桌面运行时进一步分为平台 host 和应用状态两层。`window.rs` 只负责 `winit`/`pixels`
+窗口事件、surface 调整和 framebuffer 呈现；`DesktopApp` 持有游戏、脚本、输入、表现和
+固定时间步状态。更新顺序由显式 `UpdateLane` 状态机决定，开场阶段由 `FrontendState`
+保证互斥，活动菜单由单一 `ActiveMenu` 表示。桌面会话按脚本、菜单、战斗表现、音频、
+视觉和持久化分组，避免平台事件循环直接组合非法状态。
+
+```text
+winit event -> DesktopApp::advance -> UpdateLane -> core/script/battle/menu
+                  |                       |
+                  +---- render_frame <----+
+                            |
+                       pixels present
+```
+
 分层用于控制代码依赖，开发计划则按可运行的玩家体验组织。每个里程碑都会同时涉及
 资源、核心逻辑、平台适配和表现层，而不是先完成一个系统再开始下一个系统。
 

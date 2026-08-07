@@ -7,14 +7,14 @@ use pal_core::script::{ScriptRuntime, ScriptVisual};
 
 use super::dialog::ActiveDialog;
 use super::menu_state::{
-    update_wrapping_selection, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
+    update_wrapping_selection, ActiveMenu, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
     ItemUseSession, MagicSession, SaveSlotMode, ShopMode, SystemAudioKind,
 };
 use super::original_save::{
     next_saved_times, original_save_slots, save_original_game, SaveOriginalGameError,
 };
 use super::script_driver::{advance_script, ScriptRenderResources};
-use super::session::SessionState;
+use super::session::DesktopSession;
 use super::LoadedScene;
 
 pub(super) struct MenuUpdateContext<'a, L, S> {
@@ -25,7 +25,7 @@ pub(super) struct MenuUpdateContext<'a, L, S> {
     pub(super) text: &'a TextLibrary,
     pub(super) role_sprites: &'a RoleSprites,
     pub(super) load_scene: &'a mut L,
-    pub(super) services: &'a mut SessionState,
+    pub(super) services: &'a mut DesktopSession,
     pub(super) original_save_dir: &'a Path,
     pub(super) set_title: &'a mut S,
 }
@@ -52,9 +52,9 @@ where
 
     fn sync_music(&mut self) {
         if let Some(music_id) = self.game.current_music {
-            self.services.music.play(music_id, true, 0);
+            self.services.audio.music.play(music_id, true, 0);
         } else {
-            self.services.music.stop();
+            self.services.audio.music.stop();
         }
     }
 }
@@ -66,16 +66,11 @@ where
 {
     let changed =
         context.input.confirm || context.input.cancel || context.input.direction_pressed.is_some();
-    if context.services.confirmation_menu.is_some() {
-        update_confirmation_menu(context);
-    } else if context.services.field_menu.is_some() {
-        update_field_menu(context);
-    } else if context.services.shop_menu.is_some() {
-        update_shop_menu(context);
-    } else if context.services.inventory_menu.is_some() {
-        update_inventory_menu(context);
-    } else {
-        return None;
+    match context.services.menus.active_menu.as_ref()? {
+        ActiveMenu::Confirmation(_) => update_confirmation_menu(context),
+        ActiveMenu::Field(_) => update_field_menu(context),
+        ActiveMenu::Shop(_) => update_shop_menu(context),
+        ActiveMenu::Inventory(_) => update_inventory_menu(context),
     }
     Some(changed)
 }
@@ -87,8 +82,7 @@ where
 {
     let mut menu = context
         .services
-        .confirmation_menu
-        .take()
+        .take_confirmation_menu()
         .expect("confirmation menu was checked above");
     if matches!(
         context.input.direction_pressed,
@@ -107,7 +101,7 @@ where
         }
         context.advance_script();
     } else {
-        context.services.confirmation_menu = Some(menu);
+        context.services.set_confirmation_menu(menu);
     }
 }
 
@@ -118,14 +112,13 @@ where
 {
     let mut menu = context
         .services
-        .field_menu
-        .take()
+        .take_field_menu()
         .expect("field menu was checked above");
     let mut keep_menu = true;
     match &mut menu {
         FieldMenu::Main { selected } => {
             update_wrapping_selection(selected, context.input.direction_pressed, 4);
-            context.services.main_menu_selected = *selected;
+            context.services.menus.main_menu_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
                 (context.set_title)("Rust-PAL");
@@ -138,6 +131,7 @@ where
                     1 => {
                         let selected = context
                             .services
+                            .menus
                             .magic_caster_selected
                             .min(context.game.party.members().len().saturating_sub(1));
                         menu = FieldMenu::MagicCaster { selected };
@@ -145,13 +139,13 @@ where
                     }
                     2 => {
                         menu = FieldMenu::InventoryAction {
-                            selected: context.services.inventory_action_selected,
+                            selected: context.services.menus.inventory_action_selected,
                         };
                         (context.set_title)("Rust-PAL [Inventory]");
                     }
                     3 => {
                         menu = FieldMenu::System {
-                            selected: context.services.system_selected,
+                            selected: context.services.menus.system_selected,
                         };
                         (context.set_title)("Rust-PAL [System]");
                     }
@@ -161,14 +155,14 @@ where
         }
         FieldMenu::InventoryAction { selected } => {
             update_wrapping_selection(selected, context.input.direction_pressed, 2);
-            context.services.inventory_action_selected = *selected;
+            context.services.menus.inventory_action_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
                 (context.set_title)("Rust-PAL");
             } else if context.input.confirm {
                 keep_menu = false;
-                context.services.inventory_menu = Some(InventoryMenu {
-                    selected: context.services.inventory_selected,
+                context.services.set_inventory_menu(InventoryMenu {
+                    selected: context.services.menus.inventory_selected,
                     mode: if *selected == 0 {
                         InventoryMode::EquipItems
                     } else {
@@ -199,7 +193,7 @@ where
                 context.input.direction_pressed,
                 context.game.party.members().len(),
             );
-            context.services.magic_caster_selected = *selected;
+            context.services.menus.magic_caster_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
                 (context.set_title)("Rust-PAL");
@@ -212,7 +206,7 @@ where
                 {
                     menu = FieldMenu::MagicList {
                         caster: *selected,
-                        selected: context.services.magic_selected,
+                        selected: context.services.menus.magic_selected,
                     };
                     (context.set_title)("Rust-PAL [Magic list]");
                 }
@@ -222,7 +216,7 @@ where
             let role_id = context.game.party.members()[*caster].role_id;
             let magics = context.game.field_magics(role_id);
             update_wrapping_selection(selected, context.input.direction_pressed, magics.len());
-            context.services.magic_selected = *selected;
+            context.services.menus.magic_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
                 (context.set_title)("Rust-PAL");
@@ -236,7 +230,7 @@ where
                         {
                             keep_menu = false;
                             if context.scripts.start(request) {
-                                context.services.magic = Some(MagicSession {
+                                context.services.menus.magic = Some(MagicSession {
                                     caster_selected: *caster,
                                     magic_id: magic.magic_id,
                                     target_selected: None,
@@ -249,7 +243,7 @@ where
                         menu = FieldMenu::MagicTarget {
                             caster: *caster,
                             magic_id: magic.magic_id,
-                            selected: context.services.magic_target_selected,
+                            selected: context.services.menus.magic_target_selected,
                         };
                         (context.set_title)("Rust-PAL [Magic target]");
                     }
@@ -266,11 +260,11 @@ where
                 context.input.direction_pressed,
                 context.game.party.members().len(),
             );
-            context.services.magic_target_selected = *selected;
+            context.services.menus.magic_target_selected = *selected;
             if context.input.cancel {
                 menu = FieldMenu::MagicList {
                     caster: *caster,
-                    selected: context.services.magic_selected,
+                    selected: context.services.menus.magic_selected,
                 };
                 (context.set_title)("Rust-PAL [Magic list]");
             } else if context.input.confirm {
@@ -283,7 +277,7 @@ where
                 {
                     keep_menu = false;
                     if context.scripts.start(request) {
-                        context.services.magic = Some(MagicSession {
+                        context.services.menus.magic = Some(MagicSession {
                             caster_selected: *caster,
                             magic_id: *magic_id,
                             target_selected: Some(*selected),
@@ -296,10 +290,10 @@ where
         }
         FieldMenu::System { selected } => {
             update_wrapping_selection(selected, context.input.direction_pressed, 5);
-            context.services.system_selected = *selected;
+            context.services.menus.system_selected = *selected;
             if context.input.cancel {
                 menu = FieldMenu::Main {
-                    selected: context.services.main_menu_selected,
+                    selected: context.services.menus.main_menu_selected,
                 };
                 (context.set_title)("Rust-PAL [Menu]");
             } else if context.input.confirm {
@@ -309,6 +303,7 @@ where
                             mode: SaveSlotMode::Save,
                             selected: context
                                 .services
+                                .persistence
                                 .current_save_slot
                                 .map_or(0, |slot| usize::from(slot.saturating_sub(1))),
                             slots: original_save_slots(context.original_save_dir),
@@ -320,6 +315,7 @@ where
                             mode: SaveSlotMode::Load,
                             selected: context
                                 .services
+                                .persistence
                                 .current_save_slot
                                 .map_or(0, |slot| usize::from(slot.saturating_sub(1))),
                             slots: original_save_slots(context.original_save_dir),
@@ -330,7 +326,7 @@ where
                         menu = FieldMenu::SystemAudio {
                             parent_selected: *selected,
                             kind: SystemAudioKind::Music,
-                            selected_enabled: context.services.music.enabled(),
+                            selected_enabled: context.services.audio.music.enabled(),
                         };
                         (context.set_title)("Rust-PAL [Music switch]");
                     }
@@ -338,7 +334,7 @@ where
                         menu = FieldMenu::SystemAudio {
                             parent_selected: *selected,
                             kind: SystemAudioKind::Sound,
-                            selected_enabled: context.services.sound_effects.enabled(),
+                            selected_enabled: context.services.audio.sound_effects.enabled(),
                         };
                         (context.set_title)("Rust-PAL [Sound switch]");
                     }
@@ -366,13 +362,14 @@ where
             } else if context.input.confirm {
                 match kind {
                     SystemAudioKind::Music => {
-                        context.services.music.set_enabled(*selected_enabled);
+                        context.services.audio.music.set_enabled(*selected_enabled);
                         if *selected_enabled {
                             context.sync_music();
                         }
                     }
                     SystemAudioKind::Sound => context
                         .services
+                        .audio
                         .sound_effects
                         .set_enabled(*selected_enabled),
                 }
@@ -393,8 +390,8 @@ where
                     .visual
                     .queue(ScriptVisual::FadeOut { speed: 2 })
                 {
-                    context.services.music.stop();
-                    context.services.quit_requested = true;
+                    context.services.audio.music.stop();
+                    context.services.persistence.quit_requested = true;
                     keep_menu = false;
                     (context.set_title)("Rust-PAL [Quitting]");
                 } else {
@@ -433,7 +430,7 @@ where
                             screen_wave,
                         ) {
                             Ok(()) => {
-                                context.services.current_save_slot = Some(slot);
+                                context.services.persistence.current_save_slot = Some(slot);
                                 keep_menu = false;
                                 (context.set_title)(&format!(
                                     "Rust-PAL [save slot {slot} written]"
@@ -456,8 +453,8 @@ where
                             .visual
                             .queue(ScriptVisual::FadeOut { speed: 1 })
                         {
-                            context.services.music.stop();
-                            context.services.pending_load_slot = Some(slot);
+                            context.services.audio.music.stop();
+                            context.services.persistence.pending_load_slot = Some(slot);
                             keep_menu = false;
                             (context.set_title)(&format!("Rust-PAL [loading save slot {slot}]"));
                         } else {
@@ -469,7 +466,7 @@ where
         }
     }
     if keep_menu {
-        context.services.field_menu = Some(menu);
+        context.services.set_field_menu(menu);
     }
 }
 
@@ -488,8 +485,7 @@ where
 {
     let mut menu = context
         .services
-        .shop_menu
-        .take()
+        .take_shop_menu()
         .expect("shop menu was checked above");
     let items = menu.items(context.game);
     if menu.confirming {
@@ -547,7 +543,7 @@ where
             }
         }
     }
-    context.services.shop_menu = Some(menu);
+    context.services.set_shop_menu(menu);
 }
 
 fn update_inventory_menu<L, S>(context: &mut MenuUpdateContext<'_, L, S>)
@@ -557,8 +553,7 @@ where
 {
     let mut menu = context
         .services
-        .inventory_menu
-        .take()
+        .take_inventory_menu()
         .expect("inventory menu was checked above");
     let mut close_menu = false;
     let mut item_request = None;
@@ -579,13 +574,13 @@ where
                                     .item_use_request(item_id, None)
                                     .map(|request| (item_id, request, true));
                             } else {
-                                menu.mode = InventoryMode::Target {
-                                    item_id,
-                                    selected: context
-                                        .services
-                                        .item_target_selected
-                                        .min(context.game.party.members().len().saturating_sub(1)),
-                                };
+                                menu.mode =
+                                    InventoryMode::Target {
+                                        item_id,
+                                        selected: context.services.menus.item_target_selected.min(
+                                            context.game.party.members().len().saturating_sub(1),
+                                        ),
+                                    };
                                 (context.set_title)("Rust-PAL [Item target]");
                             }
                         }
@@ -606,6 +601,7 @@ where
                             item_id,
                             selected: context
                                 .services
+                                .menus
                                 .item_target_selected
                                 .min(context.game.party.members().len().saturating_sub(1)),
                         };
@@ -623,7 +619,7 @@ where
                 context.input.direction_pressed,
                 context.game.party.members().len(),
             );
-            context.services.item_target_selected = selected;
+            context.services.menus.item_target_selected = selected;
             menu.mode = InventoryMode::EquipTarget { item_id, selected };
             if context.input.cancel {
                 menu.mode = InventoryMode::EquipItems;
@@ -647,7 +643,7 @@ where
                 context.input.direction_pressed,
                 context.game.party.members().len(),
             );
-            context.services.item_target_selected = selected;
+            context.services.menus.item_target_selected = selected;
             menu.mode = InventoryMode::Target { item_id, selected };
             if context.input.cancel {
                 menu.mode = InventoryMode::Items;
@@ -666,10 +662,10 @@ where
             close_menu = true;
         }
     }
-    context.services.inventory_selected = menu.selected;
+    context.services.menus.inventory_selected = menu.selected;
     if let Some((item_id, role_selected, request)) = equip_request {
         if context.scripts.start(request) {
-            context.services.equip = Some(EquipSession {
+            context.services.menus.equip = Some(EquipSession {
                 item_id,
                 inventory_selected: menu.selected,
                 role_selected,
@@ -677,11 +673,11 @@ where
             (context.set_title)("Rust-PAL [Equipping]");
             context.advance_script();
         } else {
-            context.services.inventory_menu = Some(menu);
+            context.services.set_inventory_menu(menu);
         }
     } else if let Some((item_id, request, apply_to_all)) = item_request {
         if context.scripts.start(request) {
-            context.services.item_use = Some(ItemUseSession {
+            context.services.menus.item_use = Some(ItemUseSession {
                 item_id,
                 inventory_selected: menu.selected,
                 apply_to_all,
@@ -689,10 +685,10 @@ where
             (context.set_title)("Rust-PAL [Using item]");
             context.advance_script();
         } else {
-            context.services.inventory_menu = Some(menu);
+            context.services.set_inventory_menu(menu);
         }
     } else if !close_menu {
-        context.services.inventory_menu = Some(menu);
+        context.services.set_inventory_menu(menu);
     } else {
         (context.set_title)("Rust-PAL");
     }

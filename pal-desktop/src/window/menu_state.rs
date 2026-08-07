@@ -34,6 +34,14 @@ pub(super) enum SaveSlotMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ActiveMenu {
+    Field(FieldMenu),
+    Inventory(InventoryMenu),
+    Confirmation(ConfirmationMenu),
+    Shop(ShopMenu),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SystemAudioKind {
     Music,
     Sound,

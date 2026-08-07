@@ -10,7 +10,7 @@ use super::dialog_text::dialog_body_lines;
 use super::menu_state::{
     ConfirmationMenu, FieldMenu, InventoryMenu, InventoryMode, ShopMenu, ShopMode,
 };
-use super::session::SessionState;
+use super::session::DesktopSession;
 use super::LoadedScene;
 
 const MAX_IMMEDIATE_SCENE_SETUP_EVENTS: usize = 8;
@@ -35,7 +35,7 @@ pub(super) fn advance_script<L>(
     dialog: &mut Option<ActiveDialog>,
     resources: ScriptRenderResources<'_>,
     load_scene: &mut L,
-    services: &mut SessionState,
+    services: &mut DesktopSession,
     set_title: &mut impl FnMut(&str),
 ) where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
@@ -62,13 +62,14 @@ fn advance_script_with_budget<L>(
     dialog: &mut Option<ActiveDialog>,
     resources: ScriptRenderResources<'_>,
     load_scene: &mut L,
-    services: &mut SessionState,
+    services: &mut DesktopSession,
     set_title: &mut impl FnMut(&str),
     immediate_budget: usize,
 ) where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
     let event = services
+        .scripts
         .pending_script_event
         .take()
         .or_else(|| scripts.advance());
@@ -78,7 +79,7 @@ fn advance_script_with_budget<L>(
             active.wait_after_reveal = true;
             active.awaiting_input = true;
             active.auto_wait_ticks = None;
-            services.pending_script_event = event;
+            services.scripts.pending_script_event = event;
             return;
         }
         if !matches!(event_value, ScriptEvent::Message { .. }) {
@@ -100,7 +101,7 @@ fn advance_script_with_budget<L>(
                 font_color,
                 face_index,
                 playing_rng,
-                services.dialog_delay_ms,
+                services.scripts.dialog_delay_ms,
             );
             if let Some(active) = dialog.as_mut() {
                 if active.position == position
@@ -117,7 +118,7 @@ fn advance_script_with_budget<L>(
                 } else {
                     active.awaiting_input = true;
                     next.wait_after_reveal |= dialog_body_lines(resources.text, &next).len() >= 4;
-                    services.pending_dialog = Some(next);
+                    services.scripts.pending_dialog = Some(next);
                 }
             } else {
                 next.wait_after_reveal |= dialog_body_lines(resources.text, &next).len() >= 4;
@@ -130,7 +131,7 @@ fn advance_script_with_budget<L>(
         }
         Some(ScriptEvent::Delay) => {}
         Some(ScriptEvent::Confirm { no_entry }) => {
-            services.confirmation_menu = Some(ConfirmationMenu {
+            services.set_confirmation_menu(ConfirmationMenu {
                 no_entry,
                 selected_yes: false,
             });
@@ -141,7 +142,7 @@ fn advance_script_with_budget<L>(
                 set_title("Rust-PAL [invalid store]");
                 return;
             }
-            services.shop_menu = Some(ShopMenu {
+            services.set_shop_menu(ShopMenu {
                 mode: ShopMode::Buy { store_number },
                 selected: 0,
                 confirming: false,
@@ -150,7 +151,7 @@ fn advance_script_with_budget<L>(
             set_title("Rust-PAL [Buy]");
         }
         Some(ScriptEvent::OpenSellMenu) => {
-            services.shop_menu = Some(ShopMenu {
+            services.set_shop_menu(ShopMenu {
                 mode: ShopMode::Sell,
                 selected: 0,
                 confirming: false,
@@ -159,32 +160,33 @@ fn advance_script_with_budget<L>(
             set_title("Rust-PAL [Sell]");
         }
         Some(ScriptEvent::StartBattle(request)) => {
-            services.field_menu = None;
-            services.inventory_menu = None;
-            services.shop_menu = None;
-            services.confirmation_menu = None;
-            if game.start_battle(request, &services.auto_scripts) {
-                services.battle_selected_enemy = game
+            services.clear_active_menu();
+            if game.start_battle(request, &services.scripts.auto_scripts) {
+                services.battle.battle_selected_enemy = game
                     .battle()
                     .and_then(|battle| battle.first_living_enemy())
                     .unwrap_or(0);
-                services.battle_command_selected = 0;
-                services.battle_targeting_enemy = false;
-                services.battle_menu = super::battle_render::BattleMenuState::Main;
-                services.battle_auto_attack = false;
-                services.battle_force_all = false;
-                services.battle_repeat_all = false;
-                services.post_battle = None;
-                services.battle_events.clear();
-                services.battle_event_ticks = 0;
-                services.battle_kept_effects.clear();
-                services.battle_effect_sound_count = 0;
-                services.battle_feedback_sound_played = false;
-                services.battle_settlement_ticks = None;
+                services.battle.battle_command_selected = 0;
+                services.battle.battle_targeting_enemy = false;
+                services.battle.battle_menu = super::battle_render::BattleMenuState::Main;
+                services.battle.battle_auto_attack = false;
+                services.battle.battle_force_all = false;
+                services.battle.battle_repeat_all = false;
+                services.battle.post_battle = None;
+                services.battle.battle_events.clear();
+                services.battle.battle_event_ticks = 0;
+                services.battle.battle_kept_effects.clear();
+                services.battle.battle_effect_sound_count = 0;
+                services.battle.battle_feedback_sound_played = false;
+                services.battle.battle_settlement_ticks = None;
                 services.visual.queue_battle_transition();
                 if game.current_battle_music == 0 {
-                    services.music.stop();
-                } else if !services.music.play(game.current_battle_music, true, 0) {
+                    services.audio.music.stop();
+                } else if !services
+                    .audio
+                    .music
+                    .play(game.current_battle_music, true, 0)
+                {
                     set_title("Rust-PAL [battle music unavailable]");
                     return;
                 }
@@ -212,9 +214,9 @@ fn advance_script_with_budget<L>(
             set_title("Rust-PAL [visual effect is already active]");
         }
         Some(ScriptEvent::Visual(_)) => {}
-        Some(ScriptEvent::WaitForKey) => services.waiting_for_key = true,
-        Some(ScriptEvent::LoadLastSave) => services.load_last_save_requested = true,
-        Some(ScriptEvent::QuitGame) => services.quit_requested = true,
+        Some(ScriptEvent::WaitForKey) => services.scripts.waiting_for_key = true,
+        Some(ScriptEvent::LoadLastSave) => services.persistence.load_last_save_requested = true,
+        Some(ScriptEvent::QuitGame) => services.persistence.quit_requested = true,
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SetPlayerPosition { .. },
         )) => {
@@ -237,7 +239,7 @@ fn advance_script_with_budget<L>(
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
             if super::session::PendingSceneChange::request(
-                &mut services.pending_scene_change,
+                &mut services.scripts.pending_scene_change,
                 &mut game.scene_number,
                 scene_number,
             ) {
@@ -267,7 +269,8 @@ fn advance_script_with_budget<L>(
                 set_title("Rust-PAL [invalid scene map]");
                 return;
             }
-            if services.pending_scene_change.is_none() && target_scene == game.scene_number {
+            if services.scripts.pending_scene_change.is_none() && target_scene == game.scene_number
+            {
                 let Some(scene) = load_scene(
                     target_scene,
                     game.scene_map_override(target_scene),
@@ -280,7 +283,7 @@ fn advance_script_with_budget<L>(
             }
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::PlaySound { sound_id }))
-            if !services.sound_effects.play(sound_id) =>
+            if !services.audio.sound_effects.play(sound_id) =>
         {
             set_title(&format!("Rust-PAL [invalid sound {sound_id}]"));
         }
@@ -290,7 +293,7 @@ fn advance_script_with_budget<L>(
             looped,
             fade_seconds,
         })) => {
-            if services.music.play(music_id, looped, fade_seconds) {
+            if services.audio.music.play(music_id, looped, fade_seconds) {
                 game.apply_script_action(pal_core::script::ScriptAction::PlayMusic {
                     music_id,
                     looped,
@@ -351,7 +354,7 @@ fn advance_script_with_budget<L>(
             action @ pal_core::script::ScriptAction::SummonEnemy { failure_entry, .. },
         )) => {
             if game.apply_script_action(action) {
-                services.sound_effects.play(212);
+                services.audio.sound_effects.play(212);
             } else if failure_entry != 0 {
                 scripts.branch_to(failure_entry);
             }
@@ -361,7 +364,7 @@ fn advance_script_with_budget<L>(
             object_id,
         })) => match game.transform_enemy(enemy_index, object_id) {
             Some(true) => {
-                services.sound_effects.play(47);
+                services.audio.sound_effects.play(47);
             }
             Some(false) => {}
             None => set_title("Rust-PAL [script transform target is unavailable]"),
@@ -534,14 +537,14 @@ fn advance_script_with_budget<L>(
                 }
                 return;
             } else if trigger.kind == TriggerKind::Item {
-                if let Some(item_use) = services.item_use.take() {
+                if let Some(item_use) = services.menus.item_use.take() {
                     game.finish_item_use(item_use.item_id, next_entry, succeeded);
                     let selected = item_use
                         .inventory_selected
                         .min(game.inventory().len().saturating_sub(1));
-                    services.inventory_selected = selected;
+                    services.menus.inventory_selected = selected;
                     if item_use.apply_to_all {
-                        services.inventory_menu = None;
+                        services.clear_active_menu();
                         set_title("Rust-PAL");
                     } else if game.usable_item(item_use.item_id).is_some() {
                         let target_selected = game
@@ -550,8 +553,8 @@ fn advance_script_with_budget<L>(
                             .iter()
                             .position(|member| member.role_id == trigger.object_id)
                             .unwrap_or(0);
-                        services.item_target_selected = target_selected;
-                        services.inventory_menu = Some(InventoryMenu {
+                        services.menus.item_target_selected = target_selected;
+                        services.set_inventory_menu(InventoryMenu {
                             selected,
                             mode: InventoryMode::Target {
                                 item_id: item_use.item_id,
@@ -560,7 +563,7 @@ fn advance_script_with_budget<L>(
                         });
                         set_title("Rust-PAL [Item target]");
                     } else {
-                        services.inventory_menu = Some(InventoryMenu {
+                        services.set_inventory_menu(InventoryMenu {
                             selected,
                             mode: InventoryMode::Items,
                         });
@@ -569,14 +572,14 @@ fn advance_script_with_budget<L>(
                 }
                 return;
             } else if trigger.kind == TriggerKind::Equip {
-                if let Some(equip) = services.equip.take() {
+                if let Some(equip) = services.menus.equip.take() {
                     game.finish_item_equip(equip.item_id, next_entry);
                     let selected = equip
                         .inventory_selected
                         .min(game.equippable_inventory().len().saturating_sub(1));
-                    services.inventory_selected = selected;
-                    services.item_target_selected = equip.role_selected;
-                    services.inventory_menu = Some(InventoryMenu {
+                    services.menus.inventory_selected = selected;
+                    services.menus.item_target_selected = equip.role_selected;
+                    services.set_inventory_menu(InventoryMenu {
                         selected,
                         mode: InventoryMode::EquipItems,
                     });
@@ -584,7 +587,7 @@ fn advance_script_with_budget<L>(
                 }
                 return;
             } else if trigger.kind == TriggerKind::Magic {
-                if let Some(mut magic) = services.magic.take() {
+                if let Some(mut magic) = services.menus.magic.take() {
                     game.finish_magic_script(magic.magic_id, next_entry, magic.success_phase);
                     let caster_role = game.party.members()[magic.caster_selected].role_id;
                     if succeeded && !magic.success_phase {
@@ -595,7 +598,7 @@ fn advance_script_with_budget<L>(
                             game.magic_request(caster_role, magic.magic_id, target_role, true)
                         {
                             magic.success_phase = true;
-                            services.magic = Some(magic);
+                            services.menus.magic = Some(magic);
                             scripts.start(request);
                             set_title("Rust-PAL [Casting]");
                             return;
@@ -612,16 +615,16 @@ fn advance_script_with_budget<L>(
                         });
                     if available {
                         if let Some(selected) = magic.target_selected {
-                            services.field_menu = Some(FieldMenu::MagicTarget {
+                            services.set_field_menu(FieldMenu::MagicTarget {
                                 caster: magic.caster_selected,
                                 magic_id: magic.magic_id,
                                 selected,
                             });
                             set_title("Rust-PAL [Magic target]");
                         } else {
-                            services.field_menu = Some(FieldMenu::MagicList {
+                            services.set_field_menu(FieldMenu::MagicList {
                                 caster: magic.caster_selected,
-                                selected: services.magic_selected,
+                                selected: services.menus.magic_selected,
                             });
                             set_title("Rust-PAL [Magic list]");
                         }
@@ -632,6 +635,7 @@ fn advance_script_with_budget<L>(
                 return;
             } else if trigger.object_id == 0xffff {
                 let completed_scene = services
+                    .scripts
                     .pending_scene_change
                     .map_or(game.scene_number, |change| change.source_scene());
                 game.update_scene_enter_script_for(completed_scene, next_entry);
@@ -696,13 +700,13 @@ fn finish_pending_scene_change<L>(
     game: &mut GameState,
     role_sprites: &RoleSprites,
     load_scene: &mut L,
-    services: &mut SessionState,
+    services: &mut DesktopSession,
     set_title: &mut impl FnMut(&str),
 ) -> bool
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
-    let Some(change) = services.pending_scene_change.take() else {
+    let Some(change) = services.scripts.pending_scene_change.take() else {
         return false;
     };
     let target_scene = change.target_scene();
@@ -728,8 +732,8 @@ where
     true
 }
 
-fn cancel_pending_scene_change(game: &mut GameState, services: &mut SessionState) {
-    if let Some(change) = services.pending_scene_change.take() {
+fn cancel_pending_scene_change(game: &mut GameState, services: &mut DesktopSession) {
+    if let Some(change) = services.scripts.pending_scene_change.take() {
         game.scene_number = change.source_scene();
     }
 }
@@ -767,15 +771,15 @@ pub(super) fn opcode_label(raw: u16) -> String {
     )
 }
 
-fn resume_inventory_after_item_error(game: &GameState, services: &mut SessionState) {
-    let Some(item_use) = services.item_use.take() else {
+fn resume_inventory_after_item_error(game: &GameState, services: &mut DesktopSession) {
+    let Some(item_use) = services.menus.item_use.take() else {
         return;
     };
     let selected = item_use
         .inventory_selected
         .min(game.inventory().len().saturating_sub(1));
-    services.inventory_selected = selected;
-    services.inventory_menu = Some(InventoryMenu {
+    services.menus.inventory_selected = selected;
+    services.set_inventory_menu(InventoryMenu {
         selected,
         mode: InventoryMode::Items,
     });
@@ -783,14 +787,14 @@ fn resume_inventory_after_item_error(game: &GameState, services: &mut SessionSta
 
 pub(super) fn resume_script_menu_after_error(
     game: &GameState,
-    services: &mut SessionState,
+    services: &mut DesktopSession,
     kind: TriggerKind,
 ) {
     match kind {
         TriggerKind::Item => resume_inventory_after_item_error(game, services),
         TriggerKind::Equip => {
-            if let Some(equip) = services.equip.take() {
-                services.inventory_menu = Some(InventoryMenu {
+            if let Some(equip) = services.menus.equip.take() {
+                services.set_inventory_menu(InventoryMenu {
                     selected: equip
                         .inventory_selected
                         .min(game.equippable_inventory().len().saturating_sub(1)),
@@ -799,10 +803,10 @@ pub(super) fn resume_script_menu_after_error(
             }
         }
         TriggerKind::Magic => {
-            if let Some(magic) = services.magic.take() {
-                services.field_menu = Some(FieldMenu::MagicList {
+            if let Some(magic) = services.menus.magic.take() {
+                services.set_field_menu(FieldMenu::MagicList {
                     caster: magic.caster_selected,
-                    selected: services.magic_selected,
+                    selected: services.menus.magic_selected,
                 });
             }
         }
@@ -812,15 +816,15 @@ pub(super) fn resume_script_menu_after_error(
 
 pub(super) fn update_trigger_world(
     game: &mut GameState,
-    services: &mut SessionState,
+    services: &mut DesktopSession,
     set_title: &mut impl FnMut(&str),
 ) {
-    let update = game.update_auto_scripts_report(&services.auto_scripts);
+    let update = game.update_auto_scripts_report(&services.scripts.auto_scripts);
     if let Some(error) = update.error {
         set_title(&auto_script_error_title(error));
     }
     for sound_id in game.take_auto_script_sounds() {
-        if !services.sound_effects.play(sound_id) {
+        if !services.audio.sound_effects.play(sound_id) {
             set_title(&format!("Rust-PAL [invalid auto sound {sound_id}]"));
         }
     }
