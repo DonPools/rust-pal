@@ -1,4 +1,4 @@
-//! Native window integration and desktop presentation facade.
+//! Native desktop window integration and presentation facade.
 
 use std::time::Instant;
 
