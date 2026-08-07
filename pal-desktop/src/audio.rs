@@ -1,4 +1,4 @@
-//! Desktop audio output for decoded PAL sound effects, DOS RIX/OPL2 music and MIDI fallback.
+//! Desktop audio output for decoded PAL sound effects and selectable RIX or MIDI music.
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -20,12 +20,30 @@ const MAX_MUSIC_SECONDS: f64 = 15.0 * 60.0;
 const RELEASE_TAIL_SECONDS: f64 = 2.0;
 const MUSIC_BUFFER_FRAMES: usize = 2048;
 const MUSIC_BUFFER_COUNT: usize = 8;
+const MIDI_PREAMP_GAIN: f32 = 0.75;
+const MIDI_LIMITER_THRESHOLD: f32 = 0.85;
+const MIDI_LIMITER_CEILING: f32 = 0.98;
 const RIX_TICKS_PER_SECOND: usize = 70;
 const RIX_SAMPLES_PER_TICK: usize = MUSIC_SAMPLE_RATE as usize / RIX_TICKS_PER_SECOND;
 const MAX_RIX_TICKS: usize = MAX_MUSIC_SECONDS as usize * RIX_TICKS_PER_SECOND;
 pub const AUDIO_VOLUME_MAX: u8 = 100;
 const DEFAULT_MUSIC_VOLUME: u8 = 100;
 const DEFAULT_SOUND_VOLUME: u8 = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicBackend {
+    Midi,
+    Rix,
+}
+
+impl std::fmt::Display for MusicBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Midi => "MIDI",
+            Self::Rix => "RIX/OPL2",
+        })
+    }
+}
 
 pub struct SoundEffects {
     archive: MkfArchive,
@@ -44,6 +62,7 @@ pub struct BackgroundMusic {
     pending_fade: Option<Duration>,
     loop_control: Option<Arc<AtomicBool>>,
     current: Option<u16>,
+    backend: MusicBackend,
     volume: u8,
     enabled: bool,
 }
@@ -60,12 +79,13 @@ impl BackgroundMusic {
             pending_fade: None,
             loop_control: None,
             current: None,
+            backend: MusicBackend::Rix,
             volume: DEFAULT_MUSIC_VOLUME,
             enabled: true,
         })
     }
 
-    /// Play a DOS `MUS.MKF` RIX song, falling back to MIDI when needed.
+    /// Play one song with the selected backend without changing its timbre mid-session.
     pub fn play(&mut self, music_id: u16, looped: bool, fade_seconds: u8) -> bool {
         if music_id == 0 {
             self.stop();
@@ -83,20 +103,35 @@ impl BackgroundMusic {
             }
             return true;
         }
-        let rix = self
-            .rix_archive
-            .read_chunk(usize::from(music_id))
-            .filter(|chunk| !chunk.is_empty())
-            .map(<[u8]>::to_vec);
-        let midi = self
-            .midi_archive
-            .as_ref()
-            .and_then(|archive| archive.read_chunk(usize::from(music_id)))
-            .filter(|chunk| !chunk.is_empty())
-            .map(<[u8]>::to_vec);
-        if rix.is_none() && midi.is_none() {
-            return false;
-        }
+        let data = match self.backend {
+            MusicBackend::Midi => {
+                let Some(midi) = self
+                    .midi_archive
+                    .as_ref()
+                    .and_then(|archive| archive.read_chunk(usize::from(music_id)))
+                    .filter(|chunk| !chunk.is_empty())
+                else {
+                    return false;
+                };
+                let Some(sound_font) = &self.sound_font else {
+                    return false;
+                };
+                MusicSourceData::Midi {
+                    midi: midi.to_vec(),
+                    sound_font: Arc::clone(sound_font),
+                }
+            }
+            MusicBackend::Rix => {
+                let Some(rix) = self
+                    .rix_archive
+                    .read_chunk(usize::from(music_id))
+                    .filter(|chunk| !chunk.is_empty())
+                else {
+                    return false;
+                };
+                MusicSourceData::Rix(rix.to_vec())
+            }
+        };
         self.stop();
         let Some((_, handle)) = &self.output else {
             self.current = Some(music_id);
@@ -108,23 +143,19 @@ impl BackgroundMusic {
         sink.set_volume(volume_gain(self.volume));
         let fade = Duration::from_secs(u64::from(fade_seconds));
         let (sender, receiver) = mpsc::channel();
-        let sound_font = self.sound_font.clone();
         let loop_control = Arc::new(AtomicBool::new(looped));
         let producer_loop_control = Arc::clone(&loop_control);
         thread::spawn(move || {
-            let source = rix
-                .as_deref()
-                .and_then(|rix| {
-                    StreamingRixSource::new(rix, Arc::clone(&producer_loop_control))
+            let source = match data {
+                MusicSourceData::Rix(rix) => {
+                    StreamingRixSource::new(&rix, Arc::clone(&producer_loop_control))
                         .map(|source| PreparedMusicSource::Rix(Box::new(source)))
-                })
-                .or_else(|| {
-                    Some(PreparedMusicSource::Midi(StreamingMidiSource::new(
-                        midi.as_deref()?,
-                        sound_font.as_ref()?,
-                        producer_loop_control,
-                    )?))
-                });
+                }
+                MusicSourceData::Midi { midi, sound_font } => {
+                    StreamingMidiSource::new(&midi, &sound_font, producer_loop_control)
+                        .map(PreparedMusicSource::Midi)
+                }
+            };
             let _ = sender.send(source);
         });
         self.pending = Some(receiver);
@@ -183,6 +214,28 @@ impl BackgroundMusic {
         self.enabled
     }
 
+    pub fn backend(&self) -> MusicBackend {
+        self.backend
+    }
+
+    pub fn backend_available(&self, backend: MusicBackend) -> bool {
+        match backend {
+            MusicBackend::Midi => self.midi_archive.is_some() && self.sound_font.is_some(),
+            MusicBackend::Rix => true,
+        }
+    }
+
+    pub fn set_backend(&mut self, backend: MusicBackend) -> bool {
+        if !self.backend_available(backend) {
+            return false;
+        }
+        if self.backend != backend {
+            self.stop();
+            self.backend = backend;
+        }
+        true
+    }
+
     pub fn volume(&self) -> u8 {
         self.volume
     }
@@ -222,7 +275,7 @@ pub fn validate_midi_output(midi: &[u8], sound_font: &[u8]) -> bool {
     let Ok(midi_file) = MidiFile::new(&mut reader) else {
         return false;
     };
-    let settings = SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
+    let settings = midi_synthesizer_settings();
     let Ok(synthesizer) = Synthesizer::new(&sound_font, &settings) else {
         return false;
     };
@@ -231,9 +284,15 @@ pub fn validate_midi_output(midi: &[u8], sound_font: &[u8]) -> bool {
     let mut left = vec![0.0f32; MUSIC_SAMPLE_RATE as usize];
     let mut right = vec![0.0f32; MUSIC_SAMPLE_RATE as usize];
     sequencer.render(&mut left, &mut right);
-    left.iter()
-        .chain(&right)
-        .any(|sample| sample.abs() > 0.0001)
+    let mut audible = false;
+    for sample in left.iter().chain(&right) {
+        let pcm = midi_sample_to_pcm(*sample);
+        audible |= pcm != 0;
+        if pcm == i16::MIN || pcm == i16::MAX {
+            return false;
+        }
+    }
+    audible
 }
 
 /// Render a bounded prefix of one RIX track and verify that OPL2 produces sound.
@@ -251,6 +310,14 @@ pub fn validate_rix_output(rix: &[u8]) -> bool {
 fn parse_sound_font(data: &[u8]) -> Option<Arc<SoundFont>> {
     let mut reader = Cursor::new(data);
     Some(Arc::new(SoundFont::new(&mut reader).ok()?))
+}
+
+enum MusicSourceData {
+    Rix(Vec<u8>),
+    Midi {
+        midi: Vec<u8>,
+        sound_font: Arc<SoundFont>,
+    },
 }
 
 enum PreparedMusicSource {
@@ -401,7 +468,7 @@ impl StreamingMidiSource {
             return None;
         }
 
-        let settings = SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
+        let settings = midi_synthesizer_settings();
         let synthesizer = Synthesizer::new(sound_font, &settings).ok()?;
         let mut sequencer = MidiFileSequencer::new(synthesizer);
         // Pass boundaries are controlled by `loop_control` so a repeated
@@ -467,7 +534,7 @@ fn produce_midi_chunks(
         let chunk = left[..frames]
             .iter()
             .zip(&right[..frames])
-            .flat_map(|(&left, &right)| [float_to_pcm(left), float_to_pcm(right)])
+            .flat_map(|(&left, &right)| [midi_sample_to_pcm(left), midi_sample_to_pcm(right)])
             .collect();
         if sender.send(Some(chunk)).is_err() {
             return;
@@ -538,12 +605,31 @@ impl Source for StreamingMidiSource {
 fn interleave_pcm(left: &[f32], right: &[f32]) -> Vec<i16> {
     left.iter()
         .zip(right)
-        .flat_map(|(&left, &right)| [float_to_pcm(left), float_to_pcm(right)])
+        .flat_map(|(&left, &right)| [midi_sample_to_pcm(left), midi_sample_to_pcm(right)])
         .collect()
 }
 
-fn float_to_pcm(sample: f32) -> i16 {
-    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
+fn midi_synthesizer_settings() -> SynthesizerSettings {
+    let mut settings = SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
+    settings.enable_reverb_and_chorus = false;
+    settings
+}
+
+fn midi_sample_to_pcm(sample: f32) -> i16 {
+    if !sample.is_finite() {
+        return 0;
+    }
+    let sample = sample * MIDI_PREAMP_GAIN;
+    let magnitude = sample.abs();
+    let limited = if magnitude <= MIDI_LIMITER_THRESHOLD {
+        sample
+    } else {
+        let knee = MIDI_LIMITER_CEILING - MIDI_LIMITER_THRESHOLD;
+        sample.signum()
+            * (MIDI_LIMITER_THRESHOLD
+                + knee * (1.0 - (-(magnitude - MIDI_LIMITER_THRESHOLD) / knee).exp()))
+    };
+    (limited * f32::from(i16::MAX)) as i16
 }
 
 fn volume_gain(volume: u8) -> f32 {
@@ -663,6 +749,20 @@ impl SoundEffects {
 mod tests {
     use super::*;
 
+    fn make_mkf(chunks: &[&[u8]]) -> Vec<u8> {
+        let table_size = (chunks.len() + 1) * 4;
+        let mut offset = table_size as u32;
+        let mut data = offset.to_le_bytes().to_vec();
+        for chunk in chunks {
+            offset += chunk.len() as u32;
+            data.extend_from_slice(&offset.to_le_bytes());
+        }
+        for chunk in chunks {
+            data.extend_from_slice(chunk);
+        }
+        data
+    }
+
     fn synthetic_rix() -> Vec<u8> {
         let mut data = vec![0; 96];
         data[0..2].copy_from_slice(&0x55aau16.to_le_bytes());
@@ -704,11 +804,35 @@ mod tests {
     }
 
     #[test]
-    fn interleaves_and_clamps_stereo_pcm() {
+    fn unavailable_backend_does_not_change_the_selected_timbre() {
+        let rix = synthetic_rix();
+        let rix_mkf = make_mkf(&[&rix]);
+        let mut music = BackgroundMusic::new(&rix_mkf, &[], &[]).unwrap();
+        assert_eq!(music.backend(), MusicBackend::Rix);
+        assert!(!music.backend_available(MusicBackend::Midi));
+        assert!(!music.set_backend(MusicBackend::Midi));
+        assert_eq!(music.backend(), MusicBackend::Rix);
+    }
+
+    #[test]
+    fn interleaves_midi_with_headroom_and_smooth_limiting() {
+        let pcm = interleave_pcm(&[0.0, 1.5], &[-1.5, 0.5]);
+        assert_eq!(pcm[0], 0);
+        assert_eq!(pcm[1], -pcm[2]);
         assert_eq!(
-            interleave_pcm(&[0.0, 1.5], &[-1.5, 0.5]),
-            vec![0, -32767, 32767, 16383]
+            pcm[3],
+            (0.5 * MIDI_PREAMP_GAIN * f32::from(i16::MAX)) as i16
         );
+        assert!(pcm[1].unsigned_abs() < i16::MAX as u16);
+        assert!(pcm[2].unsigned_abs() < i16::MAX as u16);
+        assert_eq!(midi_sample_to_pcm(f32::NAN), 0);
+    }
+
+    #[test]
+    fn midi_synthesis_disables_brightening_effects_by_default() {
+        assert!(!midi_synthesizer_settings().enable_reverb_and_chorus);
+        assert_eq!(midi_sample_to_pcm(0.5), -midi_sample_to_pcm(-0.5));
+        assert!(midi_sample_to_pcm(10.0).unsigned_abs() < i16::MAX as u16);
     }
 
     #[test]

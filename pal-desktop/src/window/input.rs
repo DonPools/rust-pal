@@ -24,7 +24,9 @@ pub(super) struct HeldInput {
 }
 
 impl HeldInput {
-    pub(super) fn set_key(&mut self, key: KeyCode, pressed: bool, repeat: bool) {
+    /// Update one physical key and report when the final held direction stops.
+    pub(super) fn set_key(&mut self, key: KeyCode, pressed: bool, repeat: bool) -> bool {
+        let had_active_direction = self.active_direction.is_some();
         if pressed && !repeat {
             self.any_pressed = true;
         }
@@ -60,6 +62,8 @@ impl HeldInput {
             KeyCode::KeyF if pressed && !repeat => self.battle_force = true,
             _ => {}
         }
+
+        had_active_direction && self.active_direction.is_none()
     }
 
     pub(super) fn sample(&mut self) -> (GameInput, bool) {
@@ -139,6 +143,24 @@ mod tests {
         input.set_key(KeyCode::ArrowDown, true, true);
 
         assert_eq!(input.sample().0.direction_pressed, None);
+    }
+
+    #[test]
+    fn releasing_the_final_direction_reports_that_movement_stopped() {
+        let mut input = HeldInput::default();
+        assert!(!input.set_key(KeyCode::ArrowDown, true, false));
+        assert!(input.set_key(KeyCode::ArrowDown, false, false));
+        assert_eq!(input.sample().0.direction, None);
+    }
+
+    #[test]
+    fn releasing_one_of_two_directions_keeps_movement_active() {
+        let mut input = HeldInput::default();
+        input.set_key(KeyCode::ArrowDown, true, false);
+        input.set_key(KeyCode::ArrowRight, true, false);
+
+        assert!(!input.set_key(KeyCode::ArrowRight, false, false));
+        assert_eq!(input.sample().0.direction, Some(Direction::South));
     }
 
     #[test]

@@ -55,6 +55,95 @@ impl BitmapFont {
     }
 }
 
+/// Optional Big5 item and magic descriptions supplied by SDLPAL `desc.dat`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemDescriptions {
+    entries: BTreeMap<u16, Vec<Vec<u8>>>,
+}
+
+impl ItemDescriptions {
+    /// Parse lines in the form `HEX_ID(name)=line one*line two`.
+    ///
+    /// Header and blank lines are ignored. `*` separates display lines while
+    /// the retained text remains in its original Big5 encoding.
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        let mut entries = BTreeMap::new();
+        for raw_line in data.split(|byte| *byte == b'\n') {
+            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            let Some(open) = line.iter().position(|byte| *byte == b'(') else {
+                continue;
+            };
+            let Ok(id_text) = std::str::from_utf8(&line[..open]) else {
+                continue;
+            };
+            if id_text.is_empty() || !id_text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            let close = line.windows(2).position(|bytes| bytes == b")=")?;
+            if close <= open + 1 {
+                return None;
+            }
+            let id = u16::from_str_radix(id_text, 16).ok()?;
+            let name = &line[open + 1..close];
+            let description = &line[close + 2..];
+            if name.is_empty()
+                || description.is_empty()
+                || !is_valid_big5_text(name)
+                || !is_valid_big5_text(description)
+            {
+                return None;
+            }
+            let lines = description
+                .split(|byte| *byte == b'*')
+                .map(|line| (!line.is_empty()).then(|| line.to_vec()))
+                .collect::<Option<Vec<_>>>()?;
+            if entries.insert(id, lines).is_some() {
+                return None;
+            }
+        }
+        (!entries.is_empty()).then_some(Self { entries })
+    }
+
+    pub fn lines(&self, object_id: u16) -> Option<&[Vec<u8>]> {
+        self.entries.get(&object_id).map(Vec::as_slice)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u16, &[Vec<u8>])> {
+        self.entries
+            .iter()
+            .map(|(&object_id, lines)| (object_id, lines.as_slice()))
+    }
+}
+
+fn is_valid_big5_text(text: &[u8]) -> bool {
+    let mut index = 0;
+    while index < text.len() {
+        let lead = text[index];
+        if lead < 0x80 {
+            index += 1;
+            continue;
+        }
+        let Some(&trail) = text.get(index + 1) else {
+            return false;
+        };
+        if !(0x81..=0xfe).contains(&lead)
+            || !((0x40..=0x7e).contains(&trail) || (0xa1..=0xfe).contains(&trail))
+        {
+            return false;
+        }
+        index += 2;
+    }
+    true
+}
+
 /// Fixed-width words and indexed messages retained in their original Big5 encoding.
 #[derive(Debug)]
 pub struct TextLibrary {
@@ -175,6 +264,32 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
         assert!(TextLibrary::parse(&[b' '; 10], b"text", &backwards).is_none());
+    }
+
+    #[test]
+    fn parses_optional_item_descriptions_and_line_breaks() {
+        let data = b"header\r\n3d(\xa4\x40\xa4\x41)=\xa4\x42*HP+150\r\n40(\xa4\x43)=\xa4\x44\r\n";
+        let descriptions = ItemDescriptions::parse(data).unwrap();
+        assert_eq!(descriptions.len(), 2);
+        assert_eq!(
+            descriptions.lines(0x3d),
+            Some([b"\xa4\x42".to_vec(), b"HP+150".to_vec()].as_slice())
+        );
+        assert_eq!(
+            descriptions.lines(0x40),
+            Some([b"\xa4\x44".to_vec()].as_slice())
+        );
+        assert_eq!(descriptions.lines(0x41), None);
+    }
+
+    #[test]
+    fn rejects_malformed_or_duplicate_item_descriptions() {
+        assert!(ItemDescriptions::parse(b"3d(\xa4\x40)=\xa4\r\n").is_none());
+        assert!(
+            ItemDescriptions::parse(b"3d(\xa4\x40)=first\r\n3d(\xa4\x40)=second\r\n").is_none()
+        );
+        assert!(ItemDescriptions::parse(b"3d(\xa4\x40)=valid\r\n40(broken\r\n").is_none());
+        assert!(ItemDescriptions::parse(b"header only\r\n").is_none());
     }
 
     #[test]

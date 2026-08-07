@@ -5,10 +5,12 @@ use pal_core::game::{GameInput, GameState};
 use pal_core::role::{Direction, RoleSprites};
 use pal_core::script::{ScriptRuntime, ScriptVisual};
 
+use crate::audio::MusicBackend;
+
 use super::dialog::ActiveDialog;
 use super::menu_state::{
     update_wrapping_selection, ActiveMenu, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
-    ItemUseSession, MagicSession, SaveSlotMode, ShopMode, SystemAudioKind,
+    ItemUseSession, MagicSession, SaveSlotMode, ShopMode,
 };
 use super::original_save::{
     next_saved_times, original_save_slots, save_original_game, SaveOriginalGameError,
@@ -50,11 +52,12 @@ where
         );
     }
 
-    fn sync_music(&mut self) {
+    fn sync_music(&mut self) -> bool {
         if let Some(music_id) = self.game.current_music {
-            self.services.audio.music.play(music_id, true, 0);
+            self.services.audio.music.play(music_id, true, 0)
         } else {
             self.services.audio.music.stop();
+            true
         }
     }
 }
@@ -323,17 +326,22 @@ where
                         (context.set_title)("Rust-PAL [Load slot]");
                     }
                     2 => {
-                        menu = FieldMenu::SystemAudio {
+                        menu = FieldMenu::SystemMusic {
                             parent_selected: *selected,
-                            kind: SystemAudioKind::Music,
-                            selected_enabled: context.services.audio.music.enabled(),
+                            selected: if context.services.audio.music.enabled() {
+                                match context.services.audio.music.backend() {
+                                    MusicBackend::Midi => 1,
+                                    MusicBackend::Rix => 2,
+                                }
+                            } else {
+                                0
+                            },
                         };
-                        (context.set_title)("Rust-PAL [Music switch]");
+                        (context.set_title)("Rust-PAL [Music backend]");
                     }
                     3 => {
-                        menu = FieldMenu::SystemAudio {
+                        menu = FieldMenu::SystemSound {
                             parent_selected: *selected,
-                            kind: SystemAudioKind::Sound,
                             selected_enabled: context.services.audio.sound_effects.enabled(),
                         };
                         (context.set_title)("Rust-PAL [Sound switch]");
@@ -348,9 +356,49 @@ where
                 }
             }
         }
-        FieldMenu::SystemAudio {
+        FieldMenu::SystemMusic {
             parent_selected,
-            kind,
+            selected,
+        } => {
+            update_wrapping_selection(selected, context.input.direction_pressed, 3);
+            if context.input.cancel {
+                menu = FieldMenu::System {
+                    selected: *parent_selected,
+                };
+                (context.set_title)("Rust-PAL [System]");
+            } else if context.input.confirm {
+                let applied = match *selected {
+                    0 => {
+                        context.services.audio.music.set_enabled(false);
+                        true
+                    }
+                    1 | 2 => {
+                        let backend = if *selected == 1 {
+                            MusicBackend::Midi
+                        } else {
+                            MusicBackend::Rix
+                        };
+                        if context.services.audio.music.set_backend(backend) {
+                            context.services.audio.music.set_enabled(true);
+                            context.sync_music()
+                        } else {
+                            false
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                if applied {
+                    menu = FieldMenu::System {
+                        selected: *parent_selected,
+                    };
+                    (context.set_title)("Rust-PAL [System]");
+                } else {
+                    (context.set_title)("Rust-PAL [selected music backend unavailable]");
+                }
+            }
+        }
+        FieldMenu::SystemSound {
+            parent_selected,
             selected_enabled,
         } => {
             update_binary_selection(selected_enabled, context.input.direction_pressed);
@@ -360,19 +408,11 @@ where
                 };
                 (context.set_title)("Rust-PAL [System]");
             } else if context.input.confirm {
-                match kind {
-                    SystemAudioKind::Music => {
-                        context.services.audio.music.set_enabled(*selected_enabled);
-                        if *selected_enabled {
-                            context.sync_music();
-                        }
-                    }
-                    SystemAudioKind::Sound => context
-                        .services
-                        .audio
-                        .sound_effects
-                        .set_enabled(*selected_enabled),
-                }
+                context
+                    .services
+                    .audio
+                    .sound_effects
+                    .set_enabled(*selected_enabled);
                 menu = FieldMenu::System {
                     selected: *parent_selected,
                 };

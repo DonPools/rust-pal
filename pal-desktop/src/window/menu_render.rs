@@ -4,7 +4,7 @@
 
 use pal_assets::bitmap::Bitmap;
 use pal_assets::rle::RleBitmap;
-use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_assets::text::{BitmapFont, ItemDescriptions, TextLibrary};
 use pal_core::battle::BattleState;
 use pal_core::game::GameState;
 
@@ -14,6 +14,7 @@ use super::menu_state::{
     ShopMenu, ShopMode, INVENTORY_COLUMNS, INVENTORY_VISIBLE_ROWS,
 };
 use super::original_save::OriginalSaveSlot;
+use super::text_render::{draw_dialog_ascii, DialogTextMode};
 use crate::renderer::Renderer;
 
 fn draw_ui_box(
@@ -411,6 +412,38 @@ fn render_binary_selection_menu(
     }
 }
 
+fn render_music_backend_menu(
+    renderer: &mut Renderer,
+    sprites: &[RleBitmap],
+    selected: usize,
+    ui_ticks: u64,
+) {
+    const LABELS: [&[u8]; 3] = [b"OFF", b"MIDI", b"RIX"];
+    const BOX_X: [i32; 3] = [55, 128, 201];
+    const Y: i32 = 100;
+
+    for (index, (label, box_x)) in LABELS.into_iter().zip(BOX_X).enumerate() {
+        draw_single_line_box(renderer, sprites, box_x, Y, 2);
+        let color = if index == selected {
+            selected_color(ui_ticks)
+        } else {
+            0x4f
+        };
+        let label_x = box_x + (64 - label.len() as i32 * 8) / 2;
+        for (column, byte) in label.iter().copied().enumerate() {
+            draw_dialog_ascii(
+                renderer,
+                sprites,
+                byte,
+                label_x + column as i32 * 8,
+                106,
+                color,
+                DialogTextMode::Normal,
+            );
+        }
+    }
+}
+
 pub(super) fn render_field_menu(
     renderer: &mut Renderer,
     game: &GameState,
@@ -503,10 +536,16 @@ pub(super) fn render_field_menu(
         FieldMenu::System { selected } => {
             render_system_menu(renderer, text, font, sprites, selected, ui_ticks)
         }
-        FieldMenu::SystemAudio {
+        FieldMenu::SystemMusic {
+            parent_selected,
+            selected,
+        } => {
+            render_system_menu(renderer, text, font, sprites, parent_selected, ui_ticks);
+            render_music_backend_menu(renderer, sprites, selected, ui_ticks);
+        }
+        FieldMenu::SystemSound {
             parent_selected,
             selected_enabled,
-            ..
         } => {
             render_system_menu(renderer, text, font, sprites, parent_selected, ui_ticks);
             render_binary_selection_menu(
@@ -1084,6 +1123,7 @@ pub(super) fn render_inventory_menu(
     game: &GameState,
     text: &TextLibrary,
     font: &BitmapFont,
+    item_descriptions: &ItemDescriptions,
     sprites: &[RleBitmap],
     item_sprites: &[Option<RleBitmap>],
     equip_background: &Bitmap,
@@ -1198,6 +1238,60 @@ pub(super) fn render_inventory_menu(
             draw_cursor(renderer, sprites, x + 25, y + 10);
             draw_item_bitmap(renderer, game, item_sprites, item_id, 8, 147);
         }
+    }
+
+    if let Some(&(item_id, _)) = inventory.get(menu.selected) {
+        render_item_description(renderer, font, sprites, item_descriptions, item_id);
+    }
+}
+
+fn render_item_description(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    descriptions: &ItemDescriptions,
+    item_id: u16,
+) {
+    let Some(lines) = descriptions.lines(item_id) else {
+        return;
+    };
+    for (row, line) in lines.iter().take(3).enumerate() {
+        draw_item_description_line(renderer, font, sprites, line, 48, 142 + row as i32 * 18);
+    }
+}
+
+fn draw_item_description_line(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    text: &[u8],
+    x: i32,
+    y: i32,
+) {
+    let mut cursor_x = x;
+    let mut index = 0;
+    while index < text.len() {
+        let byte = text[index];
+        if byte < 0x80 {
+            draw_dialog_ascii(
+                renderer,
+                sprites,
+                byte,
+                cursor_x,
+                y,
+                0x4f,
+                DialogTextMode::Normal,
+            );
+            cursor_x += 8;
+            index += 1;
+            continue;
+        }
+        let Some(&trail) = text.get(index + 1) else {
+            break;
+        };
+        renderer.draw_big5_text_shadowed(font, &[byte, trail], cursor_x, y, 0x4f);
+        cursor_x += 16;
+        index += 2;
     }
 }
 
@@ -1429,5 +1523,44 @@ fn render_equip_target_menu(
             };
             renderer.draw_big5_text_shadowed(font, label, 15, 108 + index as i32 * 18, color);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pal_assets::palette::Palette;
+
+    fn one_pixel_font() -> BitmapFont {
+        let mut data = vec![0; 0x682 + 30];
+        data[0x682] = 0x80;
+        BitmapFont::parse(&[0xb8, 0x67], &data).unwrap()
+    }
+
+    fn cell_changed(renderer: &Renderer, start_x: usize, end_x: usize) -> bool {
+        (start_x..end_x).any(|x| {
+            (0..15).any(|y| {
+                let offset = (y * renderer.width + x) * 4;
+                renderer.screen()[offset..offset + 4] != [40, 50, 60, 255]
+            })
+        })
+    }
+
+    #[test]
+    fn item_description_draws_big5_and_literal_ascii_effect_text() {
+        let mut renderer = Renderer::new(Palette::default(), 40, 15);
+        renderer.clear(40, 50, 60);
+        draw_item_description_line(
+            &mut renderer,
+            &one_pixel_font(),
+            &[],
+            &[0xb8, 0x67, b'-', b'1'],
+            0,
+            0,
+        );
+
+        assert!(cell_changed(&renderer, 0, 16));
+        assert!(cell_changed(&renderer, 16, 24));
+        assert!(cell_changed(&renderer, 24, 32));
     }
 }

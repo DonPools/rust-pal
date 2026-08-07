@@ -5,7 +5,7 @@ use pal_assets::script::ScriptTable;
 use pal_core::battle::BattleEvent;
 use pal_core::script::ScriptEvent;
 
-use crate::audio::{BackgroundMusic, SoundEffects};
+use crate::audio::{BackgroundMusic, MusicBackend, SoundEffects};
 
 use super::battle_render::{BattleMenuState, PostBattlePresentation};
 use super::dialog::ActiveDialog;
@@ -97,6 +97,13 @@ pub(super) struct BattlePresentationState {
 pub(super) struct AudioSession {
     pub(super) sound_effects: SoundEffects,
     pub(super) music: BackgroundMusic,
+}
+
+pub(super) struct MusicResources<'a> {
+    pub(super) rix_mkf: &'a [u8],
+    pub(super) midi_mkf: &'a [u8],
+    pub(super) sound_font: &'a [u8],
+    pub(super) requested_backend: MusicBackend,
 }
 
 pub(super) struct PersistenceState {
@@ -221,12 +228,24 @@ impl DesktopSession {
     pub(super) fn new(
         auto_scripts: ScriptTable,
         voc_mkf: &[u8],
-        mus_mkf: &[u8],
-        midi_mkf: &[u8],
-        sound_font: &[u8],
+        music_resources: MusicResources<'_>,
         magic_effect_sprites: &BattleSpriteArchive,
         player_battle_sprites: &BattleSpriteArchive,
     ) -> Self {
+        let mut music = BackgroundMusic::new(
+            music_resources.rix_mkf,
+            music_resources.midi_mkf,
+            music_resources.sound_font,
+        )
+        .expect("failed to load MUS.MKF RIX music");
+        if !music.set_backend(music_resources.requested_backend) {
+            eprintln!(
+                "requested {} music is unavailable; using {}",
+                music_resources.requested_backend,
+                music.backend()
+            );
+        }
+        println!("music backend: {}", music.backend());
         Self {
             scripts: ScriptSession {
                 pending_scene_change: None,
@@ -275,8 +294,7 @@ impl DesktopSession {
             audio: AudioSession {
                 sound_effects: SoundEffects::new(voc_mkf)
                     .expect("failed to load VOC sound effects"),
-                music: BackgroundMusic::new(mus_mkf, midi_mkf, sound_font)
-                    .expect("failed to load MUS.MKF RIX music"),
+                music,
             },
             visual: VisualState::new(),
             persistence: PersistenceState {

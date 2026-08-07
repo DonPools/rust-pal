@@ -41,12 +41,6 @@ pub(super) enum ActiveMenu {
     Shop(ShopMenu),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SystemAudioKind {
-    Music,
-    Sound,
-}
-
 impl OpeningMenu {
     pub(super) fn new(slots: [OriginalSaveSlot; 5]) -> Self {
         Self {
@@ -112,9 +106,12 @@ pub(super) enum FieldMenu {
     System {
         selected: usize,
     },
-    SystemAudio {
+    SystemMusic {
         parent_selected: usize,
-        kind: SystemAudioKind,
+        selected: usize,
+    },
+    SystemSound {
+        parent_selected: usize,
         selected_enabled: bool,
     },
     SystemQuit {

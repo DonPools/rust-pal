@@ -4214,25 +4214,22 @@ impl<M: CollisionMap> GameState<M> {
         let dy = y_offset.clamp(-speed, speed);
         self.player.world_x += dx;
         self.player.world_y += dy;
-        self.player.anim_frame =
-            (self.player.anim_frame + 1) % self.player.frames_per_direction.max(1);
         let completed = (self.player.world_x, self.player.world_y) == target;
-        if completed {
-            self.player.anim_frame = 0;
+        for follower in &mut self.party_followers {
+            follower.world_x += dx;
+            follower.world_y += dy;
         }
         {
             let object = self.object_mut(object_id)?;
             object.world_x += dx;
             object.world_y += dy;
-            object.advance_animation();
-            if completed {
-                object.current_frame = 0;
-            }
         }
-        self.record_party_step(
-            (self.player.world_x, self.player.world_y),
-            self.player.direction,
-        );
+        self.party_trail.rotate_right(1);
+        self.party_trail[0] = TrailPoint {
+            world_x: self.player.world_x,
+            world_y: self.player.world_y,
+            direction: self.player.direction,
+        };
         self.follow_player();
         Some(completed)
     }
@@ -4294,14 +4291,7 @@ impl<M: CollisionMap> GameState<M> {
             return true;
         }
         let Some(direction) = input.direction else {
-            if self.player.anim_frame == 0 {
-                return changed;
-            }
-            self.player.anim_frame = 0;
-            for follower in &mut self.party_followers {
-                follower.anim_frame = 0;
-            }
-            return true;
+            return changed | self.stop_party_walking_animation();
         };
 
         changed |= self.player.direction != direction;
@@ -4322,6 +4312,20 @@ impl<M: CollisionMap> GameState<M> {
         } else if self.player.anim_frame != 0 {
             self.player.anim_frame = 0;
             changed = true;
+        }
+        changed
+    }
+
+    /// Reset the party to standing frames without advancing the world tick.
+    ///
+    /// Input adapters can use this when the final direction key is released so
+    /// the 10 FPS exploration step does not add visible release latency.
+    pub fn stop_party_walking_animation(&mut self) -> bool {
+        let mut changed = self.player.anim_frame != 0;
+        self.player.anim_frame = 0;
+        for follower in &mut self.party_followers {
+            changed |= follower.anim_frame != 0;
+            follower.anim_frame = 0;
         }
         changed
     }
@@ -5317,6 +5321,8 @@ impl<M: CollisionMap> GameState<M> {
         self.player.world_x += dx;
         self.player.world_y += dy;
         if dx != 0 || dy != 0 {
+            self.player.anim_frame =
+                (self.player.anim_frame + 1) % self.player.frames_per_direction.max(1);
             self.record_party_step(old_position, self.player.direction);
         }
         self.follow_player();
@@ -7386,6 +7392,57 @@ mod tests {
     }
 
     #[test]
+    fn scripted_party_offset_advances_walking_animation_only_when_moving() {
+        let mut state = state(&[]);
+
+        assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 8, dy: 4 }));
+        assert_eq!(state.player.anim_frame, 1);
+
+        assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 0, dy: 0 }));
+        assert_eq!(state.player.anim_frame, 1);
+
+        assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 8, dy: 4 }));
+        assert_eq!(state.player.anim_frame, 2);
+    }
+
+    #[test]
+    fn party_ride_moves_actors_without_advancing_animation() {
+        let mut state = state(&[]).with_scene_objects(vec![blocking_object(300, 220)]);
+        state.player.anim_frame = 2;
+        let mut follower = state.player.clone();
+        follower.world_x = 288;
+        follower.world_y = 224;
+        follower.anim_frame = 3;
+        state.party_followers.push(follower);
+        state.scene_objects[0].current_frame = 1;
+
+        assert_eq!(state.ride_object_to(1, 12, 16, 0, 2), Some(false));
+        assert_eq!((state.player.world_x, state.player.world_y), (324, 242));
+        assert_eq!(state.player.anim_frame, 2);
+        assert_eq!(
+            (
+                state.party_followers[0].world_x,
+                state.party_followers[0].world_y,
+                state.party_followers[0].anim_frame,
+            ),
+            (292, 226, 3)
+        );
+        assert_eq!(
+            (
+                state.scene_objects[0].world_x,
+                state.scene_objects[0].world_y,
+                state.scene_objects[0].current_frame,
+            ),
+            (304, 222, 1)
+        );
+
+        while state.ride_object_to(1, 12, 16, 0, 2) == Some(false) {}
+        assert_eq!(state.player.anim_frame, 2);
+        assert_eq!(state.party_followers[0].anim_frame, 3);
+        assert_eq!(state.scene_objects[0].current_frame, 1);
+    }
+
+    #[test]
     fn scripted_viewport_stays_locked_until_restored() {
         let mut state = state(&[]);
         assert!(state.apply_script_action(ScriptAction::MoveViewport {
@@ -7698,6 +7755,18 @@ mod tests {
         assert_eq!((state.player.world_x, state.player.world_y), (320, 240));
         assert_eq!(state.player.anim_frame, 0);
         assert!(!state.update(GameInput::default()));
+    }
+
+    #[test]
+    fn idle_resets_follower_animation_when_the_leader_is_already_standing() {
+        let mut state = state(&[]);
+        let mut follower = state.player.clone();
+        follower.anim_frame = 2;
+        state.party_followers.push(follower);
+
+        assert!(state.update(GameInput::default()));
+        assert_eq!(state.player.anim_frame, 0);
+        assert_eq!(state.party_followers[0].anim_frame, 0);
     }
 
     #[test]

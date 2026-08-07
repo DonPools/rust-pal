@@ -2,7 +2,7 @@ use pal_assets::battle::{BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::palette::{Palette, PaletteSet};
 use pal_assets::rle::RleBitmap;
-use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_assets::text::{BitmapFont, ItemDescriptions, TextLibrary};
 use pal_core::battle::BattleEvent;
 use pal_core::game::GameState;
 use pal_core::role::RoleSprites;
@@ -35,6 +35,7 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) active_menu: Option<&'a ActiveMenu>,
     pub(super) text: &'a TextLibrary,
     pub(super) font: &'a BitmapFont,
+    pub(super) item_descriptions: &'a ItemDescriptions,
     pub(super) dialog_faces: &'a [Option<RleBitmap>],
     pub(super) dialog_icons: &'a [RleBitmap],
     pub(super) ui_sprites: &'a [RleBitmap],
@@ -233,6 +234,7 @@ pub(super) fn render_game(
                 game,
                 ui.text,
                 ui.font,
+                ui.item_descriptions,
                 ui.ui_sprites,
                 ui.item_sprites,
                 ui.equip_background,

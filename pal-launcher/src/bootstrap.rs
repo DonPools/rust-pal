@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pal_assets::battle::{BattleData, BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
@@ -10,7 +10,7 @@ use pal_assets::rle::RleBitmap;
 use pal_assets::rng::RngArchive;
 use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
-use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_assets::text::{BitmapFont, ItemDescriptions, TextLibrary};
 use pal_core::game::GameState;
 use pal_core::map::tile_to_world;
 use pal_core::party::Party;
@@ -20,10 +20,11 @@ use pal_desktop::renderer::Renderer;
 use crate::assets::{
     create_global_scene_objects, create_scene_objects, load_battle_backgrounds, load_battle_data,
     load_battle_effects, load_dialog_faces, load_dialog_icons, load_enemy_battle_sprites,
-    load_fbp_archive, load_global_objects, load_magic_effect_sprites, load_magics, load_map,
-    load_midi_music, load_palettes, load_player_battle_sprites, load_player_roles, load_rix_music,
-    load_rng_archive, load_role_sprites, load_scene_data, load_script_table, load_sound_effects,
-    load_sound_font, load_stores, load_text_resources, load_ui_sprites,
+    load_fbp_archive, load_global_objects, load_item_descriptions, load_magic_effect_sprites,
+    load_magics, load_map, load_midi_music, load_palettes, load_player_battle_sprites,
+    load_player_roles, load_rix_music, load_rng_archive, load_role_sprites, load_scene_data,
+    load_script_table, load_sound_effects, load_sound_font, load_stores, load_text_resources,
+    load_ui_sprites,
 };
 use crate::{DEFAULT_PALETTE, DEFAULT_SCENE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -37,6 +38,7 @@ pub(super) struct BootstrappedGame {
     pub(super) opening_background: Bitmap,
     pub(super) text: TextLibrary,
     pub(super) font: BitmapFont,
+    pub(super) item_descriptions: ItemDescriptions,
     pub(super) script_table: ScriptTable,
     pub(super) voc_mkf: Vec<u8>,
     pub(super) mus_mkf: Vec<u8>,
@@ -64,7 +66,7 @@ pub(super) struct BootstrappedGame {
     pub(super) renderer: Renderer,
 }
 
-pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
+pub(super) fn bootstrap(data_dir: PathBuf, sound_font_path: Option<&Path>) -> BootstrappedGame {
     let palettes = load_palettes(&data_dir).expect("failed to load palettes");
     let palette = palettes
         .get(DEFAULT_PALETTE)
@@ -83,11 +85,22 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
     let rng_archive = load_rng_archive(&data_dir).expect("failed to load RNG.MKF");
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
+    let item_descriptions = load_item_descriptions(&data_dir).unwrap_or_else(|| {
+        if data_dir.join("desc.dat").exists() {
+            eprintln!("warning: ignoring malformed data/desc.dat");
+        }
+        ItemDescriptions::default()
+    });
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
     let voc_mkf = load_sound_effects(&data_dir).expect("failed to load sound effects");
     let mus_mkf = load_rix_music(&data_dir).expect("failed to load MUS.MKF RIX music");
     let midi_mkf = load_midi_music(&data_dir).unwrap_or_default();
-    let sound_font = load_sound_font(&data_dir).unwrap_or_default();
+    let default_sound_font_path = data_dir.join("TimGM6mb.sf2");
+    let sound_font = match sound_font_path {
+        Some(path) => load_sound_font(path)
+            .unwrap_or_else(|| panic!("failed to load SoundFont {}", path.display())),
+        None => load_sound_font(&default_sound_font_path).unwrap_or_default(),
+    };
     let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
     let magics = load_magics(&data_dir).expect("failed to load magic data");
     let battle_data = load_battle_data(&data_dir).expect("failed to load battle data");
@@ -161,6 +174,7 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         opening_background,
         text,
         font,
+        item_descriptions,
         script_table,
         voc_mkf,
         mus_mkf,

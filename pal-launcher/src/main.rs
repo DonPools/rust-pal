@@ -12,7 +12,7 @@ use pal_desktop::window::{run_game_window, GameResources, Viewport};
 use asset_check::check_assets;
 use assets::load_runtime_scene_with_map;
 use bootstrap::{bootstrap, BootstrappedGame};
-use command::Command;
+use command::{Command, CommandMode};
 
 const SCREEN_WIDTH: u32 = 320;
 const SCREEN_HEIGHT: u32 = 200;
@@ -30,11 +30,11 @@ fn main() {
     println!("Rust-PAL M6");
     println!("data: {}", data_dir.display());
 
-    let boot = bootstrap(data_dir);
+    let boot = bootstrap(data_dir, command.sound_font_path.as_deref());
     print_bootstrap_summary(&boot);
-    match command {
-        Command::Run => run_desktop(boot),
-        Command::CheckAssets => check_assets(boot),
+    match command.mode {
+        CommandMode::Run => run_desktop(boot, command.music_backend),
+        CommandMode::CheckAssets => check_assets(boot),
     }
 }
 
@@ -52,7 +52,7 @@ fn print_bootstrap_summary(boot: &BootstrappedGame) {
     );
 }
 
-fn run_desktop(boot: BootstrappedGame) {
+fn run_desktop(boot: BootstrappedGame, music_backend: pal_desktop::audio::MusicBackend) {
     let BootstrappedGame {
         data_dir,
         scene_data,
@@ -60,6 +60,7 @@ fn run_desktop(boot: BootstrappedGame) {
         opening_background,
         text,
         font,
+        item_descriptions,
         script_table,
         voc_mkf,
         mus_mkf,
@@ -96,6 +97,7 @@ fn run_desktop(boot: BootstrappedGame) {
             opening_background,
             text,
             font,
+            item_descriptions,
             dialog_faces,
             dialog_icons,
             ui_sprites,
@@ -111,6 +113,7 @@ fn run_desktop(boot: BootstrappedGame) {
             mus_mkf,
             midi_mkf,
             sound_font,
+            music_backend,
             palettes,
             fbp_archive,
             rng_archive,

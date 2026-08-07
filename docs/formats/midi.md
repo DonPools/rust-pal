@@ -1,10 +1,10 @@
-# MIDI 兼容回退
+# MIDI 背景音乐
 
 ## 存储
 
 `MIDI.MKF` 的零基 chunk 编号与脚本音乐编号一致。chunk 0 为空，非空 chunk 是完整的
-Standard MIDI File，以 `MThd` 头和一个或多个 `MTrk` 轨道组成。它不是 DOS 原版的主
-音乐路径；桌面端优先读取同编号的 `MUS.MKF` RIX，只有 RIX 缺失或无法准备时才尝试 MIDI。
+Standard MIDI File，以 `MThd` 头和一个或多个 `MTrk` 轨道组成。桌面端把 MIDI 和
+`MUS.MKF` RIX 作为两种显式后端，不在单曲播放失败时自动切换音源。
 
 当前解析器支持 format 0 和 format 1、ticks-per-quarter-note 时间基准、可变长整数、
 running status、tempo meta event、SysEx 跳过以及常用 channel event。SMPTE 时间基准、
@@ -12,18 +12,21 @@ running status、tempo meta event、SysEx 跳过以及常用 channel event。SMP
 
 ## 播放
 
-兼容回退使用纯 Rust `rustysynth` 和 General MIDI SoundFont，将完整 MIDI 事件合成为
+MIDI 后端使用纯 Rust `rustysynth` 和 General MIDI SoundFont，将完整 MIDI 事件合成为
 `44100 Hz` 立体声 PCM，再交给 `rodio` 播放。该后端支持 SoundFont 采样、
 包络、滤波、颤音、声像、expression、延音踏板、pitch bend、混响和 chorus，并支持
 剧情脚本要求的启动、停止、循环和淡入。同一曲目再次收到播放指令时会原地更新循环
 标志，不从头重播；每一遍结束时根据最新标志决定继续或在两秒 release tail 后停止。
 
-系统菜单使用“禁用 / 启用”开关。内部音乐增益默认 100%；MIDI 各通道的 controller 7、
-expression 和 velocity 仍由 SoundFont 合成器独立处理。真实资源检查在回退资源存在时
-统计多通道歌曲、通道音量事件并验证实际合成输出。
+为避免密集曲目在浮点转 `i16` 时产生刺耳的硬削波，合成器默认关闭额外 reverb/chorus，
+转换前保留 25% headroom，并从 85% 满幅开始使用平滑软限幅，输出上限为 98%。MIDI 各通道
+的 controller 7、expression 和 velocity 仍由合成器独立处理。真实资源检查会覆盖已知
+高峰值曲目，要求输出非静音且不触及整数满幅。
 
 SoundFont 默认从 `data/TimGM6mb.sf2` 加载，不嵌入 binary 或仓库。`MIDI.MKF` 与
-SoundFont 都是可选资源；缺少时 DOS RIX/OPL2 播放和游戏启动不受影响。
+SoundFont 都是可选资源；可用 `--sound-font=/path/to/custom.sf2` 选择更合适的 GM 音色库。
+启动默认请求 MIDI；资源缺少或无效时会明确告警并固定使用 RIX。系统菜单提供
+`OFF / MIDI / RIX` 三选项，选择不可用的 MIDI 时会保留当前后端并显示提示。
 
 脚本 `0x0043` 的音乐编号 `0` 表示停止。当前音乐编号属于核心游戏状态，并包含在开发
 快照中；恢复快照时桌面层会重新开始对应曲目。

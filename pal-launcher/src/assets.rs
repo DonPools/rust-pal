@@ -15,7 +15,7 @@ use pal_assets::scene::SceneData;
 use pal_assets::script::ScriptTable;
 use pal_assets::sprite::{sprite_from_yj1_chunk, Sprite};
 use pal_assets::store::Stores;
-use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_assets::text::{BitmapFont, ItemDescriptions, TextLibrary};
 use pal_assets::voc::VocClip;
 use pal_assets::yj1;
 use pal_core::map::Map;
@@ -63,6 +63,10 @@ pub(super) fn load_text_resources(data_dir: &Path) -> Option<(TextLibrary, Bitma
     ))
 }
 
+pub(super) fn load_item_descriptions(data_dir: &Path) -> Option<ItemDescriptions> {
+    ItemDescriptions::parse(&std::fs::read(data_dir.join("desc.dat")).ok()?)
+}
+
 pub(super) fn load_script_table(data_dir: &Path) -> Option<ScriptTable> {
     let data = std::fs::read(data_dir.join("SSS.MKF")).ok()?;
     let archive = MkfArchive::new(&data)?;
@@ -81,8 +85,8 @@ pub(super) fn load_midi_music(data_dir: &Path) -> Option<Vec<u8>> {
     std::fs::read(data_dir.join("MIDI.MKF")).ok()
 }
 
-pub(super) fn load_sound_font(data_dir: &Path) -> Option<Vec<u8>> {
-    std::fs::read(data_dir.join("TimGM6mb.sf2")).ok()
+pub(super) fn load_sound_font(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
 }
 
 pub(super) fn load_role_sprites(data_dir: &Path) -> Option<RoleSprites> {

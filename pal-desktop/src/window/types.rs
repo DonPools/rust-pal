@@ -7,11 +7,13 @@ use pal_assets::palette::PaletteSet;
 use pal_assets::rle::RleBitmap;
 use pal_assets::rng::RngArchive;
 use pal_assets::script::ScriptTable;
-use pal_assets::text::{BitmapFont, TextLibrary};
+use pal_assets::text::{BitmapFont, ItemDescriptions, TextLibrary};
 use pal_core::game::Camera;
 use pal_core::map::Map;
 use pal_core::role::RoleSprites;
 use pal_core::scene::SceneObject;
+
+use crate::audio::MusicBackend;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Viewport {
@@ -53,6 +55,7 @@ pub struct GameResources {
     pub opening_background: Bitmap,
     pub text: TextLibrary,
     pub font: BitmapFont,
+    pub item_descriptions: ItemDescriptions,
     pub dialog_faces: Vec<Option<RleBitmap>>,
     pub dialog_icons: Vec<RleBitmap>,
     pub ui_sprites: Vec<RleBitmap>,
@@ -68,6 +71,7 @@ pub struct GameResources {
     pub mus_mkf: Vec<u8>,
     pub midi_mkf: Vec<u8>,
     pub sound_font: Vec<u8>,
+    pub music_backend: MusicBackend,
     pub palettes: Vec<PaletteSet>,
     pub fbp_archive: FbpArchive,
     pub rng_archive: RngArchive,

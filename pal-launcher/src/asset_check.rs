@@ -30,6 +30,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         initial_event_sprite_numbers,
         text,
         font,
+        item_descriptions,
         script_table,
         voc_mkf,
         mus_mkf,
@@ -542,13 +543,17 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     if let Some(midi_archive) = &midi_archive {
         assert!(validate_sound_font(&sound_font), "invalid SoundFont");
-        assert!(
-            validate_midi_output(
-                midi_archive.read_chunk(31).expect("missing opening music"),
-                &sound_font,
-            ),
-            "SoundFont MIDI synthesis produced no audio"
-        );
+        for music_id in [20, 31, 45] {
+            assert!(
+                validate_midi_output(
+                    midi_archive
+                        .read_chunk(music_id)
+                        .unwrap_or_else(|| panic!("missing MIDI music {music_id}")),
+                    &sound_font,
+                ),
+                "SoundFont MIDI synthesis {music_id} was silent or saturated"
+            );
+        }
     }
     let leader = game.party.leader().expect("loaded party has no leader");
     assert!(leader.attributes.hp <= leader.attributes.max_hp);
@@ -1971,6 +1976,31 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         text_pixels > 0,
         "bitmap text did not change the framebuffer"
     );
+    let description_count = item_descriptions.len();
+    let mut description_glyph_count = 0usize;
+    for (object_id, lines) in item_descriptions.iter() {
+        assert!(
+            text.word(usize::from(object_id)).is_some(),
+            "description references unavailable object {object_id}"
+        );
+        for line in lines {
+            let mut index = 0;
+            while index < line.len() {
+                if line[index] < 0x80 {
+                    index += 1;
+                    continue;
+                }
+                let trail = line[index + 1];
+                let code = u16::from_be_bytes([line[index], trail]);
+                assert!(
+                    font.glyph(code).is_some(),
+                    "description for object {object_id} has missing glyph {code:04x}"
+                );
+                description_glyph_count += 1;
+                index += 2;
+            }
+        }
+    }
     println!(
         "scene sprite rendered: {sprite_pixels} pixels, {} slots loaded",
         role_sprites.character_count()
@@ -1991,8 +2021,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
          5 save-slot labels"
     );
     println!(
-        "text data passed: {} words, {} messages, {} glyphs, {text_pixels} sample pixels, \
-         {speed_controls} speed, {terminal_controls} terminal and {icon_controls} icon controls",
+        "text data passed: {} words, {} messages, {} glyphs, {description_count} descriptions \
+         with {description_glyph_count} glyphs, {text_pixels} sample pixels, {speed_controls} \
+         speed, {terminal_controls} terminal and {icon_controls} icon controls",
         text.word_count(),
         text.message_count(),
         font.glyph_count(),
@@ -2012,7 +2043,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     println!(
         "music data passed: {rix_music_count} RIX songs, {rix_register_writes} OPL writes, \
-         {audible_rix_songs} rendered songs; optional MIDI fallback: {midi_music_count} songs, \
+         {audible_rix_songs} rendered songs; optional MIDI backend: {midi_music_count} songs, \
          {} channels, {multi_channel_songs} multi-channel songs, \
          {midi_channel_volume_events} volume events, \
          {looped_music_scripts} looped, {single_play_music_scripts} single-play and \
@@ -2052,7 +2083,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     );
     if midi_archive.is_some() {
         println!(
-            "optional SoundFont fallback passed: {} bytes",
+            "optional SoundFont backend passed: {} bytes",
             sound_font.len()
         );
     }

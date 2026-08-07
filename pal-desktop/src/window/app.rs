@@ -17,13 +17,14 @@ use super::dialog_text::dialog_page_count;
 use super::input::HeldInput;
 use super::menu_state::{FieldMenu, OpeningMenu, OpeningMenuAction};
 use super::menu_update::{update_active_menu, MenuUpdateContext};
+use super::minimap::{MiniMapCache, MiniMapFrame};
 use super::opening_intro::{OpeningIntro, OpeningIntroAction, TITLE_MUSIC};
 use super::original_save::{
     latest_original_save_slot, original_save_slots, restore_original_save, RestoreOriginalSaveError,
 };
 use super::presentation::{render_game, UiRenderContext};
 use super::script_driver::{advance_script, auto_script_error_title, ScriptRenderResources};
-use super::session::DesktopSession;
+use super::session::{DesktopSession, MusicResources};
 use super::snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
 use super::state::{DebugState, FrontendState, TimingState, UpdateLane, UpdateLaneState};
 use super::types::{GameResources, LoadedScene};
@@ -50,6 +51,8 @@ pub(super) struct DesktopApp<L> {
     frontend: FrontendState,
     input: HeldInput,
     clock: FrameClock,
+    minimap_enabled: bool,
+    minimap_cache: MiniMapCache,
 }
 
 impl<L> DesktopApp<L>
@@ -68,9 +71,12 @@ where
         let session = DesktopSession::new(
             auto_scripts,
             &resources.voc_mkf,
-            &resources.mus_mkf,
-            &resources.midi_mkf,
-            &resources.sound_font,
+            MusicResources {
+                rix_mkf: &resources.mus_mkf,
+                midi_mkf: &resources.midi_mkf,
+                sound_font: &resources.sound_font,
+                requested_backend: resources.music_backend,
+            },
             &resources.magic_effect_sprites,
             &resources.player_battle_sprites,
         );
@@ -94,6 +100,8 @@ where
             frontend: FrontendState::Intro(Box::new(opening_intro)),
             input: HeldInput::default(),
             clock: FrameClock::new(now),
+            minimap_enabled: true,
+            minimap_cache: MiniMapCache::default(),
         }
     }
 
@@ -115,6 +123,7 @@ where
                 active_menu: session.menus.active_menu.as_ref(),
                 text: &resources.text,
                 font: &resources.font,
+                item_descriptions: &resources.item_descriptions,
                 dialog_faces: &resources.dialog_faces,
                 dialog_icons: &resources.dialog_icons,
                 ui_sprites: &resources.ui_sprites,
@@ -167,6 +176,18 @@ where
                     set_title(self.debug.title());
                     true
                 }
+                KeyCode::KeyM
+                    if matches!(&self.frontend, FrontendState::Playing)
+                        && self.game.battle().is_none()
+                        && self.session.battle.post_battle.is_none()
+                        && !self.scripts.is_active()
+                        && self.dialog.is_none()
+                        && !self.session.has_active_menu()
+                        && !self.session.visual.is_blocking() =>
+                {
+                    self.minimap_enabled = !self.minimap_enabled;
+                    true
+                }
                 KeyCode::F5
                     if !self.frontend.is_opening_menu()
                         && !self.scripts.is_active()
@@ -212,8 +233,16 @@ where
         if handled {
             self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(Instant::now())));
         } else {
-            self.input.set_key(code, pressed, repeat);
+            let stopped_direction_input = self.input.set_key(code, pressed, repeat);
+            if stopped_direction_input && self.stop_exploration_walking_animation() {
+                self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(Instant::now())));
+            }
         }
+    }
+
+    fn stop_exploration_walking_animation(&mut self) -> bool {
+        (self.update_lane(false) == UpdateLane::Exploration)
+            && self.game.stop_party_walking_animation()
     }
 
     fn timing_state(&self) -> TimingState {
@@ -842,6 +871,9 @@ where
 
     pub(super) fn reset_input(&mut self) {
         self.input = HeldInput::default();
+        if self.stop_exploration_walking_animation() {
+            self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(Instant::now())));
+        }
     }
 
     pub(super) fn screen(&self) -> &[u8] {
@@ -858,6 +890,34 @@ where
 
     pub(super) fn show_script_debug(&self) -> bool {
         self.debug.show_script
+    }
+
+    pub(super) fn minimap_frame(
+        &mut self,
+        scale_factor: f64,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Option<&MiniMapFrame> {
+        let visible = self.minimap_enabled
+            && matches!(&self.frontend, FrontendState::Playing)
+            && !self.debug.show_script
+            && self.game.battle().is_none()
+            && self.session.battle.post_battle.is_none()
+            && !self.scripts.is_active()
+            && self.dialog.is_none()
+            && !self.session.has_active_menu()
+            && !self.session.visual.is_blocking();
+        visible.then(|| {
+            self.minimap_cache.frame(
+                self.game.scene_number,
+                &self.game.map,
+                &self.game.player,
+                &self.game.scene_objects,
+                scale_factor,
+                surface_width,
+                surface_height,
+            )
+        })
     }
 
     pub(super) fn debug_snapshot(

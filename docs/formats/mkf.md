@@ -99,7 +99,7 @@ impl MkfArchive {
 | `GOP.MKF` | 大量 | 过场动画？ |
 | `MAP.MKF` | 大量 | 场景瓦片地图数据 |
 | `MGO.MKF` | 中等 | 迷宫全局对象 |
-| `MIDI.MKF` | 几十 | 可选 Standard MIDI 背景音乐回退 |
+| `MIDI.MKF` | 几十 | 可选 Standard MIDI 背景音乐后端 |
 | `MUS.MKF` | 几十 | DOS 原版 RIX / OPL2 背景音乐 |
 | `PAT.MKF` | 少量 | 256 色调色板（日间及可选夜间颜色） |
 | `RGM.MKF` | 大量 | 随机迷宫生成数据 |

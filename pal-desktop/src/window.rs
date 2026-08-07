@@ -14,6 +14,7 @@ use winit::keyboard::PhysicalKey;
 use winit::window::WindowBuilder;
 
 use app::DesktopApp;
+use minimap::MiniMapOverlay;
 
 mod app;
 mod ascii_font;
@@ -29,6 +30,7 @@ mod input;
 mod menu_render;
 mod menu_state;
 mod menu_update;
+mod minimap;
 mod opening_intro;
 mod original_save;
 mod presentation;
@@ -84,6 +86,11 @@ pub fn run_game_window<L>(
         pixels.surface_texture_format(),
         window.scale_factor(),
     );
+    let mut minimap_overlay = MiniMapOverlay::new(
+        pixels.device(),
+        pixels.surface_texture_format(),
+        window.scale_factor(),
+    );
     let mut app = DesktopApp::new(renderer, game, resources, load_scene);
     app.render_frame(0);
 
@@ -111,6 +118,17 @@ pub fn run_game_window<L>(
                 WindowEvent::RedrawRequested => {
                     pixels.frame_mut().copy_from_slice(app.screen());
                     let surface_size = window.inner_size();
+                    let show_minimap = app
+                        .minimap_frame(
+                            window.scale_factor(),
+                            surface_size.width,
+                            surface_size.height,
+                        )
+                        .map(|frame| {
+                            minimap_overlay.update(pixels.device(), pixels.queue(), frame);
+                            true
+                        })
+                        .unwrap_or(false);
                     if app.show_script_debug() {
                         debug_overlay.update(
                             pixels.device(),
@@ -124,6 +142,14 @@ pub fn run_game_window<L>(
                     }
                     let render_result = pixels.render_with(|encoder, render_target, context| {
                         context.scaling_renderer.render(encoder, render_target);
+                        if show_minimap {
+                            minimap_overlay.render(
+                                encoder,
+                                render_target,
+                                surface_size.width,
+                                surface_size.height,
+                            );
+                        }
                         if app.show_script_debug() {
                             debug_overlay.render(
                                 encoder,
