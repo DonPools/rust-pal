@@ -1,4 +1,5 @@
 use super::{InstructionFlow, ScriptInstructionDebug, ScriptRuntime};
+use crate::script::opcode::TriggerHandler;
 use crate::script::{ScriptEvent, ScriptOpcode};
 
 const MAX_INSTRUCTIONS_PER_ADVANCE: usize = 1024;
@@ -42,163 +43,15 @@ impl ScriptRuntime {
                     opcode: entry.opcode,
                 });
             };
-            use ScriptOpcode::*;
-            let flow = match opcode {
-                Stop | StopAndAdvance | StopAndReplace | Jump | Call | JumpByChance
-                | AdvanceEntry | WaitFrames | MarkScriptFailed | NoOp | Delay | RandomSelect
-                | AutoScriptNoOp => self.dispatch_control(execution, entry, opcode),
-                Redraw
-                | Confirm
-                | OpenBuyMenu
-                | OpenSellMenu
-                | ShakeScreen
-                | SelectRngAnimation
-                | PlayRngAnimation
-                | DialogCenter
-                | DialogUpper
-                | DialogLower
-                | DialogCenterWindow
-                | PlayMusic
-                | PlaySound
-                | WaitForKey
-                | LoadLastSave
-                | FadeToRed
-                | FadeOut
-                | FadeIn
-                | UseDayPalette
-                | UseNightPalette
-                | SetScreenWave
-                | FadeScene
-                | ShowFbp
-                | StopMusic
-                | ToggleDayNightPalette
-                | SetPalette
-                | FadeColor
-                | RestoreScreen
-                | FadeSceneWithUpdate
-                | PlayEndingAnimation
-                | FadeToCurrentScene
-                | QuitGame
-                | PlayCdMusic
-                | ScrollFbp
-                | ShowFbpWithSprite
-                | BackupScreen
-                | PrintMessage => self.dispatch_presentation(execution, entry, opcode),
-                WalkObjectSouth
-                | WalkObjectWest
-                | WalkObjectNorth
-                | WalkObjectEast
-                | SetObjectPose
-                | WalkObjectTo
-                | WalkObjectToSlow
-                | SetObjectPositionRelative
-                | SetObjectPosition
-                | SetObjectGesture
-                | SetPartyMemberPose
-                | SetSelectedObjectPose
-                | SetObjectAutoScript
-                | SetObjectTriggerScript
-                | TeleportParty
-                | RideObjectSlow
-                | SetObjectTriggerMode
-                | RideObject
-                | SetPartyPosition
-                | SetObjectState
-                | HideObjectShort
-                | ChasePlayer
-                | HideObject
-                | ChangeScene
-                | PauseEnemyChase
-                | SpeedUpEnemyChase
-                | OffsetObjectAndAnimate
-                | SetSceneScripts
-                | OffsetParty
-                | SyncObjectState
-                | WalkParty
-                | WalkPartyFast
-                | WalkPartyFastest
-                | WalkObjectHalfSpeed
-                | OffsetObject
-                | SetObjectLayer
-                | MoveViewport
-                | WalkObjectFast
-                | PlaceUsedItemObject
-                | AnimateObject
-                | SetObjectScript
-                | RideObjectFast
-                | SetSceneMap
-                | SetObjectStates => self.dispatch_scene(execution, entry, opcode),
-                SetEquipmentEffect
-                | EquipItem
-                | AdjustPlayerAttribute
-                | SetPlayerAttribute
-                | AdjustPlayerHp
-                | AdjustPlayerMp
-                | AdjustPlayerHpMp
-                | AdjustCash
-                | AddItem
-                | RemoveItem
-                | RevivePlayer
-                | RemoveEquipment
-                | AddMagic
-                | RemoveMagic
-                | SetPlayerSprite
-                | SetParty
-                | LevelUpPlayer
-                | HalveCash
-                | SetPartyFollower
-                | CollapseParty => self.dispatch_role(execution, entry, opcode),
-                StartBattle
-                | DamageEnemy
-                | PoisonEnemy
-                | PoisonPlayer
-                | CureEnemyPoison
-                | CurePlayerPoison
-                | CurePoisonByLevel
-                | SetPlayerStatus
-                | SetEnemyStatus
-                | RemovePlayerStatus
-                | AdjustTemporaryPlayerStat
-                | SetTemporaryBattleSprite
-                | CollectEnemy
-                | TransmuteCollectedEnemies
-                | DrainEnemyHp
-                | FleeBattle
-                | SimulatePlayerMagic
-                | SetBattleMusic
-                | SetBattlefield
-                | ScaleMagicByMp
-                | HalvePlayerHp
-                | HalveEnemyHp
-                | HideBattleActor
-                | KillPlayer
-                | KillEnemy
-                | ThrowWeapon
-                | EnemyCastMagic
-                | EnemyEscape
-                | StealEnemy
-                | BlowEnemiesAway
-                | ScaleMagicByCash
-                | SetBattleResult
-                | EnableAutoBattle
-                | PlayerMagicAnimation
-                | DivideEnemy
-                | SummonEnemy
-                | TransformEnemy => self.dispatch_battle(execution, entry, opcode),
-                JumpIfItemCountLess
-                | JumpIfPlayerLacksPoison
-                | JumpIfEnemyLacksPoison
-                | JumpIfPlayerNotPoisoned
-                | JumpIfEnemyHpAbove
-                | JumpIfEnemyTurn
-                | JumpIfPartyNotFullHp
-                | JumpIfPartyContainsPlayer
-                | JumpIfNotFacingObject
-                | JumpIfObjectOutsideZone
-                | JumpIfItemNotEquipped
-                | JumpIfEnemyNotFirstKind
-                | JumpIfObjectStateEquals
-                | JumpIfSceneEquals => self.dispatch_condition(execution, entry, opcode),
+            let flow = match opcode.trigger_handler() {
+                TriggerHandler::Control => self.dispatch_control(execution, entry, opcode),
+                TriggerHandler::Presentation => {
+                    self.dispatch_presentation(execution, entry, opcode)
+                }
+                TriggerHandler::Scene => self.dispatch_scene(execution, entry, opcode),
+                TriggerHandler::Role => self.dispatch_role(execution, entry, opcode),
+                TriggerHandler::Battle => self.dispatch_battle(execution, entry, opcode),
+                TriggerHandler::Condition => self.dispatch_condition(execution, entry, opcode),
             };
             match flow {
                 InstructionFlow::Continue(next) => execution = next,

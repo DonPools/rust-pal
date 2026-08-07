@@ -798,7 +798,7 @@ pub(super) fn auto_script_error_title(error: AutoScriptError) -> String {
 pub(super) fn opcode_label(raw: u16) -> String {
     ScriptOpcode::from_raw(raw).map_or_else(
         || format!("opcode {raw:04X}"),
-        |opcode| format!("{} ({raw:04X})", opcode.mnemonic()),
+        |opcode| format!("{} ({raw:04X})", opcode.name()),
     )
 }
 

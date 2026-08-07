@@ -467,7 +467,7 @@ fn instruction_line(label: &str, instruction: Option<ScriptInstructionDebug>) ->
         |instruction| {
             let mnemonic = instruction
                 .decoded_opcode()
-                .map_or("UNKNOWN", ScriptOpcode::mnemonic);
+                .map_or("Unknown", ScriptOpcode::name);
             format!(
                 "{label} @{} {:04X} {mnemonic} {:04X}/{:04X}/{:04X}",
                 instruction.entry,
