@@ -7,11 +7,13 @@ use pal_core::battle::{
     BattleEvent, BattleMagic, BattleMagicVisual, BattlePhase, BattleResult, BattleState,
     BattleStatus, BattleTarget,
 };
+use pal_core::game::BATTLE_FRAME_MS;
 
 use super::battle_timing::{
-    battle_magic_for_event, event_has_full_magic_visual, kept_effect_frame, magic_event_timeline,
-    offensive_effect_frame_at, original_frames_to_ticks, timed_frame_at, timed_frames_to_ticks,
-    MagicEventTimeline,
+    battle_magic_for_event, enemy_attack_frames, enemy_magic_pre_frames,
+    event_has_full_magic_visual, kept_effect_frame, magic_event_timeline,
+    offensive_effect_frame_at, original_frames_to_ticks, player_attack_ticks, timed_frame_at,
+    timed_frames_to_ticks, MagicEventTimeline, BATTLE_FADE_TICKS,
 };
 use super::battle_update::{ACTION_EVENT_TICKS, PLAYER_MAGIC_ANIMATION_EVENT_TICKS};
 use super::draw::draw_number;
@@ -19,6 +21,8 @@ use super::menu_render::{
     draw_cursor, draw_single_line_box, draw_slash, draw_ui_box_with_shadow, selected_color,
 };
 use crate::renderer::Renderer;
+
+use super::UI_TIME_QUANTUM_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BattlePendingCommand {
@@ -100,7 +104,6 @@ pub(super) enum BattleSettlementPage {
 
 pub(super) struct PostBattlePresentation {
     pub(super) battle: BattleState,
-    pub(super) result: BattleResult,
     pub(super) pages: Vec<BattleSettlementPage>,
     pub(super) page: usize,
     pub(super) ticks_remaining: u16,
@@ -110,6 +113,10 @@ impl PostBattlePresentation {
     pub(super) fn current_page(&self) -> Option<&BattleSettlementPage> {
         self.pages.get(self.page)
     }
+}
+
+fn battle_animation_ticks(ui_ticks: u64) -> u64 {
+    ui_ticks.saturating_mul(UI_TIME_QUANTUM_MS) / BATTLE_FRAME_MS
 }
 
 pub fn render_battle(
@@ -129,6 +136,7 @@ pub fn render_battle(
         event_ticks,
         kept_effects,
     } = state;
+    let battle_ticks = battle_animation_ticks(ticks);
     if let Some(background) = resources
         .backgrounds
         .get(usize::from(battle.battlefield))
@@ -203,60 +211,40 @@ pub fn render_battle(
         }
         let idle_frames = usize::from(enemy.idle_frames.max(1));
         let speed = u64::from(enemy.idle_animation_speed.max(1));
-        let frame = match event {
-            Some(BattleEvent::EnemyMagic {
-                enemy: caster,
-                visual: true,
-                ..
-            }) if caster == index && enemy.magic_frames > 0 => {
-                let elapsed =
-                    ACTION_EVENT_TICKS.saturating_sub(event_ticks.min(ACTION_EVENT_TICKS));
-                idle_frames
-                    + usize::from(elapsed).min(usize::from(enemy.magic_frames).saturating_sub(1))
-            }
-            Some(
-                BattleEvent::EnemyAttack { enemy: caster, .. }
-                | BattleEvent::EnemyConfusedAttack { enemy: caster, .. },
-            ) if caster == index && enemy.attack_frames > 0 => {
-                let elapsed =
-                    ACTION_EVENT_TICKS.saturating_sub(event_ticks.min(ACTION_EVENT_TICKS));
-                let wait = enemy.action_wait_frames.max(1);
-                idle_frames
-                    + usize::from(enemy.magic_frames)
-                    + usize::from(elapsed / wait).min(usize::from(enemy.attack_frames) - 1)
-            }
-            _ => usize::try_from(ticks / speed).unwrap_or(0) % idle_frames,
-        };
+        let actor_state = event.and_then(|event| {
+            enemy_actor_animation_state(battle, event, index, event_ticks, magic_timing)
+        });
+        let frame = actor_state.map_or_else(
+            || usize::try_from(battle_ticks / speed).unwrap_or(0) % idle_frames,
+            |state| state.2,
+        );
         let Some(bitmap) = resources
             .enemy_sprites
             .decode_frame(usize::from(enemy.enemy_id), frame)
         else {
             continue;
         };
-        let enemy_action_offset = match event {
-            Some(BattleEvent::EnemyAttack { enemy, .. }) if enemy == index => {
-                action_offset(event_ticks)
-            }
-            Some(BattleEvent::EnemyMagic {
-                enemy,
-                visual: true,
-                ..
-            }) if enemy == index => action_offset(event_ticks) / 2,
-            Some(BattleEvent::EnemyConfusedAttack { enemy, .. }) if enemy == index => {
-                action_offset(event_ticks)
-            }
-            _ => 0,
-        };
+        let (enemy_action_x, enemy_action_y) = actor_state
+            .map(|state| (state.0, state.1))
+            .unwrap_or((0, 0));
         let enemy_blow_offset = match event {
             Some(
                 BattleEvent::PlayerMagic { blow, .. } | BattleEvent::SimulatedMagic { blow, .. },
             ) => magic_blow_offset(blow, event_ticks),
             _ => 0,
         };
-        let enemy_offset = enemy_action_offset + enemy_blow_offset;
-        let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2 + enemy_offset;
+        let (feedback_x, feedback_y, exact_flash) = event
+            .map(|event| enemy_feedback_state(event, index, event_ticks, magic_timing))
+            .unwrap_or((0, 0, false));
+        let enemy_offset = enemy_blow_offset;
+        let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2
+            + enemy_offset
+            + enemy_action_x
+            + feedback_x;
         let y = i32::from(enemy.position.y) + i32::from(enemy.y_offset) - i32::from(bitmap.height)
-            + enemy_offset / 2;
+            + enemy_offset / 2
+            + enemy_action_y
+            + feedback_y;
         let is_hit = matches!(
             event,
             Some(
@@ -267,14 +255,59 @@ pub fn render_battle(
                     | BattleEvent::EnemyConfusedAttack { target: enemy, .. }
             ) if enemy == index
         );
-        if event.is_none()
+        let exact_attack_feedback = matches!(
+            event,
+            Some(BattleEvent::PlayerAttack {
+                enemy: target,
+                visual: true,
+                ..
+            }) if target == index
+        );
+        let fade_visibility = event
+            .filter(|_| is_defeat_event)
+            .map(|_| {
+                magic_timing.map_or_else(
+                    || death_fade_visibility(event_ticks),
+                    |(_, timeline, elapsed)| {
+                        let fade_end = timeline
+                            .total_ticks
+                            .saturating_sub(timeline.summon_fade_out_ticks);
+                        let fade_start = fade_end.saturating_sub(timeline.death_fade_ticks);
+                        if elapsed < fade_start {
+                            64
+                        } else if elapsed >= fade_end {
+                            0
+                        } else {
+                            u8::try_from(
+                                u32::from(fade_end - elapsed)
+                                    .saturating_mul(64)
+                                    .checked_div(u32::from(timeline.death_fade_ticks.max(1)))
+                                    .unwrap_or(0),
+                            )
+                            .unwrap_or(64)
+                            .min(64)
+                        }
+                    },
+                )
+            })
+            .unwrap_or(64);
+        if fade_visibility < 64 {
+            renderer.blit_rle_dithered(&bitmap, x, y, fade_visibility);
+        } else if event.is_none()
             && targeting_enemy
             && index == selected_enemy
             && battle.phase() == BattlePhase::AwaitingCommand
-            && ticks & 1 != 0
+            && battle_ticks & 1 != 0
         {
             renderer.blit_rle_color_shift(&bitmap, x, y, 7);
-        } else if is_hit && feedback_active && event_ticks.is_multiple_of(2) {
+        } else if is_hit
+            && feedback_active
+            && (if exact_attack_feedback {
+                exact_flash
+            } else {
+                exact_flash || event_ticks.is_multiple_of(2)
+            })
+        {
             renderer.blit_rle_color_shift(&bitmap, x, y, 6);
         } else {
             renderer.blit_rle(&bitmap, x, y);
@@ -286,6 +319,8 @@ pub fn render_battle(
             continue;
         }
         let (mut x, mut y) = player_position(battle.players.len(), index);
+        let attack_state = event
+            .and_then(|event| player_attack_animation_state(battle, event, index, event_ticks));
         let (magic_x, magic_y, magic_frame, mut color_shift) =
             player_magic_animation_state(event, index, event_ticks);
         let (item_x, item_y, item_frame, item_color_shift) =
@@ -327,17 +362,23 @@ pub fn render_battle(
         }
         x += magic_x + item_x;
         y += magic_y + item_y;
+        if let Some((attack_x, attack_y, _)) = attack_state {
+            x = attack_x;
+            y = attack_y;
+        }
         if let Some(BattleEvent::EnemyMagic { blow, .. }) = event {
             let offset = magic_blow_offset(blow, event_ticks);
             x += offset;
             y += offset / 2;
         }
+        if let Some(event) = event {
+            let (feedback_x, feedback_y) =
+                player_feedback_offset(battle, event, index, event_ticks, magic_timing);
+            x += feedback_x;
+            y += feedback_y;
+        }
         match event {
-            Some(BattleEvent::PlayerAttack { player, .. }) if player == index => {
-                let offset = action_offset(event_ticks);
-                x -= offset;
-                y -= offset / 2;
-            }
+            Some(BattleEvent::PlayerAttack { .. }) if attack_state.is_some() => {}
             Some(BattleEvent::PlayerConfusedAttack { player, .. }) if player == index => {
                 let offset = action_offset(event_ticks);
                 x -= offset;
@@ -362,15 +403,9 @@ pub fn render_battle(
                 }
             }
             Some(BattleEvent::EnemyAttack {
-                player: target,
                 protected_by: Some(cover),
                 ..
-            }) if cover == index => {
-                let (target_x, target_y) = player_position(battle.players.len(), target);
-                let offset = action_offset(event_ticks).min(12);
-                x += (target_x - 24 - x) * offset / 12;
-                y += (target_y - 12 - y) * offset / 12;
-            }
+            }) if cover == index => {}
             Some(BattleEvent::PlayerFlee {
                 player: fleeing,
                 succeeded,
@@ -400,12 +435,8 @@ pub fn render_battle(
         let sprite = usize::from(player.battle_sprite_num);
         let available = resources.player_sprites.frame_count(sprite).unwrap_or(0);
         let event_frame = match event {
-            Some(BattleEvent::PlayerAttack { player, .. }) if player == index => {
-                Some(if event_ticks > ACTION_EVENT_TICKS / 2 {
-                    8
-                } else {
-                    9
-                })
+            Some(BattleEvent::PlayerAttack { .. }) if attack_state.is_some() => {
+                attack_state.map(|(_, _, frame)| frame)
             }
             Some(BattleEvent::EnemyAttack {
                 player,
@@ -548,6 +579,7 @@ pub fn render_battle(
             resources.text,
             resources.font,
             ticks,
+            battle_ticks,
             resources.cash,
         );
     }
@@ -569,7 +601,7 @@ pub fn render_battle(
         let visual = magic.effect_visual();
         if elapsed >= timeline.effect_start() && elapsed < timeline.tail_start() && visual.wave != 0
         {
-            renderer.apply_wave(visual.wave, i16::try_from(ticks).unwrap_or(i16::MAX));
+            renderer.apply_wave(visual.wave, i16::try_from(battle_ticks).unwrap_or(i16::MAX));
         }
         let shake_ticks = timed_frames_to_ticks(usize::from(visual.shake), visual.speed);
         if shake_ticks != 0
@@ -601,9 +633,22 @@ fn render_shared_battle_effect(
         usize::from(ACTION_EVENT_TICKS.saturating_sub(ticks_remaining.min(ACTION_EVENT_TICKS)));
     let action_phase = action_elapsed.saturating_mul(3) / usize::from(ACTION_EVENT_TICKS);
     let (bitmap, x, y) = match event {
-        BattleEvent::PlayerAttack { player, enemy, .. } => {
+        BattleEvent::PlayerAttack {
+            player,
+            enemy,
+            visual: true,
+            ..
+        } => {
             let actor = battle.players.get(player)?;
-            let bitmap = effects.player_attack_frame(actor.battle_sprite_num, action_phase)?;
+            let total = player_attack_ticks(event);
+            let elapsed = total.saturating_sub(ticks_remaining.min(total));
+            if !(7..10).contains(&elapsed) {
+                return None;
+            }
+            let bitmap = effects.player_attack_frame(
+                actor.battle_sprite_num,
+                usize::from(elapsed.saturating_sub(7)),
+            )?;
             let (x, y) = enemy_position(battle, enemy)?;
             (bitmap, x, y - 10)
         }
@@ -612,11 +657,6 @@ fn render_shared_battle_effect(
             let bitmap = effects.player_attack_frame(actor.battle_sprite_num, action_phase)?;
             let (x, y) = player_position(battle.players.len(), target);
             (bitmap, x, y - 20)
-        }
-        BattleEvent::EnemyAttack { player, .. } => {
-            let bitmap = effects.enemy_attack_frame(action_phase)?;
-            let (x, y) = player_position(battle.players.len(), player);
-            (bitmap, x - 12, y - 20)
         }
         BattleEvent::EnemyConfusedAttack { target, .. } => {
             let bitmap = effects.enemy_attack_frame(action_phase)?;
@@ -687,38 +727,71 @@ fn render_magic_effect(
     else {
         return;
     };
-    if magic.magic_type == 9
-        && elapsed >= timeline.body_start()
-        && elapsed < timeline.effect_start()
-    {
-        if behind_fighters {
+    if magic.magic_type == 9 {
+        let summon_start = timeline.pre_ticks.saturating_add(timeline.brighten_ticks);
+        let summon_end = timeline.total_ticks;
+        if elapsed >= summon_start && elapsed < summon_end && !behind_fighters {
+            let Some(sprite) = usize::try_from(magic.specific)
+                .ok()
+                .and_then(|sprite| sprite.checked_add(10))
+            else {
+                return;
+            };
+            let Some(frame_count) = player_sprites
+                .frame_count(sprite)
+                .filter(|count| *count > 0)
+            else {
+                return;
+            };
+            let body_end = timeline.body_start().saturating_add(timeline.body_ticks);
+            let frame = if elapsed < timeline.body_start() {
+                0
+            } else if elapsed < body_end {
+                timed_frame_at(
+                    elapsed.saturating_sub(timeline.body_start()),
+                    frame_count.saturating_sub(1).max(1),
+                    magic.speed,
+                )
+            } else {
+                frame_count.saturating_sub(1)
+            };
+            let visibility = if elapsed < timeline.body_start() {
+                u8::try_from(
+                    u32::from(elapsed.saturating_sub(summon_start))
+                        .saturating_mul(64)
+                        .checked_div(u32::from(timeline.summon_fade_in_ticks.max(1)))
+                        .unwrap_or(0),
+                )
+                .unwrap_or(64)
+                .min(64)
+            } else {
+                let fade_out_start = summon_end.saturating_sub(timeline.summon_fade_out_ticks);
+                if elapsed >= fade_out_start {
+                    u8::try_from(
+                        u32::from(summon_end.saturating_sub(elapsed))
+                            .saturating_mul(64)
+                            .checked_div(u32::from(timeline.summon_fade_out_ticks.max(1)))
+                            .unwrap_or(0),
+                    )
+                    .unwrap_or(64)
+                    .min(64)
+                } else {
+                    64
+                }
+            };
+            if let Some(bitmap) = player_sprites.decode_frame(sprite, frame) {
+                let x = 240 + i32::from(magic.x_offset) - i32::from(bitmap.width) / 2;
+                let y = 165 + i32::from(magic.y_offset) - i32::from(bitmap.height);
+                if visibility < 64 {
+                    renderer.blit_rle_dithered(&bitmap, x, y, visibility);
+                } else {
+                    renderer.blit_rle(&bitmap, x, y);
+                }
+            }
+        }
+        if elapsed < timeline.effect_start() {
             return;
         }
-        let Some(sprite) = usize::try_from(magic.specific)
-            .ok()
-            .and_then(|sprite| sprite.checked_add(10))
-        else {
-            return;
-        };
-        let Some(frame_count) = player_sprites
-            .frame_count(sprite)
-            .filter(|count| *count > 0)
-        else {
-            return;
-        };
-        let frame = timed_frame_at(
-            elapsed.saturating_sub(timeline.body_start()),
-            frame_count,
-            magic.speed,
-        );
-        if let Some(bitmap) = player_sprites.decode_frame(sprite, frame) {
-            renderer.blit_rle(
-                &bitmap,
-                240 + i32::from(magic.x_offset) - i32::from(bitmap.width) / 2,
-                165 + i32::from(magic.y_offset) - i32::from(bitmap.height),
-            );
-        }
-        return;
     }
     if elapsed < timeline.effect_start() || elapsed >= timeline.tail_start() {
         if elapsed >= timeline.tail_start() && magic.effect_visual().keep_effect == u16::MAX {
@@ -773,7 +846,13 @@ fn magic_render_timeline(
                 .and_then(|sprite| player_sprites.frame_count(sprite))
         })
         .flatten();
-    let timeline = magic_event_timeline(event, magic, effect_frame_count, summon_frame_count);
+    let timeline = magic_event_timeline(
+        event,
+        magic,
+        effect_frame_count,
+        summon_frame_count,
+        enemy_magic_pre_frames(battle, event, magic),
+    );
     let elapsed = timeline
         .total_ticks
         .saturating_sub(ticks_remaining.min(timeline.total_ticks));
@@ -890,6 +969,303 @@ fn action_offset(ticks_remaining: u16) -> i32 {
     let elapsed = ACTION_EVENT_TICKS.saturating_sub(ticks_remaining.min(ACTION_EVENT_TICKS));
     let distance = elapsed.min(ACTION_EVENT_TICKS.saturating_sub(elapsed));
     i32::from(distance) * 3
+}
+
+fn player_attack_animation_state(
+    battle: &BattleState,
+    event: BattleEvent,
+    player_index: usize,
+    ticks_remaining: u16,
+) -> Option<(i32, i32, usize)> {
+    let BattleEvent::PlayerAttack {
+        player,
+        enemy,
+        visual: true,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if player != player_index {
+        return None;
+    }
+    let total = player_attack_ticks(event);
+    let elapsed = total.saturating_sub(ticks_remaining.min(total));
+    let original = player_position(battle.players.len(), player);
+    if elapsed < 4 {
+        return Some((original.0, original.1, 7));
+    }
+    if elapsed >= 13 {
+        return Some((original.0, original.1, 0));
+    }
+    let actor = battle.players.get(player)?;
+    let target = battle.enemies.get(enemy)?;
+    let (enemy_x, enemy_y) = if actor.attacks_all {
+        (150, 100)
+    } else {
+        (
+            i32::from(target.position.x),
+            i32::from(target.position.y) + i32::from(target.y_offset),
+        )
+    };
+    let distance = if !actor.attacks_all && target.slot >= 3 {
+        (i32::try_from(target.slot).ok()? - i32::try_from(player).ok()?) * 8
+    } else {
+        0
+    };
+    let mut x = enemy_x - distance + 64;
+    let mut y = enemy_y + distance + 20;
+    let frame = if elapsed < 6 {
+        8
+    } else if elapsed < 7 {
+        x -= 10;
+        y -= 2;
+        8
+    } else {
+        x -= 26;
+        y -= 6;
+        if elapsed >= 9 {
+            x += 2;
+            y += 1;
+        }
+        9
+    };
+    Some((x, y, frame))
+}
+
+fn enemy_actor_animation_state(
+    battle: &BattleState,
+    event: BattleEvent,
+    enemy_index: usize,
+    ticks_remaining: u16,
+    magic_timing: Option<(BattleMagic, MagicEventTimeline, u16)>,
+) -> Option<(i32, i32, usize)> {
+    let enemy = battle.enemies.get(enemy_index)?;
+    let idle = usize::from(enemy.idle_frames.max(1));
+    let wait = usize::from(enemy.action_wait_frames.max(1));
+    match event {
+        BattleEvent::EnemyMagic {
+            enemy: caster,
+            visual: true,
+            ..
+        } if caster == enemy_index => {
+            let (magic, timeline, elapsed) = magic_timing?;
+            if elapsed >= timeline.tail_start() {
+                return Some((0, 0, 0));
+            }
+            let (x, y) = if elapsed == 0 { (12, 6) } else { (16, 8) };
+            let casting_elapsed = elapsed.saturating_sub(2);
+            let casting_frames = usize::from(enemy.magic_frames);
+            let casting_ticks =
+                u16::try_from(casting_frames.saturating_mul(wait)).unwrap_or(u16::MAX);
+            if casting_elapsed < casting_ticks && casting_frames != 0 {
+                let frame = idle
+                    + usize::from(casting_elapsed)
+                        .checked_div(wait)
+                        .unwrap_or(0)
+                        .min(casting_frames - 1);
+                return Some((x, y, frame));
+            }
+            if magic.effect_visual().fire_delay == 0 && enemy.attack_frames != 0 {
+                let local = usize::from(casting_elapsed.saturating_sub(casting_ticks));
+                let frame = idle
+                    + casting_frames
+                    + local
+                        .checked_div(wait)
+                        .unwrap_or(0)
+                        .min(usize::from(enemy.attack_frames).saturating_sub(1));
+                return Some((x, y, frame));
+            }
+            Some((x, y, idle.saturating_sub(1)))
+        }
+        BattleEvent::EnemyAttack {
+            enemy: caster,
+            player,
+            ..
+        } if caster == enemy_index => {
+            let frames = enemy_attack_frames(battle, event);
+            let total = original_frames_to_ticks(frames);
+            let elapsed = usize::from(total.saturating_sub(ticks_remaining.min(total)));
+            let magic_frames = usize::from(enemy.magic_frames);
+            let startup = magic_frames
+                .saturating_mul(2)
+                .saturating_add(3usize.saturating_sub(magic_frames))
+                .saturating_add(1);
+            let attack_frames = frames.saturating_sub(startup).saturating_sub(11);
+            if elapsed < magic_frames.saturating_mul(2) && magic_frames != 0 {
+                return Some((0, 0, idle + (elapsed / 2).min(magic_frames - 1)));
+            }
+            if elapsed < startup {
+                let steps = elapsed.saturating_sub(magic_frames.saturating_mul(2));
+                return Some((-(steps as i32) * 2, -(steps as i32), idle.saturating_sub(1)));
+            }
+            if elapsed < startup.saturating_add(attack_frames) {
+                let (target_x, target_y) = player_position(battle.players.len(), player);
+                let target_x = target_x - 44 - i32::from(enemy.position.x);
+                let target_y = target_y - 16 - i32::from(enemy.position.y);
+                let local = elapsed - startup;
+                let frame = if enemy.attack_frames == 0 {
+                    idle.saturating_sub(1)
+                } else {
+                    idle + magic_frames
+                        + (local / wait).min(usize::from(enemy.attack_frames).saturating_sub(1))
+                };
+                return Some((target_x, target_y, frame));
+            }
+            Some((0, 0, 0))
+        }
+        BattleEvent::EnemyConfusedAttack {
+            enemy: caster,
+            target,
+            ..
+        } if caster == enemy_index => {
+            let total = original_frames_to_ticks(enemy_attack_frames(battle, event));
+            let elapsed = usize::from(total.saturating_sub(ticks_remaining.min(total)));
+            if elapsed >= 10 {
+                return Some((0, 0, 0));
+            }
+            let target = battle.enemies.get(target)?;
+            let divisor = 1i32 << elapsed.min(3);
+            let x = (i32::from(target.position.x) - i32::from(enemy.position.x)) / divisor;
+            let y = (i32::from(target.position.y) - i32::from(enemy.position.y)) / divisor;
+            Some((x, y, idle.saturating_sub(1)))
+        }
+        _ => None,
+    }
+}
+
+fn death_fade_visibility(ticks_remaining: u16) -> u8 {
+    if ticks_remaining > BATTLE_FADE_TICKS {
+        return 64;
+    }
+    u8::try_from(
+        u32::from(ticks_remaining)
+            .saturating_mul(64)
+            .checked_div(u32::from(BATTLE_FADE_TICKS.max(1)))
+            .unwrap_or(0),
+    )
+    .unwrap_or(64)
+    .min(64)
+}
+
+fn enemy_feedback_state(
+    event: BattleEvent,
+    enemy_index: usize,
+    ticks_remaining: u16,
+    magic_timing: Option<(BattleMagic, MagicEventTimeline, u16)>,
+) -> (i32, i32, bool) {
+    if let BattleEvent::PlayerAttack {
+        enemy,
+        visual: true,
+        ..
+    } = event
+    {
+        if enemy != enemy_index {
+            return (0, 0, false);
+        }
+        let total = player_attack_ticks(event);
+        let elapsed = total.saturating_sub(ticks_remaining.min(total));
+        return match elapsed {
+            7 => (0, 0, true),
+            10 => (-8, -4, false),
+            11 => (-4, -2, false),
+            12 => (-6, -3, false),
+            _ => (0, 0, false),
+        };
+    }
+    let targets_enemy = matches!(
+        event,
+        BattleEvent::PlayerMagic { enemy, .. }
+            | BattleEvent::PlayerCooperativeMagic { enemy, .. }
+            | BattleEvent::SimulatedMagic { enemy, .. }
+            if enemy == enemy_index
+    );
+    if targets_enemy {
+        if let Some((_, timeline, elapsed)) = magic_timing {
+            let tail = elapsed.saturating_sub(timeline.tail_start());
+            return match tail {
+                0 => (-8, 0, false),
+                1 => (-4, 0, true),
+                2 => (-6, 0, false),
+                _ => (0, 0, false),
+            };
+        }
+    }
+    (0, 0, false)
+}
+
+fn player_feedback_offset(
+    battle: &BattleState,
+    event: BattleEvent,
+    player_index: usize,
+    ticks_remaining: u16,
+    magic_timing: Option<(BattleMagic, MagicEventTimeline, u16)>,
+) -> (i32, i32) {
+    if let BattleEvent::EnemyAttack {
+        player,
+        protected_by,
+        ..
+    } = event
+    {
+        let affected = protected_by.unwrap_or(player);
+        if affected != player_index {
+            return (0, 0);
+        }
+        let frames = enemy_attack_frames(battle, event);
+        let total = original_frames_to_ticks(frames);
+        let elapsed = usize::from(total.saturating_sub(ticks_remaining.min(total)));
+        let hit = frames.saturating_sub(11);
+        if let Some(cover) = protected_by {
+            let enemy = match event {
+                BattleEvent::EnemyAttack { enemy, .. } => battle.enemies.get(enemy),
+                _ => None,
+            };
+            let attack_frames = enemy.map_or(2, |enemy| {
+                if enemy.attack_frames == 0 {
+                    2
+                } else {
+                    usize::from(enemy.attack_frames)
+                        .saturating_add(1)
+                        .saturating_mul(usize::from(enemy.action_wait_frames.max(1)))
+                }
+            });
+            if player_index == cover
+                && elapsed >= hit.saturating_sub(attack_frames)
+                && elapsed <= hit.saturating_add(4)
+            {
+                let original = player_position(battle.players.len(), cover);
+                let target = player_position(battle.players.len(), player);
+                let knock = if elapsed > hit { (4, 2) } else { (0, 0) };
+                return (
+                    target.0 - 24 - original.0 + knock.0,
+                    target.1 - 12 - original.1 + knock.1,
+                );
+            }
+        }
+        if elapsed <= hit {
+            return (0, 0);
+        }
+        return match elapsed - hit {
+            1 => (8, 4),
+            2..=4 => (10, 5),
+            _ => (0, 0),
+        };
+    }
+    if let BattleEvent::EnemyMagic { player, .. } = event {
+        if player != player_index {
+            return (0, 0);
+        }
+        if let Some((_, timeline, elapsed)) = magic_timing {
+            return match elapsed.saturating_sub(timeline.tail_start()) {
+                0 => (0, 0),
+                1 => (4, 2),
+                2 => (6, 3),
+                3..=4 => (7, 3),
+                _ => (0, 0),
+            };
+        }
+    }
+    (0, 0)
 }
 
 fn magic_blow_offset(amount: i16, ticks_remaining: u16) -> i32 {
@@ -1418,7 +1794,8 @@ fn render_status(
     auto_attack: bool,
     text: &TextLibrary,
     font: &BitmapFont,
-    ticks: u64,
+    ui_ticks: u64,
+    battle_ticks: u64,
     cash: u32,
 ) {
     for (index, player) in battle.players.iter().enumerate() {
@@ -1508,7 +1885,7 @@ fn render_status(
 
     if let BattleMenuState::TargetPlayer { selected, .. } = menu {
         let (x, y) = player_position(battle.players.len(), selected);
-        let arrow = if ticks & 1 == 0 { 66 } else { 67 };
+        let arrow = if battle_ticks & 1 == 0 { 66 } else { 67 };
         if let Some(sprite) = ui_sprites.get(arrow) {
             renderer.blit_rle(sprite, x - 8, y - 67);
         }
@@ -1517,7 +1894,7 @@ fn render_status(
             return;
         };
         let (x, y) = player_position(battle.players.len(), active);
-        let arrow = if ticks & 1 == 0 { 68 } else { 69 };
+        let arrow = if battle_ticks & 1 == 0 { 68 } else { 69 };
         if let Some(sprite) = ui_sprites.get(arrow) {
             renderer.blit_rle(sprite, x - 8, y - 74);
         }
@@ -1615,7 +1992,7 @@ fn render_status(
                 if let Some(name) = text.word(usize::from(magic.object_id)) {
                     let enabled = magic_enabled && player.mp >= magic.mp_cost;
                     let color = match (index == selected, enabled) {
-                        (true, true) => selected_color(ticks),
+                        (true, true) => selected_color(ui_ticks),
                         (true, false) => 0x1c,
                         (false, true) => 0x4f,
                         (false, false) => 0x18,
@@ -1637,7 +2014,7 @@ fn render_status(
                 selected,
                 2,
                 20,
-                ticks,
+                ui_ticks,
             );
         }
         BattleMenuState::ItemSubmenu { selected } => {
@@ -1650,7 +2027,7 @@ fn render_status(
                 selected,
                 30,
                 50,
-                ticks,
+                ui_ticks,
             );
         }
         BattleMenuState::TargetPlayer { command, selected } => {
@@ -1819,6 +2196,13 @@ fn player_position(count: usize, index: usize) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battle_animation_clock_uses_original_forty_millisecond_frames() {
+        assert_eq!(battle_animation_ticks(3), 0);
+        assert_eq!(battle_animation_ticks(4), 1);
+        assert_eq!(battle_animation_ticks(8), 2);
+    }
 
     #[test]
     fn player_positions_match_original_one_to_three_member_layouts() {

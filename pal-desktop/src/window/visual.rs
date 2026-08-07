@@ -7,10 +7,12 @@ use pal_core::role::RoleSprites;
 use pal_core::script::ScriptVisual;
 use std::collections::HashMap;
 
+use super::battle_timing::BATTLE_FADE_MS;
 use crate::renderer::Renderer;
 
 pub(super) struct VisualState {
     pending: Option<ScriptVisual>,
+    battle_transition_pending: bool,
     effect: Option<VisualEffect>,
     palette_index: usize,
     night_palette: bool,
@@ -86,6 +88,7 @@ impl VisualState {
     pub(super) fn new() -> Self {
         Self {
             pending: None,
+            battle_transition_pending: false,
             effect: None,
             palette_index: 0,
             night_palette: false,
@@ -107,7 +110,11 @@ impl VisualState {
     }
 
     pub(super) fn queue(&mut self, command: ScriptVisual) -> bool {
-        if self.pending.is_some() || self.effect.is_some() || self.shake_remaining != 0 {
+        if self.pending.is_some()
+            || self.battle_transition_pending
+            || self.effect.is_some()
+            || self.shake_remaining != 0
+        {
             return false;
         }
         self.pending = Some(command);
@@ -115,7 +122,18 @@ impl VisualState {
     }
 
     pub(super) fn is_blocking(&self) -> bool {
-        self.pending.is_some() || self.effect.is_some() || self.shake_remaining != 0
+        self.pending.is_some()
+            || self.battle_transition_pending
+            || self.effect.is_some()
+            || self.shake_remaining != 0
+    }
+
+    pub(super) fn queue_battle_transition(&mut self) -> bool {
+        if self.is_blocking() {
+            return false;
+        }
+        self.battle_transition_pending = true;
+        true
     }
 
     pub(super) fn needs_update(&self) -> bool {
@@ -138,6 +156,7 @@ impl VisualState {
     /// the normal implicit scene fade-in reveal it.
     pub(super) fn prepare_scene_fade_in(&mut self) {
         self.pending = None;
+        self.battle_transition_pending = false;
         self.effect = None;
         self.indexed_screen = None;
         self.rgba_screen = None;
@@ -165,6 +184,7 @@ impl VisualState {
 
     pub(super) fn restore_original_environment(&mut self, night: bool, screen_wave: u16) {
         self.pending = None;
+        self.battle_transition_pending = false;
         self.effect = None;
         self.palette_index = 0;
         self.night_palette = night;
@@ -232,6 +252,16 @@ impl VisualState {
         rng: &RngArchive,
         role_sprites: &RoleSprites,
     ) -> Result<bool, String> {
+        if self.battle_transition_pending {
+            self.battle_transition_pending = false;
+            self.effect = Some(VisualEffect::CrossFade {
+                previous: current_screen.to_vec(),
+                progress: 0,
+                total: duration_ticks(BATTLE_FADE_MS),
+                draw_ending_sprite: false,
+            });
+            return Ok(true);
+        }
         let Some(command) = self.pending.take() else {
             return Ok(false);
         };

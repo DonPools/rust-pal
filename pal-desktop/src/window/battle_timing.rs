@@ -1,21 +1,27 @@
 use pal_core::battle::{BattleEvent, BattleMagic, BattleMagicVisual, BattleState};
-use pal_core::game::UPDATE_INTERVAL_MS;
+use pal_core::game::BATTLE_FRAME_MS;
 
-const ORIGINAL_BATTLE_FRAME_MS: u64 = 40;
-const OFFENSIVE_FEEDBACK_FRAMES: usize = 4;
-const DEFENSIVE_COLOR_SHIFT_FRAMES: usize = 13;
+const OFFENSIVE_FEEDBACK_FRAMES: usize = 9;
+const DEFENSIVE_COLOR_SHIFT_FRAMES: usize = 22;
+const COOPERATIVE_FEEDBACK_FRAMES: usize = 15;
+const ENEMY_MAGIC_FEEDBACK_FRAMES: usize = 14;
 const NORMAL_PRE_MAGIC_FRAMES: usize = 17;
 const SUMMON_PRE_MAGIC_FRAMES: usize = 7;
 const SUMMON_BRIGHTEN_FRAMES: usize = 10;
 const COOPERATIVE_PRE_MAGIC_FRAMES: usize = 20;
+pub(super) const BATTLE_FADE_MS: u64 = 12 * 6 * 16;
+pub(super) const BATTLE_FADE_TICKS: u16 = 29;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MagicEventTimeline {
     pub(super) pre_ticks: u16,
     pub(super) brighten_ticks: u16,
+    pub(super) summon_fade_in_ticks: u16,
     pub(super) body_ticks: u16,
     pub(super) effect_ticks: u16,
     pub(super) tail_ticks: u16,
+    pub(super) death_fade_ticks: u16,
+    pub(super) summon_fade_out_ticks: u16,
     pub(super) total_ticks: u16,
 }
 
@@ -23,11 +29,14 @@ impl MagicEventTimeline {
     pub(super) fn effect_start(self) -> u16 {
         self.pre_ticks
             .saturating_add(self.brighten_ticks)
+            .saturating_add(self.summon_fade_in_ticks)
             .saturating_add(self.body_ticks)
     }
 
     pub(super) fn body_start(self) -> u16 {
-        self.pre_ticks.saturating_add(self.brighten_ticks)
+        self.pre_ticks
+            .saturating_add(self.brighten_ticks)
+            .saturating_add(self.summon_fade_in_ticks)
     }
 
     pub(super) fn tail_start(self) -> u16 {
@@ -112,16 +121,26 @@ pub(super) fn magic_event_timeline(
     magic: BattleMagic,
     effect_frame_count: Option<usize>,
     summon_frame_count: Option<usize>,
+    enemy_pre_frames: usize,
 ) -> MagicEventTimeline {
+    let death_fade_ticks = if enemy_defeated(event) {
+        BATTLE_FADE_TICKS
+    } else {
+        0
+    };
     if !event_has_full_magic_visual(event) {
-        let tail_ticks = original_frames_to_ticks(OFFENSIVE_FEEDBACK_FRAMES);
+        let tail_ticks = original_frames_to_ticks(1);
+        let total_ticks = tail_ticks.saturating_add(death_fade_ticks).max(1);
         return MagicEventTimeline {
             pre_ticks: 0,
             brighten_ticks: 0,
+            summon_fade_in_ticks: 0,
             body_ticks: 0,
             effect_ticks: 0,
             tail_ticks,
-            total_ticks: tail_ticks,
+            death_fade_ticks,
+            summon_fade_out_ticks: 0,
+            total_ticks,
         };
     }
 
@@ -133,6 +152,7 @@ pub(super) fn magic_event_timeline(
             NORMAL_PRE_MAGIC_FRAMES
         }
         BattleEvent::PlayerCooperativeMagic { .. } => COOPERATIVE_PRE_MAGIC_FRAMES,
+        BattleEvent::EnemyMagic { .. } => enemy_pre_frames,
         _ => 0,
     };
     let pre_ticks = original_frames_to_ticks(pre_frames);
@@ -141,8 +161,12 @@ pub(super) fn magic_event_timeline(
     } else {
         0
     };
+    let summon_fade_in_ticks = if is_summon { BATTLE_FADE_TICKS } else { 0 };
     let body_ticks = if is_summon {
-        timed_frames_to_ticks(summon_frame_count.unwrap_or(0), magic.speed)
+        timed_frames_to_ticks(
+            summon_frame_count.unwrap_or(0).saturating_sub(1),
+            magic.speed,
+        )
     } else {
         0
     };
@@ -153,41 +177,126 @@ pub(super) fn magic_event_timeline(
         offensive_effect_frame_count(effect_frame_count.unwrap_or(0), effect_visual)
     };
     let effect_ticks = timed_frames_to_ticks(effect_frames, effect_visual.speed);
-    let tail_frames = if is_defensive {
-        DEFENSIVE_COLOR_SHIFT_FRAMES
-    } else {
-        OFFENSIVE_FEEDBACK_FRAMES
+    let tail_frames = match event {
+        BattleEvent::PlayerDefensiveMagic { .. } => DEFENSIVE_COLOR_SHIFT_FRAMES,
+        BattleEvent::PlayerCooperativeMagic { .. } => COOPERATIVE_FEEDBACK_FRAMES,
+        BattleEvent::EnemyMagic { .. } => ENEMY_MAGIC_FEEDBACK_FRAMES,
+        _ => OFFENSIVE_FEEDBACK_FRAMES,
     };
     let tail_ticks = original_frames_to_ticks(tail_frames);
+    let summon_fade_out_ticks = if is_summon { BATTLE_FADE_TICKS } else { 0 };
     let total_ticks = pre_ticks
         .saturating_add(brighten_ticks)
+        .saturating_add(summon_fade_in_ticks)
         .saturating_add(body_ticks)
         .saturating_add(effect_ticks)
         .saturating_add(tail_ticks)
+        .saturating_add(death_fade_ticks)
+        .saturating_add(summon_fade_out_ticks)
         .max(1);
     MagicEventTimeline {
         pre_ticks,
         brighten_ticks,
+        summon_fade_in_ticks,
         body_ticks,
         effect_ticks,
         tail_ticks,
+        death_fade_ticks,
+        summon_fade_out_ticks,
         total_ticks,
     }
 }
 
+pub(super) fn enemy_magic_pre_frames(
+    battle: &BattleState,
+    event: BattleEvent,
+    magic: BattleMagic,
+) -> usize {
+    let BattleEvent::EnemyMagic {
+        enemy,
+        visual: true,
+        ..
+    } = event
+    else {
+        return 0;
+    };
+    let Some(enemy) = battle.enemies.get(enemy) else {
+        return 0;
+    };
+    let wait = usize::from(enemy.action_wait_frames.max(1));
+    let casting = usize::from(enemy.magic_frames).saturating_mul(wait).max(1);
+    let attack = if magic.effect_visual().fire_delay == 0 {
+        usize::from(enemy.attack_frames)
+            .saturating_add(1)
+            .saturating_mul(wait)
+    } else {
+        0
+    };
+    2usize.saturating_add(casting).saturating_add(attack)
+}
+
+pub(super) fn enemy_attack_frames(battle: &BattleState, event: BattleEvent) -> usize {
+    let (BattleEvent::EnemyAttack { enemy, .. } | BattleEvent::EnemyConfusedAttack { enemy, .. }) =
+        event
+    else {
+        return 0;
+    };
+    let Some(enemy) = battle.enemies.get(enemy) else {
+        return 0;
+    };
+    if matches!(event, BattleEvent::EnemyConfusedAttack { .. }) {
+        return 17;
+    }
+    let magic_frames = usize::from(enemy.magic_frames);
+    let startup = magic_frames
+        .saturating_mul(2)
+        .saturating_add(3usize.saturating_sub(magic_frames))
+        .saturating_add(1);
+    let attack = if enemy.attack_frames == 0 {
+        2
+    } else {
+        usize::from(enemy.attack_frames)
+            .saturating_add(1)
+            .saturating_mul(usize::from(enemy.action_wait_frames.max(1)))
+    };
+    startup.saturating_add(attack).saturating_add(11)
+}
+
+pub(super) fn player_attack_ticks(event: BattleEvent) -> u16 {
+    let BattleEvent::PlayerAttack {
+        visual, defeated, ..
+    } = event
+    else {
+        return 0;
+    };
+    let action = original_frames_to_ticks(if visual { 16 } else { 1 });
+    action.saturating_add(if defeated { BATTLE_FADE_TICKS } else { 0 })
+}
+
+pub(super) fn enemy_defeated(event: BattleEvent) -> bool {
+    matches!(
+        event,
+        BattleEvent::PlayerAttack { defeated: true, .. }
+            | BattleEvent::PlayerMagic { defeated: true, .. }
+            | BattleEvent::PlayerCooperativeMagic { defeated: true, .. }
+            | BattleEvent::SimulatedMagic { defeated: true, .. }
+            | BattleEvent::EnemyConfusedAttack { defeated: true, .. }
+    )
+}
+
 pub(super) fn original_frames_to_ticks(frames: usize) -> u16 {
-    milliseconds_to_ticks((frames as u64).saturating_mul(ORIGINAL_BATTLE_FRAME_MS))
+    battle_milliseconds_to_ticks((frames as u64).saturating_mul(BATTLE_FRAME_MS))
 }
 
 pub(super) fn timed_frames_to_ticks(frames: usize, speed: i16) -> u16 {
-    milliseconds_to_ticks((frames as u64).saturating_mul(frame_time_ms(speed)))
+    battle_milliseconds_to_ticks((frames as u64).saturating_mul(frame_time_ms(speed)))
 }
 
 pub(super) fn timed_frame_at(local_tick: u16, frame_count: usize, speed: i16) -> usize {
     if frame_count == 0 {
         return 0;
     }
-    let elapsed_ms = u64::from(local_tick).saturating_mul(UPDATE_INTERVAL_MS);
+    let elapsed_ms = u64::from(local_tick).saturating_mul(BATTLE_FRAME_MS);
     usize::try_from(elapsed_ms / frame_time_ms(speed))
         .unwrap_or(usize::MAX)
         .min(frame_count - 1)
@@ -260,8 +369,8 @@ fn frame_time_ms(speed: i16) -> u64 {
     u64::try_from((i32::from(speed) + 5).max(1)).unwrap_or(1) * 10
 }
 
-fn milliseconds_to_ticks(milliseconds: u64) -> u16 {
-    u16::try_from(milliseconds.div_ceil(UPDATE_INTERVAL_MS)).unwrap_or(u16::MAX)
+pub(super) fn battle_milliseconds_to_ticks(milliseconds: u64) -> u16 {
+    u16::try_from(milliseconds.div_ceil(BATTLE_FRAME_MS)).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]
@@ -291,23 +400,27 @@ mod tests {
     fn offensive_sequence_uses_fire_delay_repetitions_speed_and_shake() {
         let magic = visual();
         assert_eq!(offensive_effect_frame_count(10, magic), 38);
-        assert_eq!(timed_frames_to_ticks(38, magic.speed), 38);
+        assert_eq!(timed_frames_to_ticks(38, magic.speed), 48);
         assert_eq!(
             effect_sound_elapsed_tick(
                 MagicEventTimeline {
-                    pre_ticks: 14,
+                    pre_ticks: 17,
                     brighten_ticks: 0,
+                    summon_fade_in_ticks: 0,
                     body_ticks: 0,
-                    effect_ticks: 38,
-                    tail_ticks: 4,
-                    total_ticks: 56,
+                    effect_ticks: 48,
+                    tail_ticks: 9,
+                    death_fade_ticks: 0,
+                    summon_fade_out_ticks: 0,
+                    total_ticks: 74,
                 },
                 magic,
                 0,
             ),
-            16
+            20
         );
-        assert_eq!(offensive_effect_frame_at(10, 10, magic), 2);
+        assert_eq!(offensive_effect_frame_at(10, 10, magic), 8);
+        assert_eq!(offensive_effect_frame_at(13, 10, magic), 2);
         assert_eq!(kept_effect_frame(10, magic), 9);
     }
 
@@ -315,7 +428,7 @@ mod tests {
     fn sub_frame_speed_is_scaled_to_the_fixed_update_step() {
         let mut magic = visual();
         magic.speed = -3;
-        assert_eq!(timed_frames_to_ticks(10, magic.speed), 4);
+        assert_eq!(timed_frames_to_ticks(10, magic.speed), 5);
         assert_eq!(timed_frame_at(1, 10, magic.speed), 2);
     }
 }

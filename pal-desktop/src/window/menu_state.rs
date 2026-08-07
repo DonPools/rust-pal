@@ -33,6 +33,12 @@ pub(super) enum SaveSlotMode {
     Load,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SystemAudioKind {
+    Music,
+    Sound,
+}
+
 impl OpeningMenu {
     pub(super) fn new(slots: [OriginalSaveSlot; 5]) -> Self {
         Self {
@@ -97,6 +103,14 @@ pub(super) enum FieldMenu {
     },
     System {
         selected: usize,
+    },
+    SystemAudio {
+        parent_selected: usize,
+        kind: SystemAudioKind,
+        selected_enabled: bool,
+    },
+    SystemQuit {
+        selected_yes: bool,
     },
     SaveSlots {
         mode: SaveSlotMode,

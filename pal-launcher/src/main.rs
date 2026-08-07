@@ -27,7 +27,7 @@ fn main() {
         std::process::exit(2);
     });
 
-    println!("Rust-PAL M6 in progress");
+    println!("Rust-PAL M6");
     println!("data: {}", data_dir.display());
 
     let boot = bootstrap(data_dir);
@@ -62,6 +62,7 @@ fn run_desktop(boot: BootstrappedGame) {
         font,
         script_table,
         voc_mkf,
+        mus_mkf,
         midi_mkf,
         sound_font,
         palettes,
@@ -107,6 +108,7 @@ fn run_desktop(boot: BootstrappedGame) {
             battle_effects,
             battle_backgrounds,
             voc_mkf,
+            mus_mkf,
             midi_mkf,
             sound_font,
             palettes,

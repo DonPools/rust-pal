@@ -73,7 +73,11 @@ pub(super) fn load_sound_effects(data_dir: &Path) -> Option<Vec<u8>> {
     std::fs::read(data_dir.join("VOC.MKF")).ok()
 }
 
-pub(super) fn load_music(data_dir: &Path) -> Option<Vec<u8>> {
+pub(super) fn load_rix_music(data_dir: &Path) -> Option<Vec<u8>> {
+    std::fs::read(data_dir.join("MUS.MKF")).ok()
+}
+
+pub(super) fn load_midi_music(data_dir: &Path) -> Option<Vec<u8>> {
     std::fs::read(data_dir.join("MIDI.MKF")).ok()
 }
 

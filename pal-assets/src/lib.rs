@@ -10,6 +10,7 @@ pub mod mkf;
 pub mod objects;
 pub mod palette;
 pub mod player_roles;
+pub mod rix;
 pub mod rle;
 pub mod rng;
 pub mod save;

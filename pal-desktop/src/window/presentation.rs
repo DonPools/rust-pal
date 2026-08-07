@@ -36,10 +36,6 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) inventory_menu: Option<&'a InventoryMenu>,
     pub(super) confirmation_menu: Option<&'a ConfirmationMenu>,
     pub(super) shop_menu: Option<&'a ShopMenu>,
-    pub(super) music_enabled: bool,
-    pub(super) music_volume: u8,
-    pub(super) sound_enabled: bool,
-    pub(super) sound_volume: u8,
     pub(super) text: &'a TextLibrary,
     pub(super) font: &'a BitmapFont,
     pub(super) dialog_faces: &'a [Option<RleBitmap>],
@@ -224,10 +220,6 @@ pub(super) fn render_game(
             ui.status_background,
             *menu,
             ui.ui_ticks,
-            ui.music_enabled,
-            ui.music_volume,
-            ui.sound_enabled,
-            ui.sound_volume,
         );
     } else if let Some(menu) = ui.shop_menu {
         render_shop_menu(

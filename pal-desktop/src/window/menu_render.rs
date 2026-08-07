@@ -362,13 +362,35 @@ pub(super) fn render_confirmation_menu(
     menu: ConfirmationMenu,
     ui_ticks: u64,
 ) {
-    const NO_WORD: usize = 19;
-    const YES_WORD: usize = 20;
+    render_binary_selection_menu(
+        renderer,
+        text,
+        font,
+        sprites,
+        19,
+        20,
+        menu.selected_yes,
+        ui_ticks,
+    );
+}
+
+fn render_binary_selection_menu(
+    renderer: &mut Renderer,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    first_word: usize,
+    second_word: usize,
+    selected_second: bool,
+    ui_ticks: u64,
+) {
     const Y: i32 = 100;
-    for (index, (word_id, selected)) in
-        [(NO_WORD, !menu.selected_yes), (YES_WORD, menu.selected_yes)]
-            .into_iter()
-            .enumerate()
+    for (index, (word_id, selected)) in [
+        (first_word, !selected_second),
+        (second_word, selected_second),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let Some(label) = text.word(word_id) else {
             continue;
@@ -400,10 +422,6 @@ pub(super) fn render_field_menu(
     status_background: &Bitmap,
     menu: FieldMenu,
     ui_ticks: u64,
-    music_enabled: bool,
-    music_volume: u8,
-    sound_enabled: bool,
-    sound_volume: u8,
 ) {
     match menu {
         FieldMenu::Main { selected } => {
@@ -483,47 +501,63 @@ pub(super) fn render_field_menu(
             }
         }
         FieldMenu::System { selected } => {
-            const LABELS: [usize; 5] = [11, 12, 13, 14, 15];
-            draw_ui_box(renderer, sprites, 40, 60, 4, 3, 0);
-            for (index, word_id) in LABELS.into_iter().enumerate() {
-                let color = if index == selected {
-                    selected_color(ui_ticks)
-                } else {
-                    0x4f
-                };
-                if let Some(label) = text.word(word_id) {
-                    renderer.draw_big5_text_shadowed(
-                        font,
-                        label,
-                        53,
-                        72 + index as i32 * 18,
-                        color,
-                    );
-                }
-                let audio = match index {
-                    2 => Some((music_enabled, music_volume)),
-                    3 => Some((sound_enabled, sound_volume)),
-                    _ => None,
-                };
-                if let Some((enabled, volume)) = audio {
-                    let value = if enabled {
-                        format!("{:>3}%", volume)
-                    } else {
-                        " OFF".to_owned()
-                    };
-                    renderer.draw_big5_text_shadowed(
-                        font,
-                        value.as_bytes(),
-                        101,
-                        72 + index as i32 * 18,
-                        color,
-                    );
-                }
-            }
+            render_system_menu(renderer, text, font, sprites, selected, ui_ticks)
+        }
+        FieldMenu::SystemAudio {
+            parent_selected,
+            selected_enabled,
+            ..
+        } => {
+            render_system_menu(renderer, text, font, sprites, parent_selected, ui_ticks);
+            render_binary_selection_menu(
+                renderer,
+                text,
+                font,
+                sprites,
+                17,
+                18,
+                selected_enabled,
+                ui_ticks,
+            );
+        }
+        FieldMenu::SystemQuit { selected_yes } => {
+            render_system_menu(renderer, text, font, sprites, 4, ui_ticks);
+            render_binary_selection_menu(
+                renderer,
+                text,
+                font,
+                sprites,
+                19,
+                20,
+                selected_yes,
+                ui_ticks,
+            );
         }
         FieldMenu::SaveSlots {
             selected, slots, ..
         } => render_save_slot_menu(renderer, text, font, sprites, slots, selected, ui_ticks),
+    }
+}
+
+fn render_system_menu(
+    renderer: &mut Renderer,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    selected: usize,
+    ui_ticks: u64,
+) {
+    const LABELS: [usize; 5] = [11, 12, 13, 14, 15];
+    draw_ui_box(renderer, sprites, 40, 60, 4, 3, 0);
+    for (index, word_id) in LABELS.into_iter().enumerate() {
+        let color = if index == selected {
+            selected_color(ui_ticks)
+        } else {
+            0x4f
+        };
+        if let Some(label) = text.word(word_id) {
+            renderer.draw_big5_text_shadowed(font, label, 53, 72 + index as i32 * 18, color);
+        }
     }
 }
 

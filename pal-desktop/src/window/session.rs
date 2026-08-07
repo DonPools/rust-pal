@@ -101,6 +101,7 @@ impl SessionState {
     pub(super) fn new(
         auto_scripts: ScriptTable,
         voc_mkf: &[u8],
+        mus_mkf: &[u8],
         midi_mkf: &[u8],
         sound_font: &[u8],
         magic_effect_sprites: &BattleSpriteArchive,
@@ -147,8 +148,8 @@ impl SessionState {
             magic: None,
             auto_scripts,
             sound_effects: SoundEffects::new(voc_mkf).expect("failed to load VOC sound effects"),
-            music: BackgroundMusic::new(midi_mkf, sound_font)
-                .expect("failed to load MIDI music and SoundFont"),
+            music: BackgroundMusic::new(mus_mkf, midi_mkf, sound_font)
+                .expect("failed to load MUS.MKF RIX music"),
             visual: VisualState::new(),
             dialog_delay_ms: 24,
             waiting_for_key: false,

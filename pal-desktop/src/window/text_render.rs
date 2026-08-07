@@ -1,8 +1,9 @@
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::BitmapFont;
 
-use crate::debug_overlay::glyph;
 use crate::renderer::Renderer;
+
+use super::ascii_font;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DialogTextMode {
@@ -179,18 +180,13 @@ fn dialog_glyph_color(palette_index: u8, mode: DialogTextMode) -> u8 {
 }
 
 fn draw_ascii_pixels(renderer: &mut Renderer, byte: u8, x: i32, y: i32, color: u8) {
-    const SOURCE_WIDTH: usize = 5;
-    const SOURCE_HEIGHT: usize = 7;
-    const DRAW_WIDTH: usize = 7;
-    const DRAW_HEIGHT: usize = 11;
-    let source = glyph(char::from(byte));
-    for row in 0..DRAW_HEIGHT {
-        let source_row = row * SOURCE_HEIGHT / DRAW_HEIGHT;
-        let bits = source[source_row];
-        for column in 0..DRAW_WIDTH {
-            let source_column = column * SOURCE_WIDTH / DRAW_WIDTH;
-            if bits & (0b1_0000 >> source_column) != 0 {
-                put_palette_pixel(renderer, x + column as i32, y + row as i32 + 2, color);
+    let Some(source) = ascii_font::glyph(byte) else {
+        return;
+    };
+    for (row, bits) in source.into_iter().enumerate() {
+        for column in 0..8 {
+            if bits & (1 << column) != 0 {
+                put_palette_pixel(renderer, x + column, y + row as i32, color);
             }
         }
     }
@@ -306,8 +302,9 @@ mod tests {
             DialogTextMode::CenterWindow,
         );
 
+        assert_eq!(pixel(&renderer, 0, 2), [0, 0, 0, 255]);
         assert_eq!(pixel(&renderer, 6, 2), [0, 0, 0, 255]);
         assert_eq!(pixel(&renderer, 7, 2), [40, 50, 60, 255]);
-        assert_eq!(pixel(&renderer, 6, 12), [0, 0, 0, 255]);
+        assert_eq!(pixel(&renderer, 0, 11), [0, 0, 0, 255]);
     }
 }

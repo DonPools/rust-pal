@@ -1,5 +1,6 @@
 //! Native window and map framebuffer presentation.
 
+mod ascii_font;
 mod battle_render;
 mod battle_timing;
 mod battle_update;
@@ -28,7 +29,7 @@ use crate::debug_overlay::{DebugOverlay, DebugSnapshot};
 use crate::renderer::Renderer;
 #[cfg(test)]
 use pal_assets::text::TextLibrary;
-use pal_core::game::{GameState, UPDATE_INTERVAL_MS};
+use pal_core::game::{GameState, BATTLE_FRAME_MS, EXPLORATION_FRAME_MS, UPDATE_INTERVAL_MS};
 #[cfg(test)]
 use pal_core::role::Direction;
 use pal_core::role::RoleSprites;
@@ -79,6 +80,7 @@ pub use types::{GameResources, LoadedScene, Viewport};
 const OPENING_MENU_MUSIC: u16 = 4;
 const OPENING_INTRO_UPDATE_MS: u64 = 10;
 const DIALOG_POLL_INTERVAL_MS: u64 = 8;
+const UI_TIME_QUANTUM_MS: u64 = 10;
 
 pub fn run_game_window<L>(
     mut renderer: Renderer,
@@ -107,6 +109,7 @@ pub fn run_game_window<L>(
         status_background,
         equip_background,
         voc_mkf,
+        mus_mkf,
         midi_mkf,
         sound_font,
         palettes,
@@ -151,6 +154,7 @@ pub fn run_game_window<L>(
     let mut script_services = SessionState::new(
         auto_scripts,
         &voc_mkf,
+        &mus_mkf,
         &midi_mkf,
         &sound_font,
         &magic_effect_sprites,
@@ -178,10 +182,6 @@ pub fn run_game_window<L>(
             inventory_menu: script_services.inventory_menu.as_ref(),
             confirmation_menu: script_services.confirmation_menu.as_ref(),
             shop_menu: script_services.shop_menu.as_ref(),
-            music_enabled: script_services.music.enabled(),
-            music_volume: script_services.music.volume(),
-            sound_enabled: script_services.sound_effects.enabled(),
-            sound_volume: script_services.sound_effects.volume(),
             text: &text,
             font: &font,
             dialog_faces: &dialog_faces,
@@ -210,11 +210,10 @@ pub fn run_game_window<L>(
         },
     );
 
-    let tick = Duration::from_millis(UPDATE_INTERVAL_MS);
-    let mut last_update = Instant::now();
+    let ui_epoch = Instant::now();
+    let mut last_update = ui_epoch;
     let mut accumulator = Duration::ZERO;
     let mut input = HeldInput::default();
-    let mut ui_ticks = 0u64;
 
     event_loop
         .run(move |event, target| match event {
@@ -330,10 +329,6 @@ pub fn run_game_window<L>(
                                     inventory_menu: script_services.inventory_menu.as_ref(),
                                     confirmation_menu: script_services.confirmation_menu.as_ref(),
                                     shop_menu: script_services.shop_menu.as_ref(),
-                                    music_enabled: script_services.music.enabled(),
-                                    music_volume: script_services.music.volume(),
-                                    sound_enabled: script_services.sound_effects.enabled(),
-                                    sound_volume: script_services.sound_effects.volume(),
                                     text: &text,
                                     font: &font,
                                     dialog_faces: &dialog_faces,
@@ -357,7 +352,7 @@ pub fn run_game_window<L>(
                                     post_battle: script_services.post_battle.as_ref(),
                                     status_background: &status_background,
                                     equip_background: &equip_background,
-                                    ui_ticks,
+                                    ui_ticks: elapsed_ui_ticks(ui_epoch.elapsed()),
                                     palettes: &palettes,
                                     visual: &script_services.visual,
                                 },
@@ -456,11 +451,23 @@ pub fn run_game_window<L>(
                         .map(|active| (active.revealed_glyphs, active.awaiting_input));
                     changed |= before != after;
                 }
-                let update_tick = if opening_intro.is_some() {
-                    Duration::from_millis(OPENING_INTRO_UPDATE_MS)
-                } else {
-                    tick
-                };
+                let dialog_or_visual_clock = script_services.visual.is_blocking()
+                    || dialog.is_some()
+                    || script_services.waiting_for_key;
+                let battle_clock = game.battle().is_some() || script_services.post_battle.is_some();
+                let scripted_or_menu_clock = opening_menu.is_some()
+                    || scripts.is_active()
+                    || battle_scripts.is_active()
+                    || script_services.field_menu.is_some()
+                    || script_services.inventory_menu.is_some()
+                    || script_services.confirmation_menu.is_some()
+                    || script_services.shop_menu.is_some();
+                let update_tick = Duration::from_millis(update_interval_ms(
+                    opening_intro.is_some(),
+                    dialog_or_visual_clock,
+                    battle_clock,
+                    scripted_or_menu_clock,
+                ));
                 while accumulator >= update_tick {
                     let (sampled, any_pressed) = input.sample();
                     if opening_intro.is_some() {
@@ -534,7 +541,7 @@ pub fn run_game_window<L>(
                             }
                         }
                     }
-                    if script_services.quit_requested {
+                    if script_services.quit_requested && !script_services.visual.is_blocking() {
                         target.exit();
                     }
                     let selected_load_slot = (!script_services.visual.is_blocking())
@@ -871,31 +878,8 @@ pub fn run_game_window<L>(
                             }
                         }
                     } else if script_services.post_battle.is_some() {
-                        let outcome = advance_post_battle(any_pressed, &mut script_services);
+                        advance_post_battle(any_pressed, &mut game, &mut script_services);
                         changed = true;
-                        if let Some(outcome) = outcome {
-                            if !scripts.resolve_battle(outcome.result) {
-                                window.set_title("Rust-PAL [battle script resume failed]");
-                            } else {
-                                if let Some(music_id) = game.current_music {
-                                    script_services.music.play(music_id, true, 0);
-                                } else {
-                                    script_services.music.stop();
-                                }
-                                advance_script(
-                                    &mut scripts,
-                                    &mut game,
-                                    &mut dialog,
-                                    ScriptRenderResources {
-                                        text: &text,
-                                        role_sprites: &role_sprites,
-                                    },
-                                    &mut load_scene,
-                                    &mut script_services,
-                                    &mut |title| window.set_title(title),
-                                );
-                            }
-                        }
                     } else if game.battle().is_some() {
                         if battle_scripts.is_active() && script_services.battle_events.is_empty() {
                             advance_script(
@@ -911,7 +895,7 @@ pub fn run_game_window<L>(
                                 &mut |title| window.set_title(title),
                             );
                             changed = true;
-                            accumulator -= tick;
+                            accumulator -= update_tick;
                             continue;
                         }
                         let outcome = update_battle(
@@ -957,7 +941,6 @@ pub fn run_game_window<L>(
                         services: &mut script_services,
                         original_save_dir: &original_save_dir,
                         set_title: &mut |title: &str| window.set_title(title),
-                        exit: &mut || target.exit(),
                     }) {
                         changed = menu_changed;
                     } else if scripts.is_active() {
@@ -981,7 +964,7 @@ pub fn run_game_window<L>(
                             });
                             window.set_title("Rust-PAL [Menu]");
                             changed = true;
-                            accumulator -= tick;
+                            accumulator -= update_tick;
                             continue;
                         }
                         let tick_changed = game.update(sampled);
@@ -1045,7 +1028,7 @@ pub fn run_game_window<L>(
                             window.set_title(&format!("Rust-PAL [visual error: {error}]"));
                         }
                     }
-                    accumulator -= tick;
+                    accumulator -= update_tick;
                 }
                 if opening_menu.is_some()
                     || (dialog.is_none()
@@ -1057,7 +1040,7 @@ pub fn run_game_window<L>(
                     changed = true;
                 }
                 if changed {
-                    ui_ticks = ui_ticks.wrapping_add(1);
+                    let ui_ticks = elapsed_ui_ticks(ui_epoch.elapsed());
                     render_game(
                         &mut renderer,
                         &game,
@@ -1074,10 +1057,6 @@ pub fn run_game_window<L>(
                             inventory_menu: script_services.inventory_menu.as_ref(),
                             confirmation_menu: script_services.confirmation_menu.as_ref(),
                             shop_menu: script_services.shop_menu.as_ref(),
-                            music_enabled: script_services.music.enabled(),
-                            music_volume: script_services.music.volume(),
-                            sound_enabled: script_services.sound_effects.enabled(),
-                            sound_volume: script_services.sound_effects.volume(),
                             text: &text,
                             font: &font,
                             dialog_faces: &dialog_faces,
@@ -1109,7 +1088,21 @@ pub fn run_game_window<L>(
                 if renderer.is_dirty() {
                     window.request_redraw();
                 }
-                let simulation_wait = update_tick.saturating_sub(accumulator);
+                let next_update_tick = Duration::from_millis(update_interval_ms(
+                    opening_intro.is_some(),
+                    script_services.visual.is_blocking()
+                        || dialog.is_some()
+                        || script_services.waiting_for_key,
+                    game.battle().is_some() || script_services.post_battle.is_some(),
+                    opening_menu.is_some()
+                        || scripts.is_active()
+                        || battle_scripts.is_active()
+                        || script_services.field_menu.is_some()
+                        || script_services.inventory_menu.is_some()
+                        || script_services.confirmation_menu.is_some()
+                        || script_services.shop_menu.is_some(),
+                ));
+                let simulation_wait = next_update_tick.saturating_sub(accumulator);
                 let dialog_wait = dialog
                     .as_ref()
                     .is_some_and(|active| !active.awaiting_input)
@@ -1121,6 +1114,29 @@ pub fn run_game_window<L>(
             _ => {}
         })
         .expect("event loop failed");
+}
+
+fn update_interval_ms(
+    opening_intro: bool,
+    dialog_or_visual: bool,
+    battle: bool,
+    scripted_or_menu: bool,
+) -> u64 {
+    if opening_intro {
+        OPENING_INTRO_UPDATE_MS
+    } else if dialog_or_visual {
+        UPDATE_INTERVAL_MS
+    } else if battle {
+        BATTLE_FRAME_MS
+    } else if scripted_or_menu {
+        UPDATE_INTERVAL_MS
+    } else {
+        EXPLORATION_FRAME_MS
+    }
+}
+
+fn elapsed_ui_ticks(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis() / u128::from(UI_TIME_QUANTUM_MS)).unwrap_or(u64::MAX)
 }
 
 fn update_debug_title(
@@ -1156,6 +1172,28 @@ mod tests {
             message_index.extend_from_slice(&(message_data.len() as u32).to_le_bytes());
         }
         TextLibrary::parse(&word_data, &message_data, &message_index).unwrap()
+    }
+
+    #[test]
+    fn update_clock_uses_original_scene_and_battle_rates() {
+        assert_eq!(update_interval_ms(false, false, false, false), 100);
+        assert_eq!(update_interval_ms(false, false, true, false), 40);
+        assert_eq!(update_interval_ms(false, false, true, true), 40);
+    }
+
+    #[test]
+    fn compatibility_clocks_keep_their_existing_intervals() {
+        assert_eq!(update_interval_ms(true, true, true, true), 10);
+        assert_eq!(update_interval_ms(false, true, true, true), 50);
+        assert_eq!(update_interval_ms(false, false, false, true), 50);
+    }
+
+    #[test]
+    fn ui_clock_uses_real_ten_millisecond_quanta() {
+        assert_eq!(elapsed_ui_ticks(Duration::from_millis(9)), 0);
+        assert_eq!(elapsed_ui_ticks(Duration::from_millis(10)), 1);
+        assert_eq!(elapsed_ui_ticks(Duration::from_millis(99)), 9);
+        assert_eq!(elapsed_ui_ticks(Duration::from_millis(100)), 10);
     }
 
     fn debug_object() -> SceneObject {

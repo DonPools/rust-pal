@@ -237,6 +237,37 @@ impl Renderer {
         self.dirty = true;
     }
 
+    /// Draw a deterministic fraction of an RLE sprite for Classic battle fades.
+    pub fn blit_rle_dithered(&mut self, rle: &RleBitmap, dx: i32, dy: i32, visibility: u8) {
+        let visibility = visibility.min(64);
+        for sy in 0..i32::from(rle.height) {
+            let y = dy + sy;
+            if y < 0 || y >= self.height as i32 {
+                continue;
+            }
+            for sx in 0..i32::from(rle.width) {
+                let source = sy as usize * usize::from(rle.width) + sx as usize;
+                if !rle.opaque[source]
+                    || ((sx as u8).wrapping_mul(13)
+                        ^ (sy as u8).wrapping_mul(29)
+                        ^ ((sx + sy) as u8).wrapping_mul(7))
+                        & 63
+                        >= visibility
+                {
+                    continue;
+                }
+                let x = dx + sx;
+                if x < 0 || x >= self.width as i32 {
+                    continue;
+                }
+                let (r, g, b) = self.palette.get_rgb(rle.pixels[source]);
+                let destination = (y as usize * self.width + x as usize) * 4;
+                self.screen[destination..destination + 4].copy_from_slice(&[r, g, b, 255]);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Draw an RLE bitmap using one palette bank while preserving each source
     /// pixel's low-nibble brightness. PAL uses this for inactive battle icons.
     pub fn blit_rle_mono(&mut self, rle: &RleBitmap, dx: i32, dy: i32, color_bank: u8, shift: i16) {

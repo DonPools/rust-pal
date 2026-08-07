@@ -21,9 +21,9 @@ use crate::assets::{
     create_global_scene_objects, create_scene_objects, load_battle_backgrounds, load_battle_data,
     load_battle_effects, load_dialog_faces, load_dialog_icons, load_enemy_battle_sprites,
     load_fbp_archive, load_global_objects, load_magic_effect_sprites, load_magics, load_map,
-    load_music, load_palettes, load_player_battle_sprites, load_player_roles, load_rng_archive,
-    load_role_sprites, load_scene_data, load_script_table, load_sound_effects, load_sound_font,
-    load_stores, load_text_resources, load_ui_sprites,
+    load_midi_music, load_palettes, load_player_battle_sprites, load_player_roles, load_rix_music,
+    load_rng_archive, load_role_sprites, load_scene_data, load_script_table, load_sound_effects,
+    load_sound_font, load_stores, load_text_resources, load_ui_sprites,
 };
 use crate::{DEFAULT_PALETTE, DEFAULT_SCENE, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -39,6 +39,7 @@ pub(super) struct BootstrappedGame {
     pub(super) font: BitmapFont,
     pub(super) script_table: ScriptTable,
     pub(super) voc_mkf: Vec<u8>,
+    pub(super) mus_mkf: Vec<u8>,
     pub(super) midi_mkf: Vec<u8>,
     pub(super) sound_font: Vec<u8>,
     pub(super) palettes: Vec<PaletteSet>,
@@ -84,8 +85,9 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
     let voc_mkf = load_sound_effects(&data_dir).expect("failed to load sound effects");
-    let midi_mkf = load_music(&data_dir).expect("failed to load MIDI music");
-    let sound_font = load_sound_font(&data_dir).expect("failed to load data/TimGM6mb.sf2");
+    let mus_mkf = load_rix_music(&data_dir).expect("failed to load MUS.MKF RIX music");
+    let midi_mkf = load_midi_music(&data_dir).unwrap_or_default();
+    let sound_font = load_sound_font(&data_dir).unwrap_or_default();
     let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
     let magics = load_magics(&data_dir).expect("failed to load magic data");
     let battle_data = load_battle_data(&data_dir).expect("failed to load battle data");
@@ -161,6 +163,7 @@ pub(super) fn bootstrap(data_dir: PathBuf) -> BootstrappedGame {
         font,
         script_table,
         voc_mkf,
+        mus_mkf,
         midi_mkf,
         sound_font,
         palettes,

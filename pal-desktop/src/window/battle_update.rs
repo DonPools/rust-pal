@@ -7,9 +7,10 @@ use super::battle_render::{
     BattleMenuState, BattlePendingCommand, BattleSettlementPage, PostBattlePresentation,
 };
 use super::battle_timing::{
-    battle_magic_for_event, effect_sound_elapsed_tick, event_has_full_magic_visual,
-    magic_event_timeline, offensive_effect_frame_count, original_frames_to_ticks,
-    MagicEventTimeline,
+    battle_magic_for_event, battle_milliseconds_to_ticks, effect_sound_elapsed_tick,
+    enemy_attack_frames, enemy_magic_pre_frames, event_has_full_magic_visual, magic_event_timeline,
+    offensive_effect_frame_count, original_frames_to_ticks, player_attack_ticks,
+    MagicEventTimeline, BATTLE_FADE_TICKS,
 };
 use super::menu_state::{update_wrapping_selection, InventoryMenu, InventoryMode};
 use super::session::SessionState;
@@ -18,9 +19,9 @@ pub(super) const ACTION_EVENT_TICKS: u16 = 8;
 pub(super) const PLAYER_MAGIC_ANIMATION_EVENT_TICKS: u16 = 22;
 const ROUND_EVENT_TICKS: u16 = 2;
 const FINISHED_EVENT_TICKS: u16 = 4;
-const SETTLEMENT_TICKS: u16 = 60;
-const BOSS_SETTLEMENT_TICKS: u16 = 110;
-const POST_BATTLE_PAGE_TICKS: u16 = 60;
+const SETTLEMENT_MS: u64 = 3_000;
+const BOSS_SETTLEMENT_MS: u64 = 5_500;
+const POST_BATTLE_PAGE_MS: u64 = 3_000;
 
 pub(super) struct FinishedBattle {
     pub(super) result: BattleResult,
@@ -56,12 +57,19 @@ pub(super) fn update_battle(
         return None;
     }
     if let Some(BattlePhase::Finished(result)) = game.battle().map(|battle| battle.phase()) {
+        if !game
+            .battle()
+            .is_some_and(|battle| battle.victory_rewards_pending())
+        {
+            let (result, _) = game.settle_battle()?;
+            return Some(FinishedBattle { result });
+        }
         let wait_ticks = game.battle().map_or(0, |battle| {
             if result == BattleResult::Won && battle.rewards().experience > 0 {
                 if battle.is_boss {
-                    BOSS_SETTLEMENT_TICKS
+                    battle_milliseconds_to_ticks(BOSS_SETTLEMENT_MS)
                 } else {
-                    SETTLEMENT_TICKS
+                    battle_milliseconds_to_ticks(SETTLEMENT_MS)
                 }
             } else {
                 0
@@ -95,19 +103,19 @@ pub(super) fn update_battle(
                 Some((player.role_id, role))
             })
             .collect::<Vec<_>>();
-        let (result, _) = game.settle_battle()?;
+        game.prepare_battle_victory()?;
         let pages = settlement_pages(game, &before);
         if !pages.is_empty() {
             services.post_battle = Some(PostBattlePresentation {
                 battle,
-                result,
                 pages,
                 page: 0,
-                ticks_remaining: POST_BATTLE_PAGE_TICKS,
+                ticks_remaining: battle_milliseconds_to_ticks(POST_BATTLE_PAGE_MS),
             });
             return None;
         }
-        return Some(FinishedBattle { result });
+        game.begin_battle_end_scripts();
+        return None;
     }
 
     if game.auto_battle() {
@@ -118,6 +126,8 @@ pub(super) fn update_battle(
     if update_battle_item_menu(input, game, services) {
         return None;
     }
+
+    let input = prioritize_battle_shortcut_direction(input, &services.battle_menu);
 
     let living = game
         .battle()?
@@ -142,49 +152,53 @@ pub(super) fn update_battle(
     }
     if input.battle_status {
         services.battle_menu = BattleMenuState::Status { selected: 0 };
-    }
-    if input.battle_flee {
-        let committed = game
-            .battle_mut()
-            .and_then(|battle| battle.attempt_flee_all());
-        commit_battle_action(game, services, committed);
         return None;
     }
-    if input.battle_defend {
-        let committed = game.battle_mut().and_then(|battle| battle.defend());
-        commit_battle_action(game, services, committed);
-        return None;
-    }
-    if input.battle_use_item {
-        open_battle_inventory(game, services, InventoryMode::BattleUseItems);
-        return None;
-    }
-    if input.battle_throw_item {
-        open_battle_inventory(game, services, InventoryMode::BattleThrowItems);
-        return None;
-    }
-    if input.battle_repeat {
-        services.battle_repeat_all = true;
-        services.battle_auto_attack = game
-            .battle()
-            .is_some_and(|battle| battle.previous_round_used_auto_attack());
-    }
-    if services.battle_repeat_all {
-        let committed = game.repeat_battle_action();
-        commit_battle_action(game, services, committed);
-        if game
-            .battle()
-            .and_then(|battle| battle.active_player())
-            .is_none()
-        {
-            services.battle_repeat_all = false;
+
+    if matches!(services.battle_menu, BattleMenuState::Main) {
+        if input.battle_flee {
+            let committed = game
+                .battle_mut()
+                .and_then(|battle| battle.attempt_flee_all());
+            commit_battle_action(game, services, committed);
+            return None;
         }
-        return None;
-    }
-    if input.battle_force || services.battle_force_all {
-        services.battle_force_all = true;
-        commit_forced_magic_or_attack(game, services, 60);
-        return None;
+        if input.battle_defend {
+            let committed = game.battle_mut().and_then(|battle| battle.defend());
+            commit_battle_action(game, services, committed);
+            return None;
+        }
+        if input.battle_use_item {
+            open_battle_inventory(game, services, InventoryMode::BattleUseItems);
+            return None;
+        }
+        if input.battle_throw_item {
+            open_battle_inventory(game, services, InventoryMode::BattleThrowItems);
+            return None;
+        }
+        if input.battle_repeat {
+            services.battle_repeat_all = true;
+            services.battle_auto_attack = game
+                .battle()
+                .is_some_and(|battle| battle.previous_round_used_auto_attack());
+        }
+        if services.battle_repeat_all {
+            let committed = game.repeat_battle_action();
+            commit_battle_action(game, services, committed);
+            if game
+                .battle()
+                .and_then(|battle| battle.active_player())
+                .is_none()
+            {
+                services.battle_repeat_all = false;
+            }
+            return None;
+        }
+        if input.battle_force || services.battle_force_all {
+            services.battle_force_all = true;
+            commit_forced_magic_or_attack(game, services, 60);
+            return None;
+        }
     }
     if services.battle_auto_attack {
         commit_automatic_attack(game, services);
@@ -208,23 +222,34 @@ pub(super) fn update_battle(
     None
 }
 
+fn prioritize_battle_shortcut_direction(mut input: GameInput, menu: &BattleMenuState) -> GameInput {
+    let global_shortcut = input.battle_auto || input.battle_status;
+    let main_wasd_shortcut =
+        matches!(menu, BattleMenuState::Main) && (input.battle_defend || input.battle_throw_item);
+    if global_shortcut || main_wasd_shortcut {
+        input.direction_pressed = None;
+    }
+    input
+}
+
 pub(super) fn advance_post_battle(
     any_pressed: bool,
+    game: &mut GameState,
     services: &mut SessionState,
-) -> Option<FinishedBattle> {
-    let presentation = services.post_battle.as_mut()?;
+) -> bool {
+    let Some(presentation) = services.post_battle.as_mut() else {
+        return false;
+    };
     if !advance_countdown(&mut presentation.ticks_remaining, any_pressed) {
-        return None;
+        return false;
     }
     presentation.page += 1;
     if presentation.page < presentation.pages.len() {
-        presentation.ticks_remaining = POST_BATTLE_PAGE_TICKS;
-        return None;
+        presentation.ticks_remaining = battle_milliseconds_to_ticks(POST_BATTLE_PAGE_MS);
+        return false;
     }
-    let presentation = services.post_battle.take()?;
-    Some(FinishedBattle {
-        result: presentation.result,
-    })
+    services.post_battle.take();
+    game.begin_battle_end_scripts()
 }
 
 fn settlement_pages(
@@ -699,8 +724,8 @@ fn tick_battle_event_queue(
 
 fn battle_event_duration(event: BattleEvent) -> u16 {
     match event {
-        BattleEvent::PlayerAttack { .. }
-        | BattleEvent::PlayerMagic { .. }
+        BattleEvent::PlayerAttack { .. } => player_attack_ticks(event),
+        BattleEvent::PlayerMagic { .. }
         | BattleEvent::EnemyAttack { .. }
         | BattleEvent::EnemyMagic { .. }
         | BattleEvent::EnemyConfusedAttack { .. }
@@ -726,10 +751,24 @@ fn dynamic_battle_event_duration(
     services: &SessionState,
     event: BattleEvent,
 ) -> u16 {
-    session_magic_timing(game, services, event).map_or_else(
-        || battle_event_duration(event),
-        |(_, timing)| timing.total_ticks,
-    )
+    if let Some((_, timing)) = session_magic_timing(game, services, event) {
+        return timing.total_ticks;
+    }
+    let Some(battle) = game.battle() else {
+        return battle_event_duration(event);
+    };
+    match event {
+        BattleEvent::PlayerAttack { .. } => player_attack_ticks(event),
+        BattleEvent::EnemyAttack { .. } => {
+            original_frames_to_ticks(enemy_attack_frames(battle, event))
+        }
+        BattleEvent::EnemyConfusedAttack { defeated, .. } => {
+            original_frames_to_ticks(enemy_attack_frames(battle, event))
+                .saturating_add(if defeated { BATTLE_FADE_TICKS } else { 0 })
+        }
+        BattleEvent::PlayerConfusedAttack { .. } => original_frames_to_ticks(21),
+        _ => battle_event_duration(event),
+    }
 }
 
 fn session_magic_timing(
@@ -761,7 +800,13 @@ fn session_magic_timing(
         .flatten();
     Some((
         magic,
-        magic_event_timeline(event, magic, effect_frame_count, summon_frame_count),
+        magic_event_timeline(
+            event,
+            magic,
+            effect_frame_count,
+            summon_frame_count,
+            enemy_magic_pre_frames(battle, event, magic),
+        ),
     ))
 }
 
@@ -1303,6 +1348,62 @@ mod tests {
     }
 
     #[test]
+    fn classic_shortcuts_do_not_also_move_the_main_menu() {
+        for input in [
+            GameInput {
+                direction_pressed: Some(Direction::West),
+                battle_auto: true,
+                ..GameInput::default()
+            },
+            GameInput {
+                direction_pressed: Some(Direction::East),
+                battle_defend: true,
+                ..GameInput::default()
+            },
+            GameInput {
+                direction_pressed: Some(Direction::North),
+                battle_throw_item: true,
+                ..GameInput::default()
+            },
+            GameInput {
+                direction_pressed: Some(Direction::South),
+                battle_status: true,
+                ..GameInput::default()
+            },
+        ] {
+            assert_eq!(
+                prioritize_battle_shortcut_direction(input, &BattleMenuState::Main)
+                    .direction_pressed,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn battle_submenus_keep_wasd_navigation_for_main_only_shortcuts() {
+        let magic_menu = BattleMenuState::Magic { selected: 0 };
+        let throw_key = GameInput {
+            direction_pressed: Some(Direction::North),
+            battle_throw_item: true,
+            ..GameInput::default()
+        };
+        let defend_key = GameInput {
+            direction_pressed: Some(Direction::East),
+            battle_defend: true,
+            ..GameInput::default()
+        };
+
+        assert_eq!(
+            prioritize_battle_shortcut_direction(throw_key, &magic_menu).direction_pressed,
+            Some(Direction::North)
+        );
+        assert_eq!(
+            prioritize_battle_shortcut_direction(defend_key, &magic_menu).direction_pressed,
+            Some(Direction::East)
+        );
+    }
+
+    #[test]
     fn magic_grid_clamps_at_both_ends() {
         let mut selected = 0;
         update_grid_selection(&mut selected, Some(Direction::West), 7);
@@ -1326,14 +1427,17 @@ mod tests {
 
     #[test]
     fn settlement_waits_for_the_classic_timeout_or_any_key() {
+        let settlement_ticks = battle_milliseconds_to_ticks(SETTLEMENT_MS);
+        assert_eq!(settlement_ticks, 75);
+        assert_eq!(battle_milliseconds_to_ticks(BOSS_SETTLEMENT_MS), 138);
         let mut ticks = None;
-        for _ in 0..SETTLEMENT_TICKS - 1 {
-            assert!(!wait_elapsed(&mut ticks, SETTLEMENT_TICKS, false));
+        for _ in 0..settlement_ticks - 1 {
+            assert!(!wait_elapsed(&mut ticks, settlement_ticks, false));
         }
-        assert!(wait_elapsed(&mut ticks, SETTLEMENT_TICKS, false));
+        assert!(wait_elapsed(&mut ticks, settlement_ticks, false));
 
         let mut skipped = None;
-        assert!(wait_elapsed(&mut skipped, SETTLEMENT_TICKS, true));
+        assert!(wait_elapsed(&mut skipped, settlement_ticks, true));
         assert_eq!(skipped, None);
     }
 
@@ -1344,6 +1448,7 @@ mod tests {
             enemy: 0,
             damage: 1,
             critical: false,
+            visual: true,
             defeated: false,
         });
         let finished = battle_event_duration(BattleEvent::Finished(BattleResult::Won));
@@ -1361,8 +1466,8 @@ mod tests {
             item_object: 1,
             target: Some(0),
         });
-        assert_eq!((action, magic_animation, finished, round), (8, 22, 4, 2));
-        assert_eq!((use_item, throw_item), (20, 20));
+        assert_eq!((action, magic_animation, finished, round), (16, 22, 4, 2));
+        assert_eq!((use_item, throw_item), (25, 24));
     }
 
     #[test]
@@ -1372,6 +1477,7 @@ mod tests {
             enemy: 0,
             damage: 1,
             critical: false,
+            visual: true,
             defeated: true,
         };
         let finished = BattleEvent::Finished(BattleResult::Won);

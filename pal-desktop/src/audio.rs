@@ -1,4 +1,4 @@
-//! Desktop audio output for decoded PAL sound effects and SoundFont MIDI music.
+//! Desktop audio output for decoded PAL sound effects, DOS RIX/OPL2 music and MIDI fallback.
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use nuked_opl3::Opl3Chip;
 use pal_assets::mkf::MkfArchive;
+use pal_assets::rix::{RixSequencer, RixTrack};
 use pal_assets::voc::VocClip;
 use rodio::buffer::SamplesBuffer;
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
@@ -18,9 +20,11 @@ const MAX_MUSIC_SECONDS: f64 = 15.0 * 60.0;
 const RELEASE_TAIL_SECONDS: f64 = 2.0;
 const MUSIC_BUFFER_FRAMES: usize = 2048;
 const MUSIC_BUFFER_COUNT: usize = 8;
+const RIX_TICKS_PER_SECOND: usize = 70;
+const RIX_SAMPLES_PER_TICK: usize = MUSIC_SAMPLE_RATE as usize / RIX_TICKS_PER_SECOND;
+const MAX_RIX_TICKS: usize = MAX_MUSIC_SECONDS as usize * RIX_TICKS_PER_SECOND;
 pub const AUDIO_VOLUME_MAX: u8 = 100;
-pub const AUDIO_VOLUME_STEP: u8 = 10;
-const DEFAULT_MUSIC_VOLUME: u8 = 70;
+const DEFAULT_MUSIC_VOLUME: u8 = 100;
 const DEFAULT_SOUND_VOLUME: u8 = 100;
 
 pub struct SoundEffects {
@@ -31,11 +35,12 @@ pub struct SoundEffects {
 }
 
 pub struct BackgroundMusic {
-    archive: MkfArchive,
-    sound_font: Arc<SoundFont>,
+    rix_archive: MkfArchive,
+    midi_archive: Option<MkfArchive>,
+    sound_font: Option<Arc<SoundFont>>,
     output: Option<(OutputStream, OutputStreamHandle)>,
     sink: Option<Sink>,
-    pending: Option<Receiver<Option<StreamingMidiSource>>>,
+    pending: Option<Receiver<Option<PreparedMusicSource>>>,
     pending_fade: Option<Duration>,
     loop_control: Option<Arc<AtomicBool>>,
     current: Option<u16>,
@@ -44,10 +49,11 @@ pub struct BackgroundMusic {
 }
 
 impl BackgroundMusic {
-    pub fn new(midi_mkf: &[u8], sound_font: &[u8]) -> Option<Self> {
+    pub fn new(rix_mkf: &[u8], midi_mkf: &[u8], sound_font: &[u8]) -> Option<Self> {
         Some(Self {
-            archive: MkfArchive::new(midi_mkf)?,
-            sound_font: parse_sound_font(sound_font)?,
+            rix_archive: MkfArchive::new(rix_mkf)?,
+            midi_archive: MkfArchive::new(midi_mkf),
+            sound_font: parse_sound_font(sound_font),
             output: OutputStream::try_default().ok(),
             sink: None,
             pending: None,
@@ -59,7 +65,7 @@ impl BackgroundMusic {
         })
     }
 
-    /// Decode and play one `MIDI.MKF` song with the configured General MIDI SoundFont.
+    /// Play a DOS `MUS.MKF` RIX song, falling back to MIDI when needed.
     pub fn play(&mut self, music_id: u16, looped: bool, fade_seconds: u8) -> bool {
         if music_id == 0 {
             self.stop();
@@ -77,13 +83,20 @@ impl BackgroundMusic {
             }
             return true;
         }
-        let Some(midi) = self
-            .archive
+        let rix = self
+            .rix_archive
             .read_chunk(usize::from(music_id))
-            .map(<[u8]>::to_vec)
-        else {
+            .filter(|chunk| !chunk.is_empty())
+            .map(<[u8]>::to_vec);
+        let midi = self
+            .midi_archive
+            .as_ref()
+            .and_then(|archive| archive.read_chunk(usize::from(music_id)))
+            .filter(|chunk| !chunk.is_empty())
+            .map(<[u8]>::to_vec);
+        if rix.is_none() && midi.is_none() {
             return false;
-        };
+        }
         self.stop();
         let Some((_, handle)) = &self.output else {
             self.current = Some(music_id);
@@ -95,11 +108,23 @@ impl BackgroundMusic {
         sink.set_volume(volume_gain(self.volume));
         let fade = Duration::from_secs(u64::from(fade_seconds));
         let (sender, receiver) = mpsc::channel();
-        let sound_font = Arc::clone(&self.sound_font);
+        let sound_font = self.sound_font.clone();
         let loop_control = Arc::new(AtomicBool::new(looped));
         let producer_loop_control = Arc::clone(&loop_control);
         thread::spawn(move || {
-            let source = StreamingMidiSource::new(&midi, &sound_font, producer_loop_control);
+            let source = rix
+                .as_deref()
+                .and_then(|rix| {
+                    StreamingRixSource::new(rix, Arc::clone(&producer_loop_control))
+                        .map(|source| PreparedMusicSource::Rix(Box::new(source)))
+                })
+                .or_else(|| {
+                    Some(PreparedMusicSource::Midi(StreamingMidiSource::new(
+                        midi.as_deref()?,
+                        sound_font.as_ref()?,
+                        producer_loop_control,
+                    )?))
+                });
             let _ = sender.send(source);
         });
         self.pending = Some(receiver);
@@ -211,9 +236,150 @@ pub fn validate_midi_output(midi: &[u8], sound_font: &[u8]) -> bool {
         .any(|sample| sample.abs() > 0.0001)
 }
 
+/// Render a bounded prefix of one RIX track and verify that OPL2 produces sound.
+pub fn validate_rix_output(rix: &[u8]) -> bool {
+    let loop_control = Arc::new(AtomicBool::new(false));
+    let Some(mut source) = StreamingRixSource::new(rix, loop_control) else {
+        return false;
+    };
+    source
+        .by_ref()
+        .take(MUSIC_SAMPLE_RATE as usize * 2)
+        .any(|sample| sample != 0)
+}
+
 fn parse_sound_font(data: &[u8]) -> Option<Arc<SoundFont>> {
     let mut reader = Cursor::new(data);
     Some(Arc::new(SoundFont::new(&mut reader).ok()?))
+}
+
+enum PreparedMusicSource {
+    Rix(Box<StreamingRixSource>),
+    Midi(StreamingMidiSource),
+}
+
+impl Iterator for PreparedMusicSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Rix(source) => source.next(),
+            Self::Midi(source) => source.next(),
+        }
+    }
+}
+
+impl Source for PreparedMusicSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        match self {
+            Self::Rix(source) => source.current_frame_len(),
+            Self::Midi(source) => source.current_frame_len(),
+        }
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        MUSIC_SAMPLE_RATE
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+struct StreamingRixSource {
+    sequencer: RixSequencer,
+    chip: Opl3Chip,
+    loop_control: Arc<AtomicBool>,
+    buffer: Vec<i16>,
+    position: usize,
+    pass_ticks: usize,
+    finished: bool,
+}
+
+impl StreamingRixSource {
+    fn new(rix: &[u8], loop_control: Arc<AtomicBool>) -> Option<Self> {
+        let track = RixTrack::parse(rix)?;
+        let chip = Opl3Chip::new(MUSIC_SAMPLE_RATE);
+        Some(Self {
+            sequencer: RixSequencer::new(track),
+            chip,
+            loop_control,
+            buffer: Vec::new(),
+            position: 0,
+            pass_ticks: 0,
+            finished: false,
+        })
+    }
+
+    fn refill(&mut self) -> bool {
+        if self.finished {
+            return false;
+        }
+        let writes = loop {
+            if self.pass_ticks >= MAX_RIX_TICKS {
+                self.finished = true;
+                return false;
+            }
+            if let Some(writes) = self.sequencer.advance() {
+                self.pass_ticks += 1;
+                break writes;
+            }
+            if !self.sequencer.ended_cleanly()
+                || !self.loop_control.load(Ordering::Acquire)
+                || self.pass_ticks == 0
+            {
+                self.finished = true;
+                return false;
+            }
+            self.sequencer.rewind(true);
+            self.pass_ticks = 0;
+        };
+        for write in writes {
+            self.chip.write_register(write.register, write.value);
+        }
+        self.buffer.resize(RIX_SAMPLES_PER_TICK * 2, 0);
+        if self.chip.generate_stream(&mut self.buffer).is_err() {
+            self.finished = true;
+            return false;
+        }
+        self.position = 0;
+        true
+    }
+}
+
+impl Iterator for StreamingRixSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.position >= self.buffer.len() && !self.refill() {
+            return None;
+        }
+        let sample = self.buffer[self.position];
+        self.position += 1;
+        Some(sample)
+    }
+}
+
+impl Source for StreamingRixSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        Some(self.buffer.len().saturating_sub(self.position))
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        MUSIC_SAMPLE_RATE
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
 }
 
 struct StreamingMidiSource {
@@ -497,11 +663,44 @@ impl SoundEffects {
 mod tests {
     use super::*;
 
+    fn synthetic_rix() -> Vec<u8> {
+        let mut data = vec![0; 96];
+        data[0..2].copy_from_slice(&0x55aau16.to_le_bytes());
+        data[8..10].copy_from_slice(&16u16.to_le_bytes());
+        data[12..14].copy_from_slice(&72u16.to_le_bytes());
+        for operator in [0usize, 13] {
+            for (field, value) in [(1, 1u16), (2, 2), (3, 15), (4, 4), (6, 2), (7, 3), (12, 1)] {
+                let offset = 16 + (operator + field) * 2;
+                data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        data[72..86]
+            .copy_from_slice(&[0, 0x90, 127, 0xb0, 60, 0xc0, 14, 0, 0, 0xc0, 14, 0, 0, 0x80]);
+        data
+    }
+
     #[test]
     fn rejects_invalid_archives_and_sound_fonts_without_opening_audio() {
         assert!(SoundEffects::new(&[]).is_none());
-        assert!(BackgroundMusic::new(&[], &[]).is_none());
+        assert!(BackgroundMusic::new(&[], &[], &[]).is_none());
         assert!(!validate_sound_font(b"not a soundfont"));
+        assert!(!validate_rix_output(b"not a RIX track"));
+    }
+
+    #[test]
+    fn rix_opl2_rendering_produces_audio_and_obeys_live_loop_control() {
+        let rix = synthetic_rix();
+        assert!(validate_rix_output(&rix));
+
+        let loop_control = Arc::new(AtomicBool::new(true));
+        let mut source = StreamingRixSource::new(&rix, Arc::clone(&loop_control)).unwrap();
+        let repeated_samples = RIX_SAMPLES_PER_TICK * 2 * 12;
+        assert_eq!(
+            source.by_ref().take(repeated_samples).count(),
+            repeated_samples
+        );
+        loop_control.store(false, Ordering::Release);
+        assert!(source.count() < RIX_SAMPLES_PER_TICK * 2 * 12);
     }
 
     #[test]

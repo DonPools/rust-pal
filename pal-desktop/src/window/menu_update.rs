@@ -5,12 +5,10 @@ use pal_core::game::{GameInput, GameState};
 use pal_core::role::{Direction, RoleSprites};
 use pal_core::script::{ScriptRuntime, ScriptVisual};
 
-use crate::audio::{AUDIO_VOLUME_MAX, AUDIO_VOLUME_STEP};
-
 use super::dialog::ActiveDialog;
 use super::menu_state::{
     update_wrapping_selection, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
-    ItemUseSession, MagicSession, SaveSlotMode, ShopMode,
+    ItemUseSession, MagicSession, SaveSlotMode, ShopMode, SystemAudioKind,
 };
 use super::original_save::{
     next_saved_times, original_save_slots, save_original_game, SaveOriginalGameError,
@@ -19,7 +17,7 @@ use super::script_driver::{advance_script, ScriptRenderResources};
 use super::session::SessionState;
 use super::LoadedScene;
 
-pub(super) struct MenuUpdateContext<'a, L, S, E> {
+pub(super) struct MenuUpdateContext<'a, L, S> {
     pub(super) input: GameInput,
     pub(super) scripts: &'a mut ScriptRuntime,
     pub(super) game: &'a mut GameState,
@@ -30,14 +28,12 @@ pub(super) struct MenuUpdateContext<'a, L, S, E> {
     pub(super) services: &'a mut SessionState,
     pub(super) original_save_dir: &'a Path,
     pub(super) set_title: &'a mut S,
-    pub(super) exit: &'a mut E,
 }
 
-impl<L, S, E> MenuUpdateContext<'_, L, S, E>
+impl<L, S> MenuUpdateContext<'_, L, S>
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
     S: FnMut(&str),
-    E: FnMut(),
 {
     fn advance_script(&mut self) {
         advance_script(
@@ -63,13 +59,10 @@ where
     }
 }
 
-pub(super) fn update_active_menu<L, S, E>(
-    context: &mut MenuUpdateContext<'_, L, S, E>,
-) -> Option<bool>
+pub(super) fn update_active_menu<L, S>(context: &mut MenuUpdateContext<'_, L, S>) -> Option<bool>
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
     S: FnMut(&str),
-    E: FnMut(),
 {
     let changed =
         context.input.confirm || context.input.cancel || context.input.direction_pressed.is_some();
@@ -87,11 +80,10 @@ where
     Some(changed)
 }
 
-fn update_confirmation_menu<L, S, E>(context: &mut MenuUpdateContext<'_, L, S, E>)
+fn update_confirmation_menu<L, S>(context: &mut MenuUpdateContext<'_, L, S>)
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
     S: FnMut(&str),
-    E: FnMut(),
 {
     let mut menu = context
         .services
@@ -119,11 +111,10 @@ where
     }
 }
 
-fn update_field_menu<L, S, E>(context: &mut MenuUpdateContext<'_, L, S, E>)
+fn update_field_menu<L, S>(context: &mut MenuUpdateContext<'_, L, S>)
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
     S: FnMut(&str),
-    E: FnMut(),
 {
     let mut menu = context
         .services
@@ -304,27 +295,7 @@ where
             }
         }
         FieldMenu::System { selected } => {
-            match context.input.direction_pressed {
-                Some(direction @ (Direction::North | Direction::South)) => {
-                    update_wrapping_selection(selected, Some(direction), 5);
-                }
-                Some(direction @ (Direction::West | Direction::East)) => match *selected {
-                    2 => {
-                        let volume =
-                            adjusted_audio_volume(context.services.music.volume(), direction);
-                        context.services.music.set_volume(volume);
-                    }
-                    3 => {
-                        let volume = adjusted_audio_volume(
-                            context.services.sound_effects.volume(),
-                            direction,
-                        );
-                        context.services.sound_effects.set_volume(volume);
-                    }
-                    _ => {}
-                },
-                None => {}
-            }
+            update_wrapping_selection(selected, context.input.direction_pressed, 5);
             context.services.system_selected = *selected;
             if context.input.cancel {
                 menu = FieldMenu::Main {
@@ -356,21 +327,78 @@ where
                         (context.set_title)("Rust-PAL [Load slot]");
                     }
                     2 => {
-                        let enabled = !context.services.music.enabled();
-                        context.services.music.set_enabled(enabled);
-                        if enabled {
+                        menu = FieldMenu::SystemAudio {
+                            parent_selected: *selected,
+                            kind: SystemAudioKind::Music,
+                            selected_enabled: context.services.music.enabled(),
+                        };
+                        (context.set_title)("Rust-PAL [Music switch]");
+                    }
+                    3 => {
+                        menu = FieldMenu::SystemAudio {
+                            parent_selected: *selected,
+                            kind: SystemAudioKind::Sound,
+                            selected_enabled: context.services.sound_effects.enabled(),
+                        };
+                        (context.set_title)("Rust-PAL [Sound switch]");
+                    }
+                    4 => {
+                        menu = FieldMenu::SystemQuit {
+                            selected_yes: false,
+                        };
+                        (context.set_title)("Rust-PAL [Quit confirm]");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        FieldMenu::SystemAudio {
+            parent_selected,
+            kind,
+            selected_enabled,
+        } => {
+            update_binary_selection(selected_enabled, context.input.direction_pressed);
+            if context.input.cancel {
+                menu = FieldMenu::System {
+                    selected: *parent_selected,
+                };
+                (context.set_title)("Rust-PAL [System]");
+            } else if context.input.confirm {
+                match kind {
+                    SystemAudioKind::Music => {
+                        context.services.music.set_enabled(*selected_enabled);
+                        if *selected_enabled {
                             context.sync_music();
                         }
                     }
-                    3 => {
-                        let enabled = !context.services.sound_effects.enabled();
-                        context.services.sound_effects.set_enabled(enabled);
-                    }
-                    4 => {
-                        keep_menu = false;
-                        (context.exit)();
-                    }
-                    _ => unreachable!(),
+                    SystemAudioKind::Sound => context
+                        .services
+                        .sound_effects
+                        .set_enabled(*selected_enabled),
+                }
+                menu = FieldMenu::System {
+                    selected: *parent_selected,
+                };
+                (context.set_title)("Rust-PAL [System]");
+            }
+        }
+        FieldMenu::SystemQuit { selected_yes } => {
+            update_binary_selection(selected_yes, context.input.direction_pressed);
+            if context.input.cancel || (context.input.confirm && !*selected_yes) {
+                menu = FieldMenu::System { selected: 4 };
+                (context.set_title)("Rust-PAL [System]");
+            } else if context.input.confirm {
+                if context
+                    .services
+                    .visual
+                    .queue(ScriptVisual::FadeOut { speed: 2 })
+                {
+                    context.services.music.stop();
+                    context.services.quit_requested = true;
+                    keep_menu = false;
+                    (context.set_title)("Rust-PAL [Quitting]");
+                } else {
+                    (context.set_title)("Rust-PAL [quit transition unavailable]");
                 }
             }
         }
@@ -445,21 +473,18 @@ where
     }
 }
 
-fn adjusted_audio_volume(volume: u8, direction: Direction) -> u8 {
+fn update_binary_selection(selected: &mut bool, direction: Option<Direction>) {
     match direction {
-        Direction::West => volume.saturating_sub(AUDIO_VOLUME_STEP),
-        Direction::East => volume
-            .saturating_add(AUDIO_VOLUME_STEP)
-            .min(AUDIO_VOLUME_MAX),
-        Direction::North | Direction::South => volume,
+        Some(Direction::West | Direction::North) => *selected = false,
+        Some(Direction::East | Direction::South) => *selected = true,
+        None => {}
     }
 }
 
-fn update_shop_menu<L, S, E>(context: &mut MenuUpdateContext<'_, L, S, E>)
+fn update_shop_menu<L, S>(context: &mut MenuUpdateContext<'_, L, S>)
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
     S: FnMut(&str),
-    E: FnMut(),
 {
     let mut menu = context
         .services
@@ -525,11 +550,10 @@ where
     context.services.shop_menu = Some(menu);
 }
 
-fn update_inventory_menu<L, S, E>(context: &mut MenuUpdateContext<'_, L, S, E>)
+fn update_inventory_menu<L, S>(context: &mut MenuUpdateContext<'_, L, S>)
 where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
     S: FnMut(&str),
-    E: FnMut(),
 {
     let mut menu = context
         .services
@@ -679,13 +703,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_audio_volume_steps_and_clamps() {
-        assert_eq!(adjusted_audio_volume(0, Direction::West), 0);
-        assert_eq!(adjusted_audio_volume(50, Direction::West), 40);
-        assert_eq!(adjusted_audio_volume(50, Direction::East), 60);
-        assert_eq!(
-            adjusted_audio_volume(AUDIO_VOLUME_MAX, Direction::East),
-            AUDIO_VOLUME_MAX
-        );
+    fn original_binary_menu_uses_no_yes_direction_order() {
+        let mut selected = true;
+        update_binary_selection(&mut selected, Some(Direction::West));
+        assert!(!selected);
+        update_binary_selection(&mut selected, Some(Direction::North));
+        assert!(!selected);
+        update_binary_selection(&mut selected, Some(Direction::East));
+        assert!(selected);
+        update_binary_selection(&mut selected, Some(Direction::South));
+        assert!(selected);
     }
 }

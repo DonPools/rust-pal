@@ -65,6 +65,7 @@ pub struct GameResources {
     pub status_background: Bitmap,
     pub equip_background: Bitmap,
     pub voc_mkf: Vec<u8>,
+    pub mus_mkf: Vec<u8>,
     pub midi_mkf: Vec<u8>,
     pub sound_font: Vec<u8>,
     pub palettes: Vec<PaletteSet>,

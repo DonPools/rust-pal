@@ -33,7 +33,13 @@ use crate::scene::{
 };
 use crate::script::{ScriptAction, ScriptOpcode};
 
+/// Compatibility tick used by script delays and blocking visual effects.
 pub const UPDATE_INTERVAL_MS: u64 = 50;
+/// Original scene update interval (10 FPS).
+pub const EXPLORATION_FRAME_MS: u64 = 100;
+/// Original battle update interval (25 FPS).
+pub const BATTLE_FRAME_MS: u64 = 40;
+
 mod exploration;
 mod field;
 mod snapshot;
@@ -483,13 +489,27 @@ impl<M: CollisionMap> GameState<M> {
     }
 
     pub fn enemy_hp_above(&self, enemy_index: u16, percentage: u16) -> bool {
-        self.active_battle
-            .as_ref()
-            .and_then(|battle| {
-                battle
-                    .enemy_index_for_slot(usize::from(enemy_index))
-                    .and_then(|index| battle.enemy_hp_above(index, percentage))
-            })
+        let (Some(battle), Some(objects), Some(data)) = (
+            self.active_battle.as_ref(),
+            self.global_objects.as_ref(),
+            self.battle_data.as_ref(),
+        ) else {
+            return false;
+        };
+        let Some(index) = battle.enemy_index_for_slot(usize::from(enemy_index)) else {
+            return false;
+        };
+        let Some(definition_hp) = battle
+            .enemies
+            .get(index)
+            .and_then(|enemy| objects.get(enemy.object_id))
+            .and_then(|object| data.enemies.get(object.enemy_id()))
+            .map(|enemy| enemy.health)
+        else {
+            return false;
+        };
+        battle
+            .enemy_hp_above_with_max(index, percentage, definition_hp)
             .unwrap_or(false)
     }
 
@@ -918,24 +938,13 @@ impl<M: CollisionMap> GameState<M> {
         true
     }
 
-    /// Apply final HP and cash changes, then leave the finished battle state.
-    pub fn settle_battle(&mut self) -> Option<(BattleResult, BattleRewards)> {
-        let result = match self.active_battle.as_ref()?.phase() {
-            BattlePhase::Finished(result) => result,
-            BattlePhase::AwaitingCommand => return None,
-        };
-        let battle = self.active_battle.take()?;
-        let objects = self.global_objects.as_ref()?;
-        for player in &battle.players {
-            let role_index = usize::from(player.role_id);
-            *self.player_statuses.get_mut(role_index)? = player.statuses;
-            *self.player_poisons.get_mut(role_index)? = player.poisons;
-            cure_poison_by_level(&mut self.player_poisons[role_index], 3, objects);
-        }
-        for statuses in &mut self.player_statuses {
-            for status in BattleStatus::ALL {
-                statuses.remove_from_player(status);
-            }
+    /// Apply victory rewards before the enemy battle-end scripts, matching Classic's order.
+    pub fn prepare_battle_victory(&mut self) -> Option<BattleRewards> {
+        let battle = self.active_battle.as_ref()?.clone();
+        if battle.phase() != BattlePhase::Finished(BattleResult::Won)
+            || !battle.victory_rewards_pending()
+        {
+            return None;
         }
         if let Some(roles) = self.player_roles.as_mut() {
             for player in &battle.players {
@@ -945,19 +954,73 @@ impl<M: CollisionMap> GameState<M> {
             }
             self.party.sync_from_roles(roles);
         }
-        let rewards = battle.settled_rewards()?;
-        if result == BattleResult::Won {
-            self.cash = self.cash.saturating_add(rewards.cash);
-            let living_roles = battle
+        let rewards = battle.rewards();
+        self.cash = self.cash.saturating_add(rewards.cash);
+        let living_roles = battle
+            .players
+            .iter()
+            .filter_map(|player| player.is_alive().then_some(player.role_id))
+            .collect::<Vec<_>>();
+        self.award_battle_experience(&living_roles, rewards.experience);
+        self.award_hidden_battle_experience(&battle, rewards.experience);
+
+        let updated = battle
+            .players
+            .iter()
+            .filter_map(|player| {
+                let role = self.player_role(player.role_id)?;
+                Some((
+                    player.role_id,
+                    role.level,
+                    role.hp,
+                    role.max_hp,
+                    role.mp,
+                    role.max_mp,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let active = self.active_battle.as_mut()?;
+        for (role_id, level, hp, max_hp, mp, max_mp) in updated {
+            let player = active
                 .players
-                .iter()
-                .filter_map(|player| player.is_alive().then_some(player.role_id))
-                .collect::<Vec<_>>();
-            self.award_battle_experience(&living_roles, rewards.experience);
-            self.award_hidden_battle_experience(&battle, rewards.experience);
-            if let Some(roles) = self.player_roles.as_mut() {
-                for player in &battle.players {
-                    let role = roles.role_mut(usize::from(player.role_id))?;
+                .iter_mut()
+                .find(|player| player.role_id == role_id)?;
+            player.level = level;
+            player.hp = hp;
+            player.max_hp = max_hp;
+            player.mp = mp;
+            player.max_mp = max_mp;
+        }
+        active.mark_victory_rewards_applied().then_some(rewards)
+    }
+
+    pub fn begin_battle_end_scripts(&mut self) -> bool {
+        self.active_battle
+            .as_mut()
+            .is_some_and(BattleState::begin_battle_end_scripts)
+    }
+
+    /// Apply post-script recovery and cleanup, then leave the finished battle state.
+    pub fn settle_battle(&mut self) -> Option<(BattleResult, BattleRewards)> {
+        let battle_state = self.active_battle.as_ref()?;
+        let result = match battle_state.phase() {
+            BattlePhase::Finished(result) if battle_state.ready_to_leave() => result,
+            BattlePhase::Finished(_) | BattlePhase::AwaitingCommand => return None,
+        };
+        let victory_rewards_applied = battle_state.victory_rewards_were_applied();
+        let rewards = if victory_rewards_applied {
+            battle_state.rewards()
+        } else {
+            BattleRewards::default()
+        };
+        let objects = self.global_objects.as_ref()?;
+        let battle = self.active_battle.take()?;
+        if let Some(roles) = self.player_roles.as_mut() {
+            for player in &battle.players {
+                let role = roles.role_mut(usize::from(player.role_id))?;
+                role.hp = player.hp;
+                role.mp = player.mp;
+                if victory_rewards_applied {
                     role.hp = role
                         .hp
                         .saturating_add(role.max_hp.saturating_sub(role.hp) / 2);
@@ -965,7 +1028,18 @@ impl<M: CollisionMap> GameState<M> {
                         .mp
                         .saturating_add(role.max_mp.saturating_sub(role.mp) / 2);
                 }
-                self.party.sync_from_roles(roles);
+            }
+            self.party.sync_from_roles(roles);
+        }
+        for player in &battle.players {
+            let role_index = usize::from(player.role_id);
+            *self.player_statuses.get_mut(role_index)? = player.statuses;
+            *self.player_poisons.get_mut(role_index)? = player.poisons;
+            cure_poison_by_level(&mut self.player_poisons[role_index], 3, objects);
+        }
+        for statuses in &mut self.player_statuses {
+            for status in BattleStatus::ALL {
+                statuses.remove_from_player(status);
             }
         }
         self.auto_battle = false;
@@ -5831,6 +5905,17 @@ mod tests {
                 state.battle().map(BattleState::phase),
                 Some(BattlePhase::Finished(BattleResult::Won))
             ) {
+                break;
+            }
+        }
+        assert!(state.prepare_battle_victory().is_some());
+        assert!(state.begin_battle_end_scripts());
+        for _ in 0..8 {
+            if let Some(request) = state.take_battle_script() {
+                assert!(state.finish_battle_script(request.script_entry, true));
+            }
+            let _ = state.advance_battle_resolution();
+            if state.battle().is_some_and(|battle| battle.ready_to_leave()) {
                 break;
             }
         }
