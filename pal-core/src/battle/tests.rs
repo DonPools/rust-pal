@@ -991,14 +991,15 @@ fn battle_item_scripts_use_original_owners_and_finish_even_when_failed() {
         })
     );
     assert!(battle.complete_script_with_result(31, false));
-    assert_eq!(
-        battle.advance_resolution(),
-        vec![BattleEvent::PlayerItemFeedback {
+    assert!(matches!(
+        battle.advance_resolution().as_slice(),
+        [BattleEvent::PlayerItemFeedback {
             player: 0,
             item_object: 20,
             consume: true,
+            ..
         }]
-    );
+    ));
 }
 
 #[test]
@@ -1104,8 +1105,40 @@ fn thrown_weapon_script_uses_enemy_owner_and_acting_player_attack() {
             player: 0,
             item_object: 21,
             consume: true,
+            ..
         }
     )));
+}
+
+#[test]
+fn item_feedback_reports_player_hp_and_mp_changes_from_the_script() {
+    let (data, objects, magics, mut role) = fixture(500, 0, 500);
+    role.hp = 300;
+    role.max_mp = 200;
+    role.mp = 20;
+    role.dexterity = 100;
+    let mut battle =
+        BattleState::new(request(true), 0, 7, [(0, &role)], &data, &objects, &magics).unwrap();
+    complete_pending_scripts(&mut battle);
+    assert!(battle.use_item(20, Some(0), 30, true).is_some());
+    assert!(matches!(
+        battle.advance_resolution().as_slice(),
+        [BattleEvent::PlayerUseItem { .. }]
+    ));
+    assert!(battle.advance_resolution().is_empty());
+    assert!(battle.take_script_request().is_some());
+    battle.players[0].hp = 425;
+    battle.players[0].mp = 70;
+    assert!(battle.complete_script(31));
+
+    let feedback = battle.advance_resolution();
+    let [BattleEvent::PlayerItemFeedback { player_changes, .. }] = feedback.as_slice() else {
+        panic!("expected item feedback");
+    };
+    assert_eq!(
+        player_changes[0],
+        BattlePlayerStatChange { hp: 125, mp: 50 }
+    );
 }
 
 #[test]

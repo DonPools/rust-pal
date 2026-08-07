@@ -1234,6 +1234,35 @@ fn play_due_magic_sounds(game: &GameState, services: &mut DesktopSession) {
         return;
     };
     match event {
+        BattleEvent::PlayerUseItem { .. } => {
+            let total = original_frames_to_ticks(17);
+            let elapsed = total.saturating_sub(services.battle.battle_event_ticks.min(total));
+            if elapsed >= original_frames_to_ticks(4)
+                && !services.battle.battle_feedback_sound_played
+            {
+                services.audio.sound_effects.play(28);
+                services.battle.battle_feedback_sound_played = true;
+            }
+            return;
+        }
+        BattleEvent::PlayerThrowItem { player, .. } => {
+            let total = original_frames_to_ticks(16);
+            let elapsed = total.saturating_sub(services.battle.battle_event_ticks.min(total));
+            if elapsed >= original_frames_to_ticks(6)
+                && !services.battle.battle_feedback_sound_played
+            {
+                if let Some(sound) = game
+                    .battle()
+                    .and_then(|battle| battle.players.get(player))
+                    .map(|player| player.magic_sound)
+                    .filter(|&sound| sound != 0)
+                {
+                    services.audio.sound_effects.play(sound);
+                }
+                services.battle.battle_feedback_sound_played = true;
+            }
+            return;
+        }
         BattleEvent::EnemySummon {
             caster,
             summoned_mask,
@@ -1501,11 +1530,7 @@ fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, eve
             ])
         }),
         BattleEvent::SimulatedMagic { .. } => None,
-        BattleEvent::PlayerUseItem { .. } => Some(vec![Some(28), None, None]),
-        BattleEvent::PlayerThrowItem { player, .. } => game.battle().and_then(|battle| {
-            let player = battle.players.get(player)?;
-            Some(vec![Some(player.magic_sound), None, None])
-        }),
+        BattleEvent::PlayerUseItem { .. } | BattleEvent::PlayerThrowItem { .. } => None,
         BattleEvent::PlayerDefensiveMagic { player, .. } => game.battle().and_then(|battle| {
             let player = battle.players.get(player)?;
             Some(vec![Some(player.magic_sound), None, None])

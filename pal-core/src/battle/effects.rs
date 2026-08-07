@@ -8,12 +8,14 @@ use super::helpers::{
 };
 use super::types::{
     cure_poison, BattleActorAction, BattleEnemy, BattleEvent, BattleFlow, BattleMagic, BattlePhase,
-    BattlePlayer, BattleResult, BattleRewards, BattleScriptRequest, BattleScriptSource,
-    BattleState, BattleStatus, BattleSteal, BattleTarget, MagicEventPhase, PlayerAction,
-    PlayerItemKind, PlayerItemPhase, PlayerMagicPhase, QueuedBattleAction, VictorySettlementStage,
-    HIDDEN_EXPERIENCE_CATEGORY_COUNT, HIDDEN_EXP_ATTACK, HIDDEN_EXP_DEFENSE, HIDDEN_EXP_FLEE,
-    HIDDEN_EXP_HEALTH, HIDDEN_EXP_MAGIC, HIDDEN_EXP_MAGIC_POWER,
+    BattlePlayer, BattlePlayerStatChange, BattleResult, BattleRewards, BattleScriptRequest,
+    BattleScriptSource, BattleState, BattleStatus, BattleSteal, BattleTarget, MagicEventPhase,
+    PlayerAction, PlayerItemKind, PlayerItemPhase, PlayerMagicPhase, QueuedBattleAction,
+    VictorySettlementStage, HIDDEN_EXPERIENCE_CATEGORY_COUNT, HIDDEN_EXP_ATTACK,
+    HIDDEN_EXP_DEFENSE, HIDDEN_EXP_FLEE, HIDDEN_EXP_HEALTH, HIDDEN_EXP_MAGIC,
+    HIDDEN_EXP_MAGIC_POWER,
 };
+use crate::party::MAX_PARTY_MEMBERS;
 use crate::random;
 
 impl BattleState {
@@ -573,6 +575,10 @@ impl BattleState {
                 return false;
             }
         };
+        let mut player_stats_before = [None; MAX_PARTY_MEMBERS];
+        for (index, actor) in self.players.iter().take(MAX_PARTY_MEMBERS).enumerate() {
+            player_stats_before[index] = Some((actor.hp, actor.mp));
+        }
         self.flow = BattleFlow::PlayerItem {
             player,
             item_object,
@@ -580,6 +586,7 @@ impl BattleState {
             kind,
             script_entry,
             object_id,
+            player_stats_before,
             phase: PlayerItemPhase::Animation,
         };
         let event = match kind {
@@ -604,11 +611,22 @@ impl BattleState {
             player,
             item_object,
             kind,
+            player_stats_before,
             ..
         } = self.flow
         else {
             return;
         };
+        let mut player_changes = [BattlePlayerStatChange::default(); MAX_PARTY_MEMBERS];
+        for (index, before) in player_stats_before.into_iter().enumerate() {
+            let (Some((hp, mp)), Some(actor)) = (before, self.players.get(index)) else {
+                continue;
+            };
+            player_changes[index] = BattlePlayerStatChange {
+                hp: actor.hp.wrapping_sub(hp) as i16,
+                mp: actor.mp.wrapping_sub(mp) as i16,
+            };
+        }
         self.pending_events
             .push_front(BattleEvent::PlayerItemFeedback {
                 player,
@@ -617,6 +635,7 @@ impl BattleState {
                     kind,
                     PlayerItemKind::Throw | PlayerItemKind::Use { consuming: true }
                 ),
+                player_changes,
             });
         self.flow = BattleFlow::PerformActions;
         self.queue_post_action_check(false);

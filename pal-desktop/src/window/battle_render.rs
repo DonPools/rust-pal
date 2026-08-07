@@ -4,8 +4,8 @@ use pal_assets::player_roles::PlayerRole;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::{
-    BattleEvent, BattleMagic, BattleMagicVisual, BattlePhase, BattleResult, BattleState,
-    BattleStatus, BattleTarget, MagicEventPhase,
+    BattleEvent, BattleMagic, BattleMagicVisual, BattlePhase, BattlePlayerStatChange, BattleResult,
+    BattleState, BattleStatus, BattleTarget, MagicEventPhase,
 };
 use pal_core::game::BATTLE_FRAME_MS;
 
@@ -682,6 +682,7 @@ pub fn render_battle(
                 renderer,
                 battle,
                 event,
+                event_ticks,
                 resources.ui_sprites,
                 resources.text,
                 resources.font,
@@ -1029,6 +1030,9 @@ fn magic_positions(
     event: BattleEvent,
     visual: BattleMagicVisual,
 ) -> Option<Vec<(i32, i32)>> {
+    if let Some(positions) = fixed_magic_positions(event, visual.magic_type) {
+        return Some(positions);
+    }
     let (enemy, player, target) = match event {
         BattleEvent::PlayerMagic { enemy, .. }
         | BattleEvent::PlayerCooperativeMagic { enemy, .. }
@@ -1037,40 +1041,51 @@ fn magic_positions(
         BattleEvent::PlayerDefensiveMagic { target, .. } => (None, None, Some(target)),
         _ => return None,
     };
-    let to_enemy = visual.usable_to_enemy();
-    Some(match visual.magic_type {
-        1 if to_enemy => vec![(70, 140), (100, 110), (160, 100)],
-        1 => vec![(180, 180), (234, 170), (270, 146)],
-        2 if to_enemy => vec![(120, 100)],
-        2 => vec![(240, 150)],
-        3 => vec![(160, 200)],
-        9 => vec![(160, 100)],
-        _ => match target {
-            Some(BattleTarget::Enemy(target)) => {
-                enemy_position(battle, target).into_iter().collect()
-            }
-            Some(BattleTarget::Player(target)) => {
-                vec![player_position(battle.players.len(), target)]
-            }
-            Some(BattleTarget::AllEnemies) => battle
-                .enemies
-                .iter()
-                .enumerate()
-                .filter_map(|(index, actor)| {
-                    actor
-                        .is_alive()
-                        .then(|| enemy_position(battle, index))
-                        .flatten()
-                })
-                .collect(),
-            Some(BattleTarget::AllPlayers) => (0..battle.players.len())
-                .map(|index| player_position(battle.players.len(), index))
-                .collect(),
-            None if enemy.is_some() => enemy_position(battle, enemy?).into_iter().collect(),
-            None if player.is_some() => vec![player_position(battle.players.len(), player?)],
-            None => Vec::new(),
-        },
+    Some(match target {
+        Some(BattleTarget::Enemy(target)) => enemy_position(battle, target).into_iter().collect(),
+        Some(BattleTarget::Player(target)) => {
+            vec![player_position(battle.players.len(), target)]
+        }
+        Some(BattleTarget::AllEnemies) => battle
+            .enemies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, actor)| {
+                actor
+                    .is_alive()
+                    .then(|| enemy_position(battle, index))
+                    .flatten()
+            })
+            .collect(),
+        Some(BattleTarget::AllPlayers) => (0..battle.players.len())
+            .map(|index| player_position(battle.players.len(), index))
+            .collect(),
+        None if enemy.is_some() => enemy_position(battle, enemy?).into_iter().collect(),
+        None if player.is_some() => vec![player_position(battle.players.len(), player?)],
+        None => Vec::new(),
     })
+}
+
+fn fixed_magic_positions(event: BattleEvent, magic_type: u16) -> Option<Vec<(i32, i32)>> {
+    // Object flags describe player-facing targeting semantics. Enemy casts use the
+    // same objects, so the event direction must decide which formation receives
+    // an area effect.
+    let targets_enemy = match event {
+        BattleEvent::PlayerMagic { .. }
+        | BattleEvent::PlayerCooperativeMagic { .. }
+        | BattleEvent::SimulatedMagic { .. } => true,
+        BattleEvent::EnemyMagic { .. } | BattleEvent::PlayerDefensiveMagic { .. } => false,
+        _ => return None,
+    };
+    match magic_type {
+        1 if targets_enemy => Some(vec![(70, 140), (100, 110), (160, 100)]),
+        1 => Some(vec![(180, 180), (234, 170), (270, 146)]),
+        2 if targets_enemy => Some(vec![(120, 100)]),
+        2 => Some(vec![(240, 150)]),
+        3 => Some(vec![(160, 200)]),
+        9 => Some(vec![(160, 100)]),
+        _ => None,
+    }
 }
 
 fn enemy_position(battle: &BattleState, enemy: usize) -> Option<(i32, i32)> {
@@ -1563,10 +1578,21 @@ fn render_battle_event(
     renderer: &mut Renderer,
     battle: &BattleState,
     event: BattleEvent,
+    ticks_remaining: u16,
     ui_sprites: &[RleBitmap],
     text: &TextLibrary,
     font: &BitmapFont,
 ) {
+    if let BattleEvent::PlayerItemFeedback { player_changes, .. } = event {
+        render_player_item_feedback(
+            renderer,
+            battle,
+            &player_changes,
+            ticks_remaining,
+            ui_sprites,
+        );
+        return;
+    }
     if let BattleEvent::PlayerFlee {
         succeeded: false, ..
     } = event
@@ -1671,6 +1697,52 @@ fn render_battle_event(
         19,
         [255, 255, 255, 255],
     );
+}
+
+fn render_player_item_feedback(
+    renderer: &mut Renderer,
+    battle: &BattleState,
+    changes: &[BattlePlayerStatChange],
+    ticks_remaining: u16,
+    ui_sprites: &[RleBitmap],
+) {
+    let total = original_frames_to_ticks(8);
+    let rise = i32::from(total.saturating_sub(ticks_remaining.min(total)));
+    for (index, change) in changes.iter().copied().enumerate() {
+        let Some(_) = battle.players.get(index) else {
+            break;
+        };
+        let (x, y) = player_position(battle.players.len(), index);
+        if change.hp != 0 {
+            let (sprite_base, fallback) = if change.hp < 0 {
+                (29, [96, 144, 240, 255])
+            } else {
+                (19, [240, 224, 96, 255])
+            };
+            draw_ui_number(
+                renderer,
+                ui_sprites,
+                u32::from(change.hp.unsigned_abs()),
+                5,
+                x - 24,
+                y - 75 - rise,
+                sprite_base,
+                fallback,
+            );
+        }
+        if change.mp > 0 {
+            draw_ui_number(
+                renderer,
+                ui_sprites,
+                u32::from(change.mp as u16),
+                5,
+                x - 24,
+                y - 67 - rise,
+                56,
+                [96, 224, 240, 255],
+            );
+        }
+    }
 }
 
 fn enemy_script_animation_state(
@@ -2567,6 +2639,47 @@ mod tests {
         assert_eq!(player_position(2, 1), (256, 152));
         assert_eq!(player_position(3, 2), (270, 146));
         assert_eq!(player_position(4, 3), (264, 153));
+    }
+
+    #[test]
+    fn enemy_area_magic_uses_the_player_formation() {
+        let event = BattleEvent::EnemyMagic {
+            enemy: 0,
+            player: 1,
+            magic_object: 2,
+            blow: 0,
+            damage: 10,
+            phase: MagicEventPhase::Visual,
+            visual: true,
+            auto_defended: false,
+            defeated: false,
+        };
+
+        assert_eq!(
+            fixed_magic_positions(event, 1),
+            Some(vec![(180, 180), (234, 170), (270, 146)])
+        );
+        assert_eq!(fixed_magic_positions(event, 2), Some(vec![(240, 150)]));
+    }
+
+    #[test]
+    fn player_area_magic_uses_the_enemy_formation() {
+        let event = BattleEvent::PlayerMagic {
+            player: 0,
+            enemy: 1,
+            magic_object: 2,
+            blow: 0,
+            damage: 10,
+            phase: MagicEventPhase::Visual,
+            visual: true,
+            defeated: false,
+        };
+
+        assert_eq!(
+            fixed_magic_positions(event, 1),
+            Some(vec![(70, 140), (100, 110), (160, 100)])
+        );
+        assert_eq!(fixed_magic_positions(event, 2), Some(vec![(120, 100)]));
     }
 
     #[test]

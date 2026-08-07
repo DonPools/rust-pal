@@ -542,6 +542,17 @@ fn advance_script_with_budget<L>(
             let events = game.advance_battle_resolution();
             queue_battle_events(game, services, events);
         }
+        Some(ScriptEvent::Action(
+            action @ (pal_core::script::ScriptAction::SimulatePlayerMagic { .. }
+            | pal_core::script::ScriptAction::ThrowWeapon { .. }),
+        )) => {
+            if !game.apply_script_action(action) {
+                set_title("Rust-PAL [script target is unavailable]");
+                return;
+            }
+            let events = game.advance_battle_resolution();
+            queue_battle_events(game, services, events);
+        }
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");
         }

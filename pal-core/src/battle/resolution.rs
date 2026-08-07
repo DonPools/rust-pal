@@ -390,6 +390,7 @@ impl BattleState {
                     kind,
                     script_entry,
                     object_id,
+                    player_stats_before,
                     phase: PlayerItemPhase::Animation,
                 } => {
                     self.flow = BattleFlow::PlayerItem {
@@ -399,6 +400,7 @@ impl BattleState {
                         kind,
                         script_entry,
                         object_id,
+                        player_stats_before,
                         phase: PlayerItemPhase::Script,
                     };
                     if script_entry != 0 {

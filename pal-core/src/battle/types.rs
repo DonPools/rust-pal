@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use pal_assets::battle::BattlePosition;
 use pal_assets::objects::GlobalObjects;
 
+use crate::party::MAX_PARTY_MEMBERS;
+
 pub const BATTLE_STATUS_COUNT: usize = 9;
 pub const MAX_BATTLE_POISONS: usize = 16;
 pub const HIDDEN_EXPERIENCE_CATEGORY_COUNT: usize = 7;
@@ -282,6 +284,7 @@ pub(super) enum BattleFlow {
         kind: PlayerItemKind,
         script_entry: u16,
         object_id: u16,
+        player_stats_before: [Option<(u16, u16)>; MAX_PARTY_MEMBERS],
         phase: PlayerItemPhase,
     },
     RoundScripts {
@@ -699,6 +702,7 @@ pub enum BattleEvent {
         player: usize,
         item_object: u16,
         consume: bool,
+        player_changes: [BattlePlayerStatChange; MAX_PARTY_MEMBERS],
     },
     PlayerFlee {
         player: usize,
@@ -757,6 +761,13 @@ pub enum MagicEventPhase {
 pub struct BattleRewards {
     pub experience: u32,
     pub cash: u32,
+}
+
+/// Signed HP/MP changes displayed after a battle item script completes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BattlePlayerStatChange {
+    pub hp: i16,
+    pub mp: i16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
