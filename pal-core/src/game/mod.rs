@@ -26,6 +26,7 @@ use crate::battle::{
 use crate::map::tile_to_world;
 use crate::map::Map;
 use crate::party::{Party, MAX_PARTY_MEMBERS};
+use crate::random;
 use crate::role::{Direction, Role};
 use crate::scene::{
     blocks_position, find_search_trigger, find_touch_trigger, SceneObject, TriggerKind,
@@ -39,6 +40,22 @@ pub const UPDATE_INTERVAL_MS: u64 = 50;
 pub const EXPLORATION_FRAME_MS: u64 = 100;
 /// Original battle update interval (25 FPS).
 pub const BATTLE_FRAME_MS: u64 = 40;
+
+/// Per-player changes produced by Classic's victory settlement sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BattlePlayerSettlement {
+    pub role_id: u16,
+    pub levels_gained: u16,
+    pub hidden_growth: [u16; HIDDEN_EXPERIENCE_CATEGORY_COUNT],
+    pub learned_magics: Vec<u16>,
+}
+
+/// Rewards and presentation details produced while preparing a battle victory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BattleVictorySettlement {
+    pub rewards: BattleRewards,
+    pub players: Vec<BattlePlayerSettlement>,
+}
 
 mod exploration;
 mod field;
@@ -138,7 +155,7 @@ impl<M: CollisionMap> GameState<M> {
             current_battlefield: 0,
             cash: 0,
             role_experience: [0; PLAYER_ROLE_COUNT],
-            growth_random_state: 0xa341_316c,
+            growth_random_state: random::DEFAULT_RANDOM_SEED,
             player_roles: None,
             stores: None,
             global_objects: None,
@@ -214,6 +231,33 @@ impl<M: CollisionMap> GameState<M> {
     pub fn with_scene_number(mut self, scene_number: u16) -> Self {
         self.scene_number = scene_number;
         self
+    }
+
+    /// Seed Classic's single random sequence. A zero seed uses the deterministic fallback.
+    pub fn with_random_seed(mut self, seed: u32) -> Self {
+        let seed = if seed == 0 {
+            random::DEFAULT_RANDOM_SEED
+        } else {
+            seed
+        };
+        self.growth_random_state = random::seed(seed);
+        self
+    }
+
+    /// Return the random state owned by the active battle or the surrounding game.
+    pub fn random_state(&self) -> u32 {
+        self.active_battle
+            .as_ref()
+            .map_or(self.growth_random_state, BattleState::random_state)
+    }
+
+    /// Synchronize script execution with Classic's single random sequence.
+    pub fn set_random_state(&mut self, state: u32) {
+        if let Some(battle) = self.active_battle.as_mut() {
+            battle.set_random_state(state);
+        } else {
+            self.growth_random_state = state;
+        }
     }
 
     /// Install static save records that are not otherwise needed by runtime logic.
@@ -306,17 +350,16 @@ impl<M: CollisionMap> GameState<M> {
             .unwrap_or_default();
         for event in &events {
             match *event {
-                BattleEvent::PlayerUseItem {
+                BattleEvent::PlayerItemFeedback {
                     item_object,
-                    consuming: true,
+                    consume: true,
                     ..
-                }
-                | BattleEvent::PlayerThrowItem { item_object, .. } => {
+                } => {
                     let _ = self.consume_inventory_item(item_object);
                 }
-                BattleEvent::PlayerUseItem {
-                    consuming: false, ..
-                }
+                BattleEvent::PlayerItemFeedback { consume: false, .. }
+                | BattleEvent::PlayerUseItem { .. }
+                | BattleEvent::PlayerThrowItem { .. }
                 | BattleEvent::PlayerAttack { .. }
                 | BattleEvent::PlayerMagic { .. }
                 | BattleEvent::EnemyAttack { .. }
@@ -331,6 +374,10 @@ impl<M: CollisionMap> GameState<M> {
                 | BattleEvent::PlayerMagicAnimation { .. }
                 | BattleEvent::PlayerFriendDeath { .. }
                 | BattleEvent::PlayerDying { .. }
+                | BattleEvent::EnemyDivide { .. }
+                | BattleEvent::EnemySummon { .. }
+                | BattleEvent::EnemyTransform { .. }
+                | BattleEvent::EnemyEscape
                 | BattleEvent::RoundCompleted
                 | BattleEvent::Finished(_) => {}
             }
@@ -851,15 +898,30 @@ impl<M: CollisionMap> GameState<M> {
         if self.active_battle.is_some() {
             return false;
         }
-        if !self.refresh_equipment_effects(scripts) {
-            return false;
-        }
         let role_ids = self
             .party
             .members()
             .iter()
             .map(|member| member.role_id)
             .collect::<Vec<_>>();
+        if let Some(roles) = self.player_roles.as_mut() {
+            for &role_id in &role_ids {
+                let role_index = usize::from(role_id);
+                let Some(role) = roles.role_mut(role_index) else {
+                    return false;
+                };
+                if role.hp == 0 {
+                    role.hp = 1;
+                    if let Some(statuses) = self.player_statuses.get_mut(role_index) {
+                        statuses.remove_from_player(BattleStatus::Puppet);
+                    }
+                }
+            }
+            self.party.sync_from_roles(roles);
+        }
+        if !self.refresh_equipment_effects(scripts) {
+            return false;
+        }
         let Some(roles) = role_ids
             .iter()
             .map(|&role_id| Some((role_id, self.effective_player_role(role_id)?)))
@@ -887,6 +949,7 @@ impl<M: CollisionMap> GameState<M> {
         ) else {
             return false;
         };
+        battle.set_random_state(self.growth_random_state);
         for enemy in &mut battle.enemies {
             apply_enemy_script_overrides(
                 enemy,
@@ -938,8 +1001,14 @@ impl<M: CollisionMap> GameState<M> {
         true
     }
 
-    /// Apply victory rewards before the enemy battle-end scripts, matching Classic's order.
+    /// Apply victory rewards before the enemy battle-end scripts.
     pub fn prepare_battle_victory(&mut self) -> Option<BattleRewards> {
+        self.prepare_battle_victory_settlement()
+            .map(|settlement| settlement.rewards)
+    }
+
+    /// Apply victory rewards in Classic's per-player order and return presentation details.
+    pub fn prepare_battle_victory_settlement(&mut self) -> Option<BattleVictorySettlement> {
         let battle = self.active_battle.as_ref()?.clone();
         if battle.phase() != BattlePhase::Finished(BattleResult::Won)
             || !battle.victory_rewards_pending()
@@ -956,13 +1025,30 @@ impl<M: CollisionMap> GameState<M> {
         }
         let rewards = battle.rewards();
         self.cash = self.cash.saturating_add(rewards.cash);
-        let living_roles = battle
-            .players
-            .iter()
-            .filter_map(|player| player.is_alive().then_some(player.role_id))
-            .collect::<Vec<_>>();
-        self.award_battle_experience(&living_roles, rewards.experience);
-        self.award_hidden_battle_experience(&battle, rewards.experience);
+        let mut player_settlements = Vec::new();
+        for (player_index, player) in battle.players.iter().enumerate() {
+            self.clear_hidden_experience_counts(player.role_id);
+            if !player.is_alive() {
+                continue;
+            }
+            let levels_gained =
+                self.award_battle_experience_for_role(player.role_id, rewards.experience);
+            let hidden_growth = self.award_hidden_battle_experience_for_player(
+                &battle,
+                player_index,
+                rewards.experience,
+            );
+            if levels_gained != 0 {
+                self.restore_role_after_battle_level_up(player.role_id)?;
+            }
+            let learned_magics = self.learn_eligible_magics_for_role(player.role_id);
+            player_settlements.push(BattlePlayerSettlement {
+                role_id: player.role_id,
+                levels_gained,
+                hidden_growth,
+                learned_magics,
+            });
+        }
 
         let updated = battle
             .players
@@ -991,7 +1077,12 @@ impl<M: CollisionMap> GameState<M> {
             player.mp = mp;
             player.max_mp = max_mp;
         }
-        active.mark_victory_rewards_applied().then_some(rewards)
+        active
+            .mark_victory_rewards_applied()
+            .then_some(BattleVictorySettlement {
+                rewards,
+                players: player_settlements,
+            })
     }
 
     pub fn begin_battle_end_scripts(&mut self) -> bool {
@@ -1015,6 +1106,7 @@ impl<M: CollisionMap> GameState<M> {
         };
         let objects = self.global_objects.as_ref()?;
         let battle = self.active_battle.take()?;
+        self.growth_random_state = battle.random_state();
         if let Some(roles) = self.player_roles.as_mut() {
             for player in &battle.players {
                 let role = roles.role_mut(usize::from(player.role_id))?;
@@ -1046,129 +1138,211 @@ impl<M: CollisionMap> GameState<M> {
         Some((result, rewards))
     }
 
-    fn award_battle_experience(&mut self, role_ids: &[u16], gained: u32) {
-        for &role_id in role_ids {
-            let role_index = usize::from(role_id);
-            let Some(current) = self.role_experience.get_mut(role_index) else {
-                continue;
-            };
-            *current = current.saturating_add(gained);
-            while let Some(level) = self
+    fn award_battle_experience_for_role(&mut self, role_id: u16, gained: u32) -> u16 {
+        let role_index = usize::from(role_id);
+        let clamped_level = {
+            let Some(role) = self
                 .player_roles
+                .as_mut()
+                .and_then(|roles| roles.role_mut(role_index))
+            else {
+                return 0;
+            };
+            let clamped = role.level > 99;
+            role.level = role.level.min(99);
+            clamped
+        };
+        if clamped_level {
+            if let Some(roles) = self.player_roles.as_ref() {
+                self.party.sync_from_roles(roles);
+            }
+            if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+                battle
+                    .players
+                    .iter_mut()
+                    .find(|player| player.role_id == role_id)
+            }) {
+                player.level = 99;
+            }
+        }
+        let Some(current) = self.role_experience.get_mut(role_index) else {
+            return 0;
+        };
+        *current = current.saturating_add(gained);
+        let mut levels_gained = 0u16;
+        while let Some(level) = self
+            .player_roles
+            .as_ref()
+            .and_then(|roles| roles.role(role_index))
+            .map(|role| role.level)
+        {
+            let Some(required) = self
+                .battle_data
                 .as_ref()
-                .and_then(|roles| roles.role(role_index))
-                .map(|role| role.level)
-            {
-                if level >= 99 {
-                    break;
-                }
-                let Some(required) = self
-                    .battle_data
-                    .as_ref()
-                    .and_then(|data| data.level_up_experience.for_level(level))
-                    .map(u32::from)
-                    .filter(|&required| required > 0)
-                else {
-                    break;
-                };
-                if self.role_experience[role_index] < required {
-                    break;
-                }
-                self.role_experience[role_index] -= required;
+                .and_then(|data| data.level_up_experience.for_level(level))
+                .map(u32::from)
+                .filter(|&required| required > 0)
+            else {
+                break;
+            };
+            if self.role_experience[role_index] < required {
+                break;
+            }
+            self.role_experience[role_index] -= required;
+            if level < 99 {
                 if !self.level_up_role(role_id) {
                     break;
                 }
+                levels_gained = levels_gained.saturating_add(1);
+            }
+        }
+        levels_gained
+    }
+
+    fn clear_hidden_experience_counts(&mut self, role_id: u16) {
+        const SAVE_CATEGORY_OFFSET: usize = 1;
+        let role_index = usize::from(role_id);
+        for category in 0..HIDDEN_EXPERIENCE_CATEGORY_COUNT {
+            if let Some(saved) = self
+                .save_experience
+                .get_mut(category + SAVE_CATEGORY_OFFSET)
+                .and_then(|roles| roles.get_mut(role_index))
+            {
+                saved.count = 0;
             }
         }
     }
 
-    fn award_hidden_battle_experience(&mut self, battle: &BattleState, gained: u32) {
+    fn award_hidden_battle_experience_for_player(
+        &mut self,
+        battle: &BattleState,
+        player_index: usize,
+        gained: u32,
+    ) -> [u16; HIDDEN_EXPERIENCE_CATEGORY_COUNT] {
         const SAVE_CATEGORY_OFFSET: usize = 1;
-        for (player_index, player) in battle.players.iter().enumerate() {
-            let role_index = usize::from(player.role_id);
-            let Some(counts) = battle.hidden_experience_counts(player_index) else {
+        let mut growth_totals = [0u16; HIDDEN_EXPERIENCE_CATEGORY_COUNT];
+        let Some(player) = battle.players.get(player_index) else {
+            return growth_totals;
+        };
+        let role_index = usize::from(player.role_id);
+        let Some(counts) = battle.hidden_experience_counts(player_index) else {
+            return growth_totals;
+        };
+        let total = counts
+            .iter()
+            .fold(0u32, |total, count| total.saturating_add(u32::from(*count)));
+        if total == 0 {
+            return growth_totals;
+        }
+        for (category, count) in counts.into_iter().enumerate() {
+            let save_category = category + SAVE_CATEGORY_OFFSET;
+            let Some(saved) = self
+                .save_experience
+                .get(save_category)
+                .and_then(|roles| roles.get(role_index))
+                .copied()
+            else {
                 continue;
             };
-            for category in 0..HIDDEN_EXPERIENCE_CATEGORY_COUNT {
-                if let Some(saved) = self
-                    .save_experience
-                    .get_mut(category + SAVE_CATEGORY_OFFSET)
-                    .and_then(|roles| roles.get_mut(role_index))
-                {
-                    saved.count = 0;
+            let mut experience = gained
+                .saturating_mul(u32::from(count))
+                .checked_div(total)
+                .unwrap_or(0)
+                .saturating_mul(2)
+                .saturating_add(u32::from(saved.experience));
+            let mut level = saved.level.min(99);
+            while let Some(required) = self
+                .battle_data
+                .as_ref()
+                .and_then(|data| data.level_up_experience.for_level(level))
+                .map(u32::from)
+                .filter(|required| *required > 0)
+            {
+                if experience < required {
+                    break;
                 }
-            }
-            if !player.is_alive() {
-                continue;
-            }
-            let total = counts
-                .iter()
-                .fold(0u32, |total, count| total.saturating_add(u32::from(*count)));
-            if total == 0 {
-                continue;
-            }
-            for (category, count) in counts.into_iter().enumerate() {
-                let save_category = category + SAVE_CATEGORY_OFFSET;
-                let Some(saved) = self
-                    .save_experience
-                    .get(save_category)
-                    .and_then(|roles| roles.get(role_index))
-                    .copied()
-                else {
-                    continue;
-                };
-                let mut experience = gained
-                    .saturating_mul(u32::from(count))
-                    .checked_div(total)
-                    .unwrap_or(0)
-                    .saturating_mul(2)
-                    .saturating_add(u32::from(saved.experience));
-                let mut level = saved.level.min(99);
-                while level < 99 {
-                    let Some(required) = self
-                        .battle_data
-                        .as_ref()
-                        .and_then(|data| data.level_up_experience.for_level(level))
-                        .map(u32::from)
-                        .filter(|required| *required > 0)
-                    else {
-                        break;
-                    };
-                    if experience < required {
-                        break;
-                    }
-                    experience -= required;
-                    let growth = u16::try_from(1 + self.growth_random(2)).unwrap_or(1);
-                    if let Some(role) = self
-                        .player_roles
-                        .as_mut()
-                        .and_then(|roles| roles.role_mut(role_index))
-                    {
-                        let attribute = match category {
-                            HIDDEN_EXP_HEALTH => &mut role.max_hp,
-                            HIDDEN_EXP_MAGIC => &mut role.max_mp,
-                            HIDDEN_EXP_ATTACK => &mut role.attack_strength,
-                            HIDDEN_EXP_MAGIC_POWER => &mut role.magic_strength,
-                            HIDDEN_EXP_DEFENSE => &mut role.defense,
-                            HIDDEN_EXP_DEXTERITY => &mut role.dexterity,
-                            HIDDEN_EXP_FLEE => &mut role.flee_rate,
-                            _ => break,
-                        };
-                        *attribute = attribute.saturating_add(growth).min(999);
-                    }
+                experience -= required;
+                let growth = u16::try_from(1 + self.growth_random(2)).unwrap_or(1);
+                if !self.apply_hidden_battle_growth(player.role_id, category, growth) {
+                    break;
+                }
+                growth_totals[category] = growth_totals[category].wrapping_add(growth);
+                if level < 99 {
                     level += 1;
                 }
-                if let Some(saved) = self
-                    .save_experience
-                    .get_mut(save_category)
-                    .and_then(|roles| roles.get_mut(role_index))
-                {
-                    saved.experience = u16::try_from(experience).unwrap_or(u16::MAX);
-                    saved.level = level;
-                    saved.count = 0;
-                }
+            }
+            if let Some(saved) = self
+                .save_experience
+                .get_mut(save_category)
+                .and_then(|roles| roles.get_mut(role_index))
+            {
+                saved.experience = u16::try_from(experience).unwrap_or(u16::MAX);
+                saved.level = level;
+                saved.count = 0;
             }
         }
+        growth_totals
+    }
+
+    fn apply_hidden_battle_growth(&mut self, role_id: u16, category: usize, growth: u16) -> bool {
+        let role_index = usize::from(role_id);
+        let Some(role) = self
+            .player_roles
+            .as_mut()
+            .and_then(|roles| roles.role_mut(role_index))
+        else {
+            return false;
+        };
+        let attribute = match category {
+            HIDDEN_EXP_HEALTH => &mut role.max_hp,
+            HIDDEN_EXP_MAGIC => &mut role.max_mp,
+            HIDDEN_EXP_ATTACK => &mut role.attack_strength,
+            HIDDEN_EXP_MAGIC_POWER => &mut role.magic_strength,
+            HIDDEN_EXP_DEFENSE => &mut role.defense,
+            HIDDEN_EXP_DEXTERITY => &mut role.dexterity,
+            HIDDEN_EXP_FLEE => &mut role.flee_rate,
+            _ => return false,
+        };
+        *attribute = attribute.wrapping_add(growth);
+        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+            battle
+                .players
+                .iter_mut()
+                .find(|player| player.role_id == role_id)
+        }) {
+            let attribute = match category {
+                HIDDEN_EXP_HEALTH => &mut player.max_hp,
+                HIDDEN_EXP_MAGIC => &mut player.max_mp,
+                HIDDEN_EXP_ATTACK => &mut player.attack_strength,
+                HIDDEN_EXP_MAGIC_POWER => &mut player.magic_strength,
+                HIDDEN_EXP_DEFENSE => &mut player.defense,
+                HIDDEN_EXP_DEXTERITY => &mut player.dexterity,
+                HIDDEN_EXP_FLEE => &mut player.flee_rate,
+                _ => return false,
+            };
+            *attribute = attribute.wrapping_add(growth);
+        }
+        true
+    }
+
+    fn restore_role_after_battle_level_up(&mut self, role_id: u16) -> Option<()> {
+        let role_index = usize::from(role_id);
+        let role = self.player_roles.as_mut()?.role_mut(role_index)?;
+        role.hp = role.max_hp;
+        role.mp = role.max_mp;
+        let (hp, max_hp, mp, max_mp) = (role.hp, role.max_hp, role.mp, role.max_mp);
+        if let Some(player) = self.active_battle.as_mut().and_then(|battle| {
+            battle
+                .players
+                .iter_mut()
+                .find(|player| player.role_id == role_id)
+        }) {
+            player.hp = hp;
+            player.max_hp = max_hp;
+            player.mp = mp;
+            player.max_mp = max_mp;
+        }
+        Some(())
     }
 
     /// Re-run equipped-item scripts so battle attributes match current equipment.
@@ -1418,38 +1592,67 @@ impl<M: CollisionMap> GameState<M> {
         role.flee_rate = role.flee_rate.saturating_add(2).min(999);
         role.hp = role.max_hp;
         role.mp = role.max_mp;
-        let new_level = role.level;
-
-        if role_index < pal_assets::battle::LEVEL_UP_ROLE_COUNT {
-            let learned = self
-                .battle_data
-                .as_ref()
-                .into_iter()
-                .flat_map(|data| data.level_up_magics.iter())
-                .map(|set| set.roles[role_index])
-                .filter(|entry| entry.level == new_level && entry.magic != 0)
-                .map(|entry| entry.magic)
-                .collect::<Vec<_>>();
-            for magic in learned {
-                if role.magic.contains(&magic) {
-                    continue;
-                }
-                if let Some(slot) = role.magic.iter_mut().find(|slot| **slot == 0) {
-                    *slot = magic;
-                }
-            }
-        }
         self.party.sync_from_roles(roles);
         true
     }
 
+    fn learn_eligible_magics_for_role(&mut self, role_id: u16) -> Vec<u16> {
+        let role_index = usize::from(role_id);
+        if role_index >= pal_assets::battle::LEVEL_UP_ROLE_COUNT {
+            return Vec::new();
+        }
+        let Some(level) = self
+            .player_roles
+            .as_ref()
+            .and_then(|roles| roles.role(role_index))
+            .map(|role| role.level)
+        else {
+            return Vec::new();
+        };
+        let Some(data) = self.battle_data.as_ref() else {
+            return Vec::new();
+        };
+        let eligible = data
+            .level_up_magics
+            .iter()
+            .map(|set| set.roles[role_index])
+            .filter(|entry| entry.magic != 0 && entry.level <= level)
+            .map(|entry| entry.magic)
+            .collect::<Vec<_>>();
+        let Some(roles) = self.player_roles.as_mut() else {
+            return Vec::new();
+        };
+        let Some(role) = roles.role_mut(role_index) else {
+            return Vec::new();
+        };
+        let mut learned = Vec::new();
+        for magic in eligible {
+            if role.magic.contains(&magic) {
+                continue;
+            }
+            let Some(slot) = role.magic.iter_mut().find(|slot| **slot == 0) else {
+                break;
+            };
+            *slot = magic;
+            learned.push(magic);
+        }
+        self.party.sync_from_roles(roles);
+        learned
+    }
+
     fn growth_random(&mut self, upper_exclusive: u32) -> u32 {
-        let mut x = self.growth_random_state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.growth_random_state = x;
-        x % upper_exclusive.max(1)
+        if upper_exclusive <= 1 {
+            return 0;
+        }
+        if let Some(battle) = self.active_battle.as_mut() {
+            let state = battle.random_state();
+            let mut state = state;
+            let value = random::random_long(&mut state, 0, upper_exclusive - 1);
+            battle.set_random_state(state);
+            value
+        } else {
+            random::random_long(&mut self.growth_random_state, 0, upper_exclusive - 1)
+        }
     }
 
     pub fn party_followers(&self) -> &[Role] {
@@ -1788,6 +1991,26 @@ impl<M: CollisionMap> GameState<M> {
             script_entry,
             kind: crate::scene::TriggerKind::Magic,
         })
+    }
+
+    /// Start a field magic at its first available script phase.
+    ///
+    /// Classic magic objects may omit the use script. In that case the success
+    /// script is the initial phase instead of making the magic unusable.
+    pub fn initial_magic_request(
+        &self,
+        caster_role: u16,
+        magic_id: u16,
+        target_role: Option<u16>,
+    ) -> Option<(TriggerRequest, bool)> {
+        let success_phase = self
+            .field_magics(caster_role)
+            .into_iter()
+            .find(|magic| magic.magic_id == magic_id && magic.enabled)?
+            .use_script
+            == 0;
+        self.magic_request(caster_role, magic_id, target_role, success_phase)
+            .map(|request| (request, success_phase))
     }
 
     pub fn finish_magic_script(&mut self, magic_id: u16, next_entry: u16, success_phase: bool) {
@@ -3054,7 +3277,6 @@ impl<M: CollisionMap> GameState<M> {
         self.current_battle_music = save.battle_music_number;
         self.current_battlefield = save.battlefield_number;
         self.role_experience = role_experience;
-        self.growth_random_state = 0xa341_316c;
         self.player_statuses =
             [BattleStatuses::from_durations([0; BATTLE_STATUS_COUNT]); PLAYER_ROLE_COUNT];
         self.player_poisons = player_poisons;
@@ -5504,6 +5726,7 @@ mod tests {
         chunks[13] = vec![0; 100];
         chunks[14] = vec![0; 200];
         chunks[14][2..4].copy_from_slice(&10u16.to_le_bytes());
+        chunks[14][198..200].copy_from_slice(&10u16.to_le_bytes());
 
         let table_size = (chunks.len() + 1) * 4;
         let mut offset = table_size as u32;
@@ -5604,7 +5827,8 @@ mod tests {
             .with_player_roles(roles)
             .with_battle_data(battle_data_for_growth());
 
-        state.award_battle_experience(&[0], 25);
+        assert_eq!(state.award_battle_experience_for_role(0, 25), 1);
+        assert_eq!(state.learn_eligible_magics_for_role(0), vec![9]);
 
         let role = state.player_role(0).unwrap();
         assert_eq!(role.level, 2);
@@ -5614,6 +5838,33 @@ mod tests {
         assert_eq!(role.mp, role.max_mp);
         assert_eq!(role.magic[0], 9);
         assert_eq!(state.party.leader().unwrap().attributes.level, 2);
+
+        let roles = state.player_roles.as_mut().unwrap();
+        roles.role_mut(0).unwrap().magic[0] = 0;
+        state.party.sync_from_roles(roles);
+        assert_eq!(state.award_battle_experience_for_role(0, 0), 0);
+        assert_eq!(state.learn_eligible_magics_for_role(0), vec![9]);
+        assert_eq!(state.player_role(0).unwrap().magic[0], 9);
+    }
+
+    #[test]
+    fn max_level_primary_experience_keeps_only_the_threshold_remainder() {
+        let mut role_data = vec![0; 900];
+        for (array, value) in [(6, 99u16), (7, 100), (9, 100)] {
+            let offset = array * PLAYER_ROLE_COUNT * 2;
+            role_data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let roles = PlayerRoles::parse(&role_data).unwrap();
+        let party = Party::single(0, &roles).unwrap();
+        let mut state = state(&[])
+            .with_party(party)
+            .with_player_roles(roles)
+            .with_battle_data(battle_data_for_growth());
+        state.role_experience[0] = 9;
+
+        assert_eq!(state.award_battle_experience_for_role(0, 21), 0);
+        assert_eq!(state.player_role(0).unwrap().level, 99);
+        assert_eq!(state.player_experience(0), Some(0));
     }
 
     #[test]
@@ -5939,6 +6190,76 @@ mod tests {
     }
 
     #[test]
+    fn victory_refills_health_after_primary_and_hidden_growth_in_the_same_battle() {
+        let mut state = battle_item_state(1);
+        state.role_experience[0] = 0;
+        for category in 1..SAVE_EXPERIENCE_KINDS {
+            state.save_experience[category][0].level = 1;
+        }
+        {
+            let roles = state.player_roles.as_mut().unwrap();
+            roles.role_mut(0).unwrap().level = 1;
+            state.party.sync_from_roles(roles);
+            let battle = state.battle_mut().unwrap();
+            battle.players[0].level = 1;
+            battle.enemies[0].hp = 1;
+            battle.enemies[0].experience = 20;
+            battle.enemies[0]
+                .statuses
+                .set_for_enemy(BattleStatus::Paralyzed, 2);
+            assert!(battle.attack(0).is_some());
+        }
+        for _ in 0..32 {
+            let _ = state.advance_battle_resolution();
+            if matches!(
+                state.battle().map(BattleState::phase),
+                Some(BattlePhase::Finished(BattleResult::Won))
+            ) {
+                break;
+            }
+        }
+
+        let settlement = state.prepare_battle_victory_settlement().unwrap();
+        let player = &settlement.players[0];
+        assert_eq!(player.levels_gained, 1);
+        assert!(player.hidden_growth[HIDDEN_EXP_HEALTH] > 0);
+        let role = state.player_role(0).unwrap();
+        assert_eq!(role.hp, role.max_hp);
+        assert_eq!(role.mp, role.max_mp);
+        let battle_player = &state.battle().unwrap().players[0];
+        assert_eq!(battle_player.hp, battle_player.max_hp);
+        assert_eq!(battle_player.mp, battle_player.max_mp);
+    }
+
+    #[test]
+    fn hidden_experience_keeps_growing_at_level_99_without_a_999_cap() {
+        let mut state = battle_item_state(1);
+        state.save_experience[HIDDEN_EXP_DEFENSE + 1][0].level = 99;
+        state
+            .player_roles
+            .as_mut()
+            .unwrap()
+            .role_mut(0)
+            .unwrap()
+            .defense = 999;
+        assert!(state.battle_mut().unwrap().defend().is_some());
+        for _ in 0..32 {
+            let _ = state.advance_battle_resolution();
+            if state
+                .battle()
+                .is_some_and(|battle| battle.active_player().is_some())
+            {
+                break;
+            }
+        }
+        let battle = state.battle().unwrap().clone();
+        state.clear_hidden_experience_counts(0);
+        state.award_hidden_battle_experience_for_player(&battle, 0, 5);
+        assert!(state.player_role(0).unwrap().defense > 999);
+        assert_eq!(state.save_experience[HIDDEN_EXP_DEFENSE + 1][0].level, 99);
+    }
+
+    #[test]
     fn battle_magic_scripts_scale_damage_from_remaining_mp_and_cash() {
         let mut role_data = vec![0; 900];
         for (array, value) in [
@@ -6014,6 +6335,14 @@ mod tests {
         assert_eq!(state.cash, 0);
         assert!(state.apply_script_action(ScriptAction::SetBattleBlow { amount: -3 }));
         assert!(state.finish_battle_script(41, true));
+        assert!(matches!(
+            state.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerMagic {
+                phase: crate::battle::MagicEventPhase::Visual,
+                damage: 0,
+                ..
+            }]
+        ));
         assert!(state.advance_battle_resolution().is_empty());
         let success_script = state.take_battle_script().unwrap();
         assert_eq!(success_script.script_entry, 32);
@@ -6045,18 +6374,53 @@ mod tests {
     }
 
     #[test]
+    fn starting_battle_revives_party_members_and_clears_puppet() {
+        let mut state = battle_item_state(1);
+        assert!(state.battle_mut().unwrap().set_script_result(0));
+        assert_eq!(
+            state.advance_battle_resolution(),
+            vec![BattleEvent::Finished(BattleResult::Terminated)]
+        );
+        assert!(state.settle_battle().is_some());
+
+        let roles = state.player_roles.as_mut().unwrap();
+        roles.role_mut(0).unwrap().hp = 0;
+        state.party.sync_from_roles(roles);
+        assert!(state.player_statuses[0].set_for_player(BattleStatus::Puppet, 5, false));
+        let scripts = ScriptTable::parse(&[0; 8]).unwrap();
+        assert!(state.start_battle(
+            BattleRequest {
+                enemy_team: 0,
+                lost_entry: 0,
+                flee_entry: 0,
+                is_boss: true,
+            },
+            &scripts,
+        ));
+        assert_eq!(state.player_role(0).unwrap().hp, 1);
+        assert_eq!(state.battle().unwrap().players[0].hp, 1);
+        assert!(!state.battle().unwrap().players[0]
+            .statuses
+            .is_active(BattleStatus::Puppet));
+    }
+
+    #[test]
     fn battle_items_consume_after_completion_and_persist_script_entries() {
         let mut consuming = battle_item_state(1);
         assert!(consuming.battle_use_item(2, Some(0)).is_some());
+        assert!(matches!(
+            consuming.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerUseItem { item_object: 2, .. }]
+        ));
         assert!(consuming.advance_battle_resolution().is_empty());
         let request = consuming.take_battle_script().unwrap();
         assert_eq!(request.script_entry, 31);
         assert!(consuming.finish_battle_script(51, false));
         assert!(matches!(
             consuming.advance_battle_resolution().as_slice(),
-            [BattleEvent::PlayerUseItem {
+            [BattleEvent::PlayerItemFeedback {
                 item_object: 2,
-                consuming: true,
+                consume: true,
                 ..
             }]
         ));
@@ -6065,14 +6429,18 @@ mod tests {
 
         let mut reusable = battle_item_state(1);
         assert!(reusable.battle_use_item(3, Some(0)).is_some());
+        assert!(matches!(
+            reusable.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerUseItem { item_object: 3, .. }]
+        ));
         assert!(reusable.advance_battle_resolution().is_empty());
         assert!(reusable.take_battle_script().is_some());
         assert!(reusable.finish_battle_script(52, true));
         assert!(matches!(
             reusable.advance_battle_resolution().as_slice(),
-            [BattleEvent::PlayerUseItem {
+            [BattleEvent::PlayerItemFeedback {
                 item_object: 3,
-                consuming: false,
+                consume: false,
                 ..
             }]
         ));
@@ -6081,13 +6449,21 @@ mod tests {
 
         let mut thrown = battle_item_state(1);
         assert!(thrown.battle_throw_item(4, Some(0)).is_some());
+        assert!(matches!(
+            thrown.advance_battle_resolution().as_slice(),
+            [BattleEvent::PlayerThrowItem { item_object: 4, .. }]
+        ));
         assert!(thrown.advance_battle_resolution().is_empty());
         let request = thrown.take_battle_script().unwrap();
         assert_eq!(request.script_entry, 41);
         assert!(thrown.finish_battle_script(53, false));
         assert!(matches!(
             thrown.advance_battle_resolution().as_slice(),
-            [BattleEvent::PlayerThrowItem { item_object: 4, .. }]
+            [BattleEvent::PlayerItemFeedback {
+                item_object: 4,
+                consume: true,
+                ..
+            }]
         ));
         assert_eq!(thrown.inventory_count(4), 0);
         assert_eq!(thrown.item_throw_scripts.get(&4), Some(&53));
@@ -6781,6 +7157,13 @@ mod tests {
                 .script_entry,
             44
         );
+        let (request, success_phase) = state.initial_magic_request(0, 1, Some(0)).unwrap();
+        assert_eq!(request.script_entry, 43);
+        assert!(!success_phase);
+        state.finish_magic_script(1, 0, false);
+        let (request, success_phase) = state.initial_magic_request(0, 1, Some(0)).unwrap();
+        assert_eq!(request.script_entry, 44);
+        assert!(success_phase);
         state.finish_magic_script(1, 45, false);
         assert!(state.consume_magic_mp(0, 1));
         assert_eq!(state.player_role(0).unwrap().mp, 7);
@@ -7823,8 +8206,10 @@ mod tests {
 
         let save = OriginalSave::parse(&bytes).unwrap();
         let mut state = state(&[]);
+        state.set_random_state(0x1234_5678);
         state.object_script_overrides.insert((1, 0), 999);
         assert!(state.restore_original_save(save, test_map(), Vec::new()));
+        assert_eq!(state.random_state(), 0x1234_5678);
         assert_eq!(state.scene_number, 1);
         assert_eq!((state.camera.x, state.camera.y), (100, 50));
         assert_eq!((state.player.world_x, state.player.world_y), (260, 162));

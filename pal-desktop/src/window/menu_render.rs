@@ -17,6 +17,13 @@ use super::original_save::OriginalSaveSlot;
 use super::text_render::{draw_dialog_ascii, DialogTextMode};
 use crate::renderer::Renderer;
 
+const ITEM_DETAIL_PANEL_X: i32 = 64;
+const ITEM_DETAIL_PANEL_Y: i32 = 140;
+const ITEM_DETAIL_PANEL_HEIGHT: i32 = 60;
+const ITEM_DESCRIPTION_X: i32 = 72;
+const ITEM_DESCRIPTION_GLYPH_HEIGHT: i32 = 15;
+const ITEM_DESCRIPTION_LINE_HEIGHT: i32 = 18;
+
 fn draw_ui_box(
     renderer: &mut Renderer,
     sprites: &[RleBitmap],
@@ -1193,8 +1200,18 @@ pub(super) fn render_inventory_menu(
     };
     let first = menu.first_visible(inventory.len());
     draw_ui_box_with_shadow(renderer, sprites, PANEL_X, PANEL_Y, 6, 17, 1, 0);
+    draw_ui_box_with_shadow(
+        renderer,
+        sprites,
+        ITEM_DETAIL_PANEL_X,
+        ITEM_DETAIL_PANEL_Y,
+        2,
+        13,
+        1,
+        0,
+    );
     if let Some(item_box) = sprites.get(70) {
-        renderer.blit_rle(item_box, 0, 140);
+        renderer.blit_rle(item_box, 0, ITEM_DETAIL_PANEL_Y);
     }
 
     for (row, &(item_id, amount)) in inventory
@@ -1255,9 +1272,25 @@ fn render_item_description(
     let Some(lines) = descriptions.lines(item_id) else {
         return;
     };
-    for (row, line) in lines.iter().take(3).enumerate() {
-        draw_item_description_line(renderer, font, sprites, line, 48, 142 + row as i32 * 18);
+    let visible_lines = lines.len().min(3);
+    let text_y = item_description_y(visible_lines);
+    for (row, line) in lines.iter().take(visible_lines).enumerate() {
+        draw_item_description_line(
+            renderer,
+            font,
+            sprites,
+            line,
+            ITEM_DESCRIPTION_X,
+            text_y + row as i32 * ITEM_DESCRIPTION_LINE_HEIGHT,
+        );
     }
+}
+
+fn item_description_y(line_count: usize) -> i32 {
+    let visible_lines = line_count.clamp(1, 3) as i32;
+    let text_height =
+        ITEM_DESCRIPTION_GLYPH_HEIGHT + (visible_lines - 1) * ITEM_DESCRIPTION_LINE_HEIGHT;
+    ITEM_DETAIL_PANEL_Y + (ITEM_DETAIL_PANEL_HEIGHT - text_height) / 2
 }
 
 fn draw_item_description_line(
@@ -1562,5 +1595,13 @@ mod tests {
         assert!(cell_changed(&renderer, 0, 16));
         assert!(cell_changed(&renderer, 16, 24));
         assert!(cell_changed(&renderer, 24, 32));
+    }
+
+    #[test]
+    fn item_description_lines_are_vertically_centered_in_the_detail_panel() {
+        assert_eq!(item_description_y(1), 162);
+        assert_eq!(item_description_y(2), 153);
+        assert_eq!(item_description_y(3), 144);
+        assert_eq!(item_description_y(4), 144);
     }
 }

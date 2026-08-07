@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use pal_assets::script::ScriptTable;
 
 use crate::battle::{BattleRequest, BattleResult};
+use crate::random;
 use crate::role::Direction;
 use crate::scene::TriggerRequest;
 
@@ -887,7 +888,7 @@ impl ScriptRuntime {
             table,
             execution: None,
             call_stack: Vec::new(),
-            random_state: 0x4d59_5df4,
+            random_state: random::DEFAULT_RANDOM_SEED,
             trigger_idle_frames: BTreeMap::new(),
             last_trigger: None,
             last_instruction: None,
@@ -973,6 +974,16 @@ impl ScriptRuntime {
             call_depth: self.call_stack.len(),
             wait_frames: self.execution.map_or(0, |execution| execution.wait_frames),
         }
+    }
+
+    /// Return the shared Classic random state used by the next script roll.
+    pub fn random_state(&self) -> u32 {
+        self.random_state
+    }
+
+    /// Synchronize the script runner with the process-wide Classic random sequence.
+    pub fn set_random_state(&mut self, state: u32) {
+        self.random_state = state;
     }
 
     /// Redirect an active script after a world-state condition fails.
@@ -2416,11 +2427,7 @@ impl ScriptRuntime {
     }
 
     fn next_random_percent(&mut self) -> u16 {
-        self.random_state = self
-            .random_state
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
-        ((self.random_state >> 16) % 100 + 1) as u16
+        random::random_long(&mut self.random_state, 1, 100) as u16
     }
 
     fn idle_branch(&mut self, object_id: u16, limit: u16) -> bool {

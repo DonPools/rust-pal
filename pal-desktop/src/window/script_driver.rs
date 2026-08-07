@@ -68,11 +68,14 @@ fn advance_script_with_budget<L>(
 ) where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
-    let event = services
-        .scripts
-        .pending_script_event
-        .take()
-        .or_else(|| scripts.advance());
+    let event = if let Some(event) = services.scripts.pending_script_event.take() {
+        Some(event)
+    } else {
+        scripts.set_random_state(game.random_state());
+        let event = scripts.advance();
+        game.set_random_state(scripts.random_state());
+        event
+    };
     if let (Some(active), Some(event_value)) = (dialog.as_ref(), event) {
         if script_event_needs_dialog_confirmation(resources.text, active, event_value) {
             let active = dialog.as_mut().expect("dialog body was checked above");
@@ -178,6 +181,8 @@ fn advance_script_with_budget<L>(
                 services.battle.battle_kept_effects.clear();
                 services.battle.battle_effect_sound_count = 0;
                 services.battle.battle_feedback_sound_played = false;
+                services.battle.battle_debug_hit = None;
+                services.battle.battle_debug_item_start = None;
                 services.battle.battle_settlement_ticks = None;
                 services.visual.queue_battle_transition();
                 if game.current_battle_music == 0 {
@@ -342,8 +347,13 @@ fn advance_script_with_budget<L>(
         }
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::DivideEnemy { failure_entry, .. },
-        )) if !game.apply_script_action(action) && failure_entry != 0 => {
-            scripts.branch_to(failure_entry);
+        )) => {
+            if game.apply_script_action(action) {
+                let events = game.advance_battle_resolution();
+                queue_battle_events(game, services, events);
+            } else if failure_entry != 0 {
+                scripts.branch_to(failure_entry);
+            }
         }
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::CollectEnemy { failure_entry, .. },
@@ -353,9 +363,12 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SummonEnemy { failure_entry, .. },
         )) => {
-            if game.apply_script_action(action) {
-                services.audio.sound_effects.play(212);
-            } else if failure_entry != 0 {
+            let succeeded = game.apply_script_action(action);
+            let events = game.advance_battle_resolution();
+            if !events.is_empty() {
+                queue_battle_events(game, services, events);
+            }
+            if !succeeded && failure_entry != 0 {
                 scripts.branch_to(failure_entry);
             }
         }
@@ -364,7 +377,8 @@ fn advance_script_with_budget<L>(
             object_id,
         })) => match game.transform_enemy(enemy_index, object_id) {
             Some(true) => {
-                services.audio.sound_effects.play(47);
+                let events = game.advance_battle_resolution();
+                queue_battle_events(game, services, events);
             }
             Some(false) => {}
             None => set_title("Rust-PAL [script transform target is unavailable]"),
@@ -372,9 +386,15 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(
             pal_core::script::ScriptAction::SetEnemyStatus { .. }
             | pal_core::script::ScriptAction::FleeBattle { .. }
-            | pal_core::script::ScriptAction::DivideEnemy { .. }
             | pal_core::script::ScriptAction::CollectEnemy { .. },
         )) => {}
+        Some(ScriptEvent::Action(action @ pal_core::script::ScriptAction::EnemyEscape))
+            if game.apply_script_action(action) =>
+        {
+            let events = game.advance_battle_resolution();
+            queue_battle_events(game, services, events);
+        }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::EnemyEscape)) => {}
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::PlaceObjectInFront { blocked_entry, .. },
         )) if !game.apply_script_action(action) => {

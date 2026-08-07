@@ -74,6 +74,7 @@ struct RngPlayback {
     end_frame: Option<usize>,
     ticks_per_frame: u16,
     ticks_until_frame: u16,
+    fade_in_progress: Option<u32>,
 }
 
 struct EndingAnimation {
@@ -295,6 +296,7 @@ impl VisualState {
                 end_frame,
                 speed,
             } => {
+                let fade_in_after_first_frame = self.needs_scene_fade_in;
                 self.needs_scene_fade_in = false;
                 let animation_index = usize::from(animation);
                 let animation_data = rng
@@ -315,6 +317,7 @@ impl VisualState {
                     end_frame: end_frame.map(usize::from),
                     ticks_per_frame,
                     ticks_until_frame: 0,
+                    fade_in_progress: fade_in_after_first_frame.then_some(0),
                 }));
             }
             ScriptVisual::FadeToRed => {
@@ -335,7 +338,7 @@ impl VisualState {
                     start: self.brightness,
                     end: 0,
                     progress: 0,
-                    total: duration_ticks(u64::from(speed) * 10 * 60),
+                    total: standard_fade_ticks(speed),
                     update_scene: false,
                 });
             }
@@ -346,7 +349,7 @@ impl VisualState {
                     start: 0,
                     end: 64,
                     progress: 0,
-                    total: duration_ticks(u64::from(speed) * 10 * 60),
+                    total: standard_fade_ticks(speed),
                     update_scene: false,
                 });
             }
@@ -568,6 +571,25 @@ impl VisualState {
                 }
             }
             VisualEffect::Rng(playback) => {
+                if playback
+                    .fade_in_progress
+                    .is_some_and(|progress| progress > 0)
+                {
+                    let total = standard_fade_ticks(1);
+                    let progress = playback
+                        .fade_in_progress
+                        .unwrap_or_default()
+                        .saturating_add(1)
+                        .min(total);
+                    self.brightness = interpolate(0, 64, progress, total);
+                    if progress == total {
+                        playback.fade_in_progress = None;
+                        playback.ticks_until_frame = 0;
+                    } else {
+                        playback.fade_in_progress = Some(progress);
+                    }
+                    return Ok(Some(effect));
+                }
                 if playback.ticks_until_frame > 0 {
                     playback.ticks_until_frame -= 1;
                     return Ok(Some(effect));
@@ -603,6 +625,13 @@ impl VisualState {
                     })?;
                 playback.next_frame += 1;
                 playback.ticks_until_frame = playback.ticks_per_frame.saturating_sub(1);
+                if playback.fade_in_progress == Some(0) {
+                    let total = standard_fade_ticks(1);
+                    let progress = 1.min(total);
+                    self.brightness = interpolate(0, 64, progress, total);
+                    playback.fade_in_progress = (progress < total).then_some(progress);
+                    return Ok(Some(effect));
+                }
                 if playback
                     .end_frame
                     .is_some_and(|end| playback.next_frame > end)
@@ -864,6 +893,10 @@ fn duration_ticks(milliseconds: u64) -> u32 {
     u32::try_from(milliseconds.div_ceil(UPDATE_INTERVAL_MS))
         .unwrap_or(u32::MAX)
         .max(1)
+}
+
+fn standard_fade_ticks(speed: u16) -> u32 {
+    duration_ticks(u64::from(speed) * 10 * 60)
 }
 
 fn screen_fade_ticks(speed: u16) -> u32 {
@@ -1164,6 +1197,58 @@ mod tests {
         assert!(visual.render_override(&mut renderer));
         assert_eq!(&renderer.screen()[..8], &[0, 252, 0, 255, 0, 252, 0, 255]);
         assert_eq!(&renderer.screen()[8..12], &[252, 0, 0, 255]);
+    }
+
+    #[test]
+    fn multi_frame_rng_fades_in_after_a_pending_scene_fade() {
+        let (palettes, fbp, _, role_sprites) = resources();
+        let animation = mkf(&[
+            raw_yj1(&[0x06, 1, 1, 0x00]),
+            raw_yj1(&[0x06, 2, 2, 0x00]),
+            raw_yj1(&[0x06, 1, 1, 0x00]),
+        ]);
+        let rng = RngArchive::new(&mkf(&[animation])).unwrap();
+        let current = vec![252; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+
+        assert!(visual.queue(ScriptVisual::FadeOut { speed: 1 }));
+        while visual.is_blocking() {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+        }
+        assert_eq!(visual.brightness, 0);
+        assert!(visual.needs_scene_fade_in);
+
+        assert!(visual.queue(ScriptVisual::PlayRng {
+            animation: 0,
+            start_frame: 0,
+            end_frame: None,
+            speed: 20,
+        }));
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+        assert!(!visual.needs_scene_fade_in);
+        assert!(visual.brightness > 0);
+        assert_eq!(&visual.indexed_screen.as_ref().unwrap()[..2], &[1, 1]);
+
+        while visual.brightness < 64 {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+            assert_eq!(&visual.indexed_screen.as_ref().unwrap()[..2], &[1, 1]);
+        }
+
+        let mut saw_second_frame = false;
+        while visual.is_blocking() {
+            visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap();
+            saw_second_frame |= visual.indexed_screen.as_ref().unwrap()[0] == 2;
+        }
+        assert!(saw_second_frame);
+        assert_eq!(&visual.indexed_screen.as_ref().unwrap()[..2], &[1, 1]);
     }
 
     #[test]

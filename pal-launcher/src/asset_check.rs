@@ -1433,6 +1433,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         magic_object: 314,
         blow,
         damage: 0,
+        phase: pal_core::battle::MagicEventPhase::Visual,
         visual: true,
         defeated: false,
     };
@@ -1520,6 +1521,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         magic_object: kept_magic_object,
         blow: 0,
         damage: 0,
+        phase: pal_core::battle::MagicEventPhase::Visual,
         visual: true,
         defeated: false,
     };

@@ -12,15 +12,22 @@ pub(super) struct DebugState {
     pub(super) show_collision: bool,
     pub(super) show_objects: bool,
     pub(super) show_script: bool,
+    pub(super) show_battle: bool,
 }
 
 impl DebugState {
     pub(super) fn title(self) -> &'static str {
-        match (self.show_collision, self.show_objects, self.show_script) {
-            (false, false, false) => "Rust-PAL",
-            (true, false, false) => "Rust-PAL [Collision]",
-            (false, true, false) => "Rust-PAL [Objects]",
-            (false, false, true) => "Rust-PAL [Script]",
+        match (
+            self.show_collision,
+            self.show_objects,
+            self.show_script,
+            self.show_battle,
+        ) {
+            (false, false, false, false) => "Rust-PAL",
+            (true, false, false, false) => "Rust-PAL [Collision]",
+            (false, true, false, false) => "Rust-PAL [Objects]",
+            (false, false, true, false) => "Rust-PAL [Script]",
+            (false, false, false, true) => "Rust-PAL [战斗调试]",
             _ => "Rust-PAL [Debug]",
         }
     }
@@ -324,5 +331,17 @@ mod tests {
             TimingMode::Battle
         );
         assert_eq!(TimingState::default().mode(), TimingMode::Exploration);
+    }
+
+    #[test]
+    fn battle_debug_has_a_distinct_window_title() {
+        assert_eq!(
+            DebugState {
+                show_battle: true,
+                ..DebugState::default()
+            }
+            .title(),
+            "Rust-PAL [战斗调试]"
+        );
     }
 }

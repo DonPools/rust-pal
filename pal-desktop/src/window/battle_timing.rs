@@ -1,4 +1,4 @@
-use pal_core::battle::{BattleEvent, BattleMagic, BattleMagicVisual, BattleState};
+use pal_core::battle::{BattleEvent, BattleMagic, BattleMagicVisual, BattleState, MagicEventPhase};
 use pal_core::game::BATTLE_FRAME_MS;
 
 const OFFENSIVE_FEEDBACK_FRAMES: usize = 9;
@@ -11,6 +11,37 @@ const SUMMON_BRIGHTEN_FRAMES: usize = 10;
 const COOPERATIVE_PRE_MAGIC_FRAMES: usize = 20;
 pub(super) const BATTLE_FADE_MS: u64 = 12 * 6 * 16;
 pub(super) const BATTLE_FADE_TICKS: u16 = 29;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EnemyEscapeTimeline {
+    movement_steps: u32,
+    pub(super) total_ticks: u16,
+}
+
+/// Classic moves every enemy five pixels left every 10 ms, then waits 500 ms.
+pub(super) fn enemy_escape_timeline(rightmost_edge: i32) -> EnemyEscapeTimeline {
+    let movement_steps = u32::try_from(rightmost_edge.max(0))
+        .unwrap_or(0)
+        .div_ceil(5)
+        .max(1);
+    let duration_ms = u64::from(movement_steps)
+        .saturating_mul(10)
+        .saturating_add(500);
+    EnemyEscapeTimeline {
+        movement_steps,
+        total_ticks: battle_milliseconds_to_ticks(duration_ms),
+    }
+}
+
+pub(super) fn enemy_escape_offset(timeline: EnemyEscapeTimeline, ticks_remaining: u16) -> i32 {
+    let elapsed_ticks = timeline
+        .total_ticks
+        .saturating_sub(ticks_remaining.min(timeline.total_ticks));
+    let elapsed_steps = u32::from(elapsed_ticks)
+        .saturating_mul(u32::try_from(BATTLE_FRAME_MS / 10).unwrap_or(0))
+        .min(timeline.movement_steps);
+    -i32::try_from(elapsed_steps.saturating_mul(5)).unwrap_or(i32::MAX)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MagicEventTimeline {
@@ -107,9 +138,10 @@ pub(super) fn battle_magic_for_event(
 
 pub(super) fn event_has_full_magic_visual(event: BattleEvent) -> bool {
     match event {
-        BattleEvent::PlayerMagic { visual, .. }
-        | BattleEvent::PlayerCooperativeMagic { visual, .. }
-        | BattleEvent::EnemyMagic { visual, .. }
+        BattleEvent::PlayerMagic { phase, .. } | BattleEvent::EnemyMagic { phase, .. } => {
+            phase == MagicEventPhase::Visual
+        }
+        BattleEvent::PlayerCooperativeMagic { visual, .. }
         | BattleEvent::SimulatedMagic { visual, .. } => visual,
         BattleEvent::PlayerDefensiveMagic { .. } => true,
         _ => false,
@@ -129,7 +161,20 @@ pub(super) fn magic_event_timeline(
         0
     };
     if !event_has_full_magic_visual(event) {
-        let tail_ticks = original_frames_to_ticks(1);
+        let feedback_frames = match event {
+            BattleEvent::PlayerMagic {
+                phase: MagicEventPhase::Feedback,
+                visual: true,
+                ..
+            } => OFFENSIVE_FEEDBACK_FRAMES,
+            BattleEvent::EnemyMagic {
+                phase: MagicEventPhase::Feedback,
+                visual: true,
+                ..
+            } => ENEMY_MAGIC_FEEDBACK_FRAMES,
+            _ => 1,
+        };
+        let tail_ticks = original_frames_to_ticks(feedback_frames);
         let total_ticks = tail_ticks.saturating_add(death_fade_ticks).max(1);
         return MagicEventTimeline {
             pre_ticks: 0,
@@ -147,12 +192,20 @@ pub(super) fn magic_event_timeline(
     let is_defensive = matches!(event, BattleEvent::PlayerDefensiveMagic { .. });
     let is_summon = magic.magic_type == 9 && magic.summon_effect.is_some();
     let pre_frames = match event {
-        BattleEvent::PlayerMagic { .. } if is_summon => SUMMON_PRE_MAGIC_FRAMES,
-        BattleEvent::PlayerMagic { .. } | BattleEvent::PlayerDefensiveMagic { .. } => {
-            NORMAL_PRE_MAGIC_FRAMES
+        BattleEvent::PlayerMagic {
+            phase: MagicEventPhase::Visual,
+            ..
+        } if is_summon => SUMMON_PRE_MAGIC_FRAMES,
+        BattleEvent::PlayerMagic {
+            phase: MagicEventPhase::Visual,
+            ..
         }
+        | BattleEvent::PlayerDefensiveMagic { .. } => NORMAL_PRE_MAGIC_FRAMES,
         BattleEvent::PlayerCooperativeMagic { .. } => COOPERATIVE_PRE_MAGIC_FRAMES,
-        BattleEvent::EnemyMagic { .. } => enemy_pre_frames,
+        BattleEvent::EnemyMagic {
+            phase: MagicEventPhase::Visual,
+            ..
+        } => enemy_pre_frames,
         _ => 0,
     };
     let pre_ticks = original_frames_to_ticks(pre_frames);
@@ -178,6 +231,14 @@ pub(super) fn magic_event_timeline(
     };
     let effect_ticks = timed_frames_to_ticks(effect_frames, effect_visual.speed);
     let tail_frames = match event {
+        BattleEvent::PlayerMagic {
+            phase: MagicEventPhase::Visual,
+            ..
+        }
+        | BattleEvent::EnemyMagic {
+            phase: MagicEventPhase::Visual,
+            ..
+        } => 0,
         BattleEvent::PlayerDefensiveMagic { .. } => DEFENSIVE_COLOR_SHIFT_FRAMES,
         BattleEvent::PlayerCooperativeMagic { .. } => COOPERATIVE_FEEDBACK_FRAMES,
         BattleEvent::EnemyMagic { .. } => ENEMY_MAGIC_FEEDBACK_FRAMES,
@@ -422,6 +483,17 @@ mod tests {
         assert_eq!(offensive_effect_frame_at(10, 10, magic), 8);
         assert_eq!(offensive_effect_frame_at(13, 10, magic), 2);
         assert_eq!(kept_effect_frame(10, magic), 9);
+    }
+
+    #[test]
+    fn enemy_escape_moves_at_ten_millisecond_steps_then_waits_half_a_second() {
+        let timeline = enemy_escape_timeline(305);
+        assert_eq!(timeline.movement_steps, 61);
+        assert_eq!(timeline.total_ticks, 28);
+        assert_eq!(enemy_escape_offset(timeline, 28), 0);
+        assert_eq!(enemy_escape_offset(timeline, 27), -20);
+        assert_eq!(enemy_escape_offset(timeline, 12), -305);
+        assert_eq!(enemy_escape_offset(timeline, 1), -305);
     }
 
     #[test]

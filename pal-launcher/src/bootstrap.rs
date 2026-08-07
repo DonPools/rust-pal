@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use pal_assets::battle::{BattleData, BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
@@ -145,7 +146,11 @@ pub(super) fn bootstrap(data_dir: PathBuf, sound_font_path: Option<&Path>) -> Bo
         .expect("failed to create current scene event objects");
     let global_scene_objects = create_global_scene_objects(&scene_data, &role_sprites)
         .expect("failed to create global event objects");
+    let random_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as u32);
     let game = GameState::new(map, player, SCREEN_WIDTH, SCREEN_HEIGHT)
+        .with_random_seed(random_seed)
         .with_scene_number(scene.number as u16)
         .with_scene_objects(scene_objects)
         .with_global_objects(global_scene_objects)

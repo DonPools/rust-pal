@@ -1,5 +1,9 @@
-use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleStatus, BattleTarget};
-use pal_core::game::{GameInput, GameState};
+use pal_core::battle::{
+    BattleEvent, BattlePhase, BattleResult, BattleStatus, BattleTarget, MagicEventPhase,
+    HIDDEN_EXP_ATTACK, HIDDEN_EXP_DEFENSE, HIDDEN_EXP_DEXTERITY, HIDDEN_EXP_FLEE,
+    HIDDEN_EXP_HEALTH, HIDDEN_EXP_MAGIC, HIDDEN_EXP_MAGIC_POWER,
+};
+use pal_core::game::{BattlePlayerSettlement, GameInput, GameState};
 use pal_core::role::Direction;
 use pal_core::script::ScriptRuntime;
 
@@ -8,16 +12,20 @@ use super::battle_render::{
 };
 use super::battle_timing::{
     battle_magic_for_event, battle_milliseconds_to_ticks, effect_sound_elapsed_tick,
-    enemy_attack_frames, enemy_magic_pre_frames, event_has_full_magic_visual, magic_event_timeline,
-    offensive_effect_frame_count, original_frames_to_ticks, player_attack_ticks,
-    MagicEventTimeline, BATTLE_FADE_TICKS,
+    enemy_attack_frames, enemy_escape_timeline, enemy_magic_pre_frames,
+    event_has_full_magic_visual, magic_event_timeline, offensive_effect_frame_count,
+    original_frames_to_ticks, player_attack_ticks, MagicEventTimeline, BATTLE_FADE_TICKS,
 };
 use super::menu_state::{update_wrapping_selection, InventoryMenu, InventoryMode};
-use super::session::DesktopSession;
+use super::session::{BattleDebugHit, BattleDebugItemStart, BattleDebugTarget, DesktopSession};
 
 pub(super) const ACTION_EVENT_TICKS: u16 = 8;
-pub(super) const PLAYER_MAGIC_ANIMATION_EVENT_TICKS: u16 = 22;
-const ROUND_EVENT_TICKS: u16 = 2;
+pub(super) const PLAYER_MAGIC_ANIMATION_EVENT_TICKS: u16 = 51;
+pub(super) const FLEE_SUCCESS_EVENT_TICKS: u16 = 17;
+pub(super) const FLEE_FAILURE_EVENT_TICKS: u16 = 11;
+pub(super) const ENEMY_DIVIDE_EVENT_TICKS: u16 = 11;
+pub(super) const ENEMY_TRANSFORM_EVENT_TICKS: u16 = 35;
+const ROUND_EVENT_TICKS: u16 = 8;
 const FINISHED_EVENT_TICKS: u16 = 4;
 const SETTLEMENT_MS: u64 = 3_000;
 const BOSS_SETTLEMENT_MS: u64 = 5_500;
@@ -103,8 +111,8 @@ pub(super) fn update_battle(
                 Some((player.role_id, role))
             })
             .collect::<Vec<_>>();
-        game.prepare_battle_victory()?;
-        let pages = settlement_pages(game, &before);
+        let settlement = game.prepare_battle_victory_settlement()?;
+        let pages = settlement_pages(game, &before, &settlement.players);
         if !pages.is_empty() {
             services.battle.post_battle = Some(PostBattlePresentation {
                 battle,
@@ -252,45 +260,70 @@ pub(super) fn advance_post_battle(
     game.begin_battle_end_scripts()
 }
 
-fn settlement_pages(
-    game: &GameState,
+fn settlement_pages<M: pal_core::game::CollisionMap>(
+    game: &GameState<M>,
     before: &[(u16, pal_assets::player_roles::PlayerRole)],
+    settlements: &[BattlePlayerSettlement],
 ) -> Vec<BattleSettlementPage> {
     let mut pages = Vec::new();
     for (role_id, previous) in before {
+        let Some(settlement) = settlements
+            .iter()
+            .find(|settlement| settlement.role_id == *role_id)
+        else {
+            continue;
+        };
         let Some(current) = game.effective_player_role(*role_id) else {
             continue;
         };
-        if current.level > previous.level {
+        if settlement.levels_gained != 0 {
+            let mut after_primary = current.clone();
+            after_primary.max_hp = after_primary
+                .max_hp
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_HEALTH]);
+            after_primary.max_mp = after_primary
+                .max_mp
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_MAGIC]);
+            after_primary.attack_strength = after_primary
+                .attack_strength
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_ATTACK]);
+            after_primary.magic_strength = after_primary
+                .magic_strength
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_MAGIC_POWER]);
+            after_primary.defense = after_primary
+                .defense
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_DEFENSE]);
+            after_primary.dexterity = after_primary
+                .dexterity
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_DEXTERITY]);
+            after_primary.flee_rate = after_primary
+                .flee_rate
+                .wrapping_sub(settlement.hidden_growth[HIDDEN_EXP_FLEE]);
+            after_primary.hp = after_primary.max_hp;
+            after_primary.mp = after_primary.max_mp;
             pages.push(BattleSettlementPage::LevelUp {
                 before: Box::new(previous.clone()),
-                after: Box::new(current.clone()),
+                after: Box::new(after_primary),
             });
-        } else {
-            for (label, old, new) in [
-                (49usize, previous.max_hp, current.max_hp),
-                (50, previous.max_mp, current.max_mp),
-                (51, previous.attack_strength, current.attack_strength),
-                (52, previous.magic_strength, current.magic_strength),
-                (53, previous.defense, current.defense),
-                (54, previous.dexterity, current.dexterity),
-                (55, previous.flee_rate, current.flee_rate),
-            ] {
-                if new > old {
-                    pages.push(BattleSettlementPage::AttributeGrowth {
-                        role_id: *role_id,
-                        label,
-                        amount: new - old,
-                    });
-                }
+        }
+        for (label, amount) in [
+            (49usize, settlement.hidden_growth[HIDDEN_EXP_HEALTH]),
+            (50, settlement.hidden_growth[HIDDEN_EXP_MAGIC]),
+            (51, settlement.hidden_growth[HIDDEN_EXP_ATTACK]),
+            (52, settlement.hidden_growth[HIDDEN_EXP_MAGIC_POWER]),
+            (53, settlement.hidden_growth[HIDDEN_EXP_DEFENSE]),
+            (54, settlement.hidden_growth[HIDDEN_EXP_DEXTERITY]),
+            (55, settlement.hidden_growth[HIDDEN_EXP_FLEE]),
+        ] {
+            if amount != 0 {
+                pages.push(BattleSettlementPage::AttributeGrowth {
+                    role_id: *role_id,
+                    label,
+                    amount,
+                });
             }
         }
-        for magic_object in current
-            .magic
-            .iter()
-            .copied()
-            .filter(|magic| *magic != 0 && !previous.magic.contains(magic))
-        {
+        for &magic_object in &settlement.learned_magics {
             pages.push(BattleSettlementPage::LearnedMagic {
                 role_id: *role_id,
                 magic_object,
@@ -572,6 +605,11 @@ pub(super) fn queue_battle_events(
     services: &mut DesktopSession,
     events: impl IntoIterator<Item = BattleEvent>,
 ) {
+    let events = events.into_iter().collect::<Vec<_>>();
+    if let Some(hit) = latest_battle_debug_hit(game, &events) {
+        services.battle.battle_debug_hit = Some(hit);
+    }
+    update_battle_item_debug(game, services, &events);
     let was_empty = services.battle.battle_events.is_empty();
     services.battle.battle_events.extend(events);
     if !was_empty {
@@ -585,6 +623,282 @@ pub(super) fn queue_battle_events(
     services.battle.battle_feedback_sound_played = false;
     play_battle_event_sounds(game, services, event);
     play_due_magic_sounds(game, services);
+}
+
+fn update_battle_item_debug(
+    game: &GameState,
+    services: &mut DesktopSession,
+    events: &[BattleEvent],
+) {
+    let Some(battle) = game.battle() else {
+        return;
+    };
+    for &event in events {
+        match event {
+            BattleEvent::PlayerThrowItem {
+                player,
+                item_object,
+                target,
+            } => {
+                services.battle.battle_debug_item_start = Some(BattleDebugItemStart {
+                    player,
+                    item_object,
+                    target,
+                    enemy_hp: battle.enemies.iter().map(|enemy| enemy.hp).collect(),
+                });
+            }
+            BattleEvent::PlayerItemFeedback {
+                player,
+                item_object,
+                ..
+            } => {
+                let Some(start) = services.battle.battle_debug_item_start.take() else {
+                    continue;
+                };
+                if start.player != player || start.item_object != item_object {
+                    services.battle.battle_debug_item_start = Some(start);
+                    continue;
+                }
+                let target = start.target.or_else(|| {
+                    battle
+                        .enemies
+                        .iter()
+                        .zip(&start.enemy_hp)
+                        .position(|(enemy, &before)| enemy.hp != before)
+                });
+                let Some(target_index) = target else {
+                    continue;
+                };
+                let Some((&hp_before, enemy)) = start
+                    .enemy_hp
+                    .get(target_index)
+                    .zip(battle.enemies.get(target_index))
+                else {
+                    continue;
+                };
+                services.battle.battle_debug_hit = Some(BattleDebugHit {
+                    action: "ITEM.TOTAL",
+                    source: player,
+                    object_id: Some(start.item_object),
+                    target: BattleDebugTarget::Enemy,
+                    target_index,
+                    damage: item_total_word_damage(hp_before, enemy.hp),
+                    hp_before: Some(hp_before),
+                    hp_after: enemy.hp,
+                    defeated: !enemy.is_alive(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn latest_battle_debug_hit(game: &GameState, events: &[BattleEvent]) -> Option<BattleDebugHit> {
+    let battle = game.battle()?;
+    let mut enemy_hp = battle
+        .enemies
+        .iter()
+        .map(|enemy| enemy.hp)
+        .collect::<Vec<_>>();
+    let mut player_hp = battle
+        .players
+        .iter()
+        .map(|player| player.hp)
+        .collect::<Vec<_>>();
+    let mut latest = None;
+
+    // Core resolves a whole action before desktop feedback starts. Walk the resulting events
+    // backwards so multi-target and double-hit actions retain their event-local HP delta. A
+    // later direct script mutation can still make this inferred value differ from live raw HP.
+    for &event in events.iter().rev() {
+        let (action, source, object_id, target, target_index, damage, defeated) = match event {
+            BattleEvent::PlayerAttack {
+                player,
+                enemy,
+                damage,
+                defeated,
+                ..
+            } => (
+                "P.ATTACK",
+                player,
+                None,
+                BattleDebugTarget::Enemy,
+                enemy,
+                damage,
+                defeated,
+            ),
+            BattleEvent::PlayerMagic {
+                player,
+                enemy,
+                magic_object,
+                damage,
+                phase: MagicEventPhase::Feedback,
+                defeated,
+                ..
+            } => (
+                "P.MAGIC",
+                player,
+                Some(magic_object),
+                BattleDebugTarget::Enemy,
+                enemy,
+                damage,
+                defeated,
+            ),
+            BattleEvent::PlayerCooperativeMagic {
+                player,
+                enemy,
+                magic_object,
+                damage,
+                defeated,
+                ..
+            } => (
+                "COOP",
+                player,
+                Some(magic_object),
+                BattleDebugTarget::Enemy,
+                enemy,
+                damage,
+                defeated,
+            ),
+            BattleEvent::SimulatedMagic {
+                enemy,
+                magic_object,
+                damage,
+                defeated,
+                ..
+            } => (
+                "SIM.MAGIC",
+                0,
+                Some(magic_object),
+                BattleDebugTarget::Enemy,
+                enemy,
+                damage,
+                defeated,
+            ),
+            BattleEvent::EnemyConfusedAttack {
+                enemy,
+                target,
+                damage,
+                defeated,
+            } => (
+                "E.CONF",
+                enemy,
+                None,
+                BattleDebugTarget::Enemy,
+                target,
+                damage,
+                defeated,
+            ),
+            BattleEvent::EnemyAttack {
+                enemy,
+                player,
+                damage,
+                defeated,
+                ..
+            } => (
+                "E.ATTACK",
+                enemy,
+                None,
+                BattleDebugTarget::Player,
+                player,
+                damage,
+                defeated,
+            ),
+            BattleEvent::EnemyMagic {
+                enemy,
+                player,
+                magic_object,
+                damage,
+                phase: MagicEventPhase::Feedback,
+                defeated,
+                ..
+            } => (
+                "E.MAGIC",
+                enemy,
+                Some(magic_object),
+                BattleDebugTarget::Player,
+                player,
+                damage,
+                defeated,
+            ),
+            BattleEvent::PlayerConfusedAttack {
+                player,
+                target,
+                damage,
+                defeated,
+            } => (
+                "P.CONF",
+                player,
+                None,
+                BattleDebugTarget::Player,
+                target,
+                damage,
+                defeated,
+            ),
+            BattleEvent::PlayerMagic {
+                phase: MagicEventPhase::Visual,
+                ..
+            }
+            | BattleEvent::EnemyMagic {
+                phase: MagicEventPhase::Visual,
+                ..
+            }
+            | BattleEvent::PlayerUseItem { .. }
+            | BattleEvent::PlayerThrowItem { .. }
+            | BattleEvent::PlayerItemFeedback { .. }
+            | BattleEvent::PlayerFlee { .. }
+            | BattleEvent::PlayerDefend { .. }
+            | BattleEvent::PlayerDefensiveMagic { .. }
+            | BattleEvent::PlayerMagicAnimation { .. }
+            | BattleEvent::PlayerFriendDeath { .. }
+            | BattleEvent::PlayerDying { .. }
+            | BattleEvent::EnemyDivide { .. }
+            | BattleEvent::EnemySummon { .. }
+            | BattleEvent::EnemyTransform { .. }
+            | BattleEvent::EnemyEscape
+            | BattleEvent::RoundCompleted
+            | BattleEvent::Finished(_) => continue,
+        };
+
+        let (hp_before, hp_after) = match target {
+            BattleDebugTarget::Enemy => {
+                let hp_after = *enemy_hp.get(target_index)?;
+                let hp_before = enemy_hp_before_damage(hp_after, damage);
+                enemy_hp[target_index] = hp_before;
+                (Some(hp_before), hp_after)
+            }
+            BattleDebugTarget::Player => {
+                let hp_after = *player_hp.get(target_index)?;
+                let hp_before = hp_after.checked_add(damage);
+                if let Some(hp_before) = hp_before {
+                    player_hp[target_index] = hp_before;
+                }
+                (hp_before, hp_after)
+            }
+        };
+        if latest.is_none() {
+            latest = Some(BattleDebugHit {
+                action,
+                source,
+                object_id,
+                target,
+                target_index,
+                damage,
+                hp_before,
+                hp_after,
+                defeated,
+            });
+        }
+    }
+    latest
+}
+
+fn enemy_hp_before_damage(hp_after: u16, damage: u16) -> u16 {
+    hp_after.wrapping_add(damage)
+}
+
+fn item_total_word_damage(hp_before: u16, hp_after: u16) -> u16 {
+    hp_before.wrapping_sub(hp_after)
 }
 
 fn update_battle_item_menu(
@@ -735,16 +1049,26 @@ fn battle_event_duration(event: BattleEvent) -> u16 {
         | BattleEvent::EnemyConfusedAttack { .. }
         | BattleEvent::PlayerConfusedAttack { .. }
         | BattleEvent::SimulatedMagic { .. }
-        | BattleEvent::PlayerFlee { .. }
-        | BattleEvent::PlayerDefend { .. }
         | BattleEvent::PlayerDefensiveMagic { .. }
         | BattleEvent::PlayerCooperativeMagic { .. } => ACTION_EVENT_TICKS,
-        BattleEvent::PlayerUseItem { .. } => original_frames_to_ticks(25),
-        BattleEvent::PlayerThrowItem { .. } => original_frames_to_ticks(24),
+        BattleEvent::PlayerFlee {
+            succeeded: true, ..
+        } => FLEE_SUCCESS_EVENT_TICKS,
+        BattleEvent::PlayerFlee {
+            succeeded: false, ..
+        } => FLEE_FAILURE_EVENT_TICKS,
+        BattleEvent::PlayerDefend { .. } => 1,
+        BattleEvent::PlayerUseItem { .. } => original_frames_to_ticks(17),
+        BattleEvent::PlayerThrowItem { .. } => original_frames_to_ticks(16),
+        BattleEvent::PlayerItemFeedback { .. } => original_frames_to_ticks(8),
         BattleEvent::PlayerMagicAnimation { .. } => PLAYER_MAGIC_ANIMATION_EVENT_TICKS,
         BattleEvent::PlayerFriendDeath { .. } | BattleEvent::PlayerDying { .. } => {
             original_frames_to_ticks(10)
         }
+        BattleEvent::EnemyDivide { .. } => ENEMY_DIVIDE_EVENT_TICKS,
+        BattleEvent::EnemySummon { .. } => BATTLE_FADE_TICKS.saturating_mul(2).saturating_add(2),
+        BattleEvent::EnemyTransform { .. } => ENEMY_TRANSFORM_EVENT_TICKS,
+        BattleEvent::EnemyEscape => enemy_escape_timeline(0).total_ticks,
         BattleEvent::RoundCompleted => ROUND_EVENT_TICKS,
         BattleEvent::Finished(_) => FINISHED_EVENT_TICKS,
     }
@@ -769,6 +1093,44 @@ fn dynamic_battle_event_duration(
         BattleEvent::EnemyConfusedAttack { defeated, .. } => {
             original_frames_to_ticks(enemy_attack_frames(battle, event))
                 .saturating_add(if defeated { BATTLE_FADE_TICKS } else { 0 })
+        }
+        BattleEvent::EnemySummon {
+            caster,
+            summoned_mask,
+        } => battle
+            .enemies
+            .get(caster)
+            .map(|enemy| {
+                let pre_ticks = original_frames_to_ticks(
+                    usize::from(enemy.magic_frames)
+                        .saturating_mul(usize::from(enemy.action_wait_frames.max(1))),
+                );
+                if summoned_mask == 0 {
+                    pre_ticks.max(1)
+                } else {
+                    pre_ticks
+                        .saturating_add(BATTLE_FADE_TICKS.saturating_mul(2))
+                        .saturating_add(2)
+                }
+            })
+            .unwrap_or_else(|| battle_event_duration(event)),
+        BattleEvent::EnemyEscape => {
+            let rightmost_edge = battle
+                .enemies
+                .iter()
+                .filter(|enemy| enemy.is_alive())
+                .filter_map(|enemy| {
+                    services
+                        .battle
+                        .enemy_battle_frame_widths
+                        .get(usize::from(enemy.enemy_id))
+                        .copied()
+                        .flatten()
+                        .map(|width| i32::from(enemy.position.x) + i32::from(width))
+                })
+                .max()
+                .unwrap_or(0);
+            enemy_escape_timeline(rightmost_edge).total_ticks
         }
         BattleEvent::PlayerConfusedAttack { .. } => original_frames_to_ticks(21),
         _ => battle_event_duration(event),
@@ -843,6 +1205,53 @@ fn play_due_magic_sounds(game: &GameState, services: &mut DesktopSession) {
     let Some(event) = services.battle.battle_events.front().copied() else {
         return;
     };
+    match event {
+        BattleEvent::EnemySummon {
+            caster,
+            summoned_mask,
+        } => {
+            let pre_ticks = game
+                .battle()
+                .and_then(|battle| battle.enemies.get(caster))
+                .map_or(0, |enemy| {
+                    original_frames_to_ticks(
+                        usize::from(enemy.magic_frames)
+                            .saturating_mul(usize::from(enemy.action_wait_frames.max(1))),
+                    )
+                });
+            let total_ticks = if summoned_mask == 0 {
+                pre_ticks.max(1)
+            } else {
+                pre_ticks
+                    .saturating_add(BATTLE_FADE_TICKS.saturating_mul(2))
+                    .saturating_add(2)
+            };
+            let elapsed =
+                total_ticks.saturating_sub(services.battle.battle_event_ticks.min(total_ticks));
+            if summoned_mask != 0
+                && elapsed >= pre_ticks
+                && !services.battle.battle_feedback_sound_played
+            {
+                services.audio.sound_effects.play(212);
+                services.battle.battle_feedback_sound_played = true;
+            }
+            return;
+        }
+        BattleEvent::EnemyTransform { .. } => {
+            let elapsed = ENEMY_TRANSFORM_EVENT_TICKS.saturating_sub(
+                services
+                    .battle
+                    .battle_event_ticks
+                    .min(ENEMY_TRANSFORM_EVENT_TICKS),
+            );
+            if elapsed >= 6 && !services.battle.battle_feedback_sound_played {
+                services.audio.sound_effects.play(47);
+                services.battle.battle_feedback_sound_played = true;
+            }
+            return;
+        }
+        _ => {}
+    }
     let Some((magic, timeline)) = session_magic_timing(game, services, event) else {
         return;
     };
@@ -912,7 +1321,10 @@ fn magic_feedback_sound(game: &GameState, event: BattleEvent) -> Option<u16> {
     let battle = game.battle()?;
     match event {
         BattleEvent::PlayerMagic {
-            enemy, defeated, ..
+            enemy,
+            defeated,
+            phase: MagicEventPhase::Feedback,
+            ..
         }
         | BattleEvent::PlayerCooperativeMagic {
             enemy, defeated, ..
@@ -929,21 +1341,34 @@ fn magic_feedback_sound(game: &GameState, event: BattleEvent) -> Option<u16> {
             .ok()
         }
         BattleEvent::EnemyMagic {
-            player, defeated, ..
+            player,
+            defeated,
+            phase: MagicEventPhase::Feedback,
+            ..
         } => defeated.then(|| battle.players.get(player).map(|player| player.death_sound))?,
         BattleEvent::PlayerDefensiveMagic { .. } => None,
+        BattleEvent::EnemyDivide { .. }
+        | BattleEvent::EnemySummon { .. }
+        | BattleEvent::EnemyTransform { .. }
+        | BattleEvent::EnemyEscape => None,
         _ => None,
     }
 }
 
+fn victory_music_track(event: BattleEvent, experience: u32, is_boss: bool) -> Option<u16> {
+    (event == BattleEvent::Finished(BattleResult::Won) && experience > 0).then_some(if is_boss {
+        2
+    } else {
+        3
+    })
+}
+
 fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, event: BattleEvent) {
-    if event == BattleEvent::Finished(BattleResult::Won) {
-        if let Some(battle) = game.battle() {
-            let _ = services
-                .audio
-                .music
-                .play(if battle.is_boss { 2 } else { 3 }, false, 0);
-        }
+    if let Some(track) = game
+        .battle()
+        .and_then(|battle| victory_music_track(event, battle.rewards().experience, battle.is_boss))
+    {
+        let _ = services.audio.music.play(track, false, 0);
     }
     let sounds = match event {
         BattleEvent::PlayerAttack {
@@ -970,9 +1395,13 @@ fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, eve
                 .ok(),
             ])
         }),
-        BattleEvent::PlayerMagic { player, visual, .. } => game.battle().and_then(|battle| {
+        BattleEvent::PlayerMagic {
+            player,
+            phase: MagicEventPhase::Visual,
+            ..
+        } => game.battle().and_then(|battle| {
             let player = battle.players.get(player)?;
-            Some(vec![visual.then_some(player.magic_sound), None, None])
+            Some(vec![Some(player.magic_sound), None, None])
         }),
         BattleEvent::EnemyAttack {
             enemy,
@@ -994,16 +1423,22 @@ fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, eve
                 None,
             ])
         }),
-        BattleEvent::EnemyMagic { enemy, visual, .. } => game.battle().and_then(|battle| {
+        BattleEvent::EnemyMagic {
+            enemy,
+            phase: MagicEventPhase::Visual,
+            ..
+        } => game.battle().and_then(|battle| {
             let enemy = battle.enemies.get(enemy)?;
-            Some(vec![
-                visual
-                    .then(|| u16::try_from(enemy.magic_sound).ok())
-                    .flatten(),
-                None,
-                None,
-            ])
+            Some(vec![u16::try_from(enemy.magic_sound).ok(), None, None])
         }),
+        BattleEvent::PlayerMagic {
+            phase: MagicEventPhase::Feedback,
+            ..
+        }
+        | BattleEvent::EnemyMagic {
+            phase: MagicEventPhase::Feedback,
+            ..
+        } => None,
         BattleEvent::EnemyConfusedAttack {
             enemy,
             target,
@@ -1048,6 +1483,7 @@ fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, eve
             Some(vec![Some(player.magic_sound), None, None])
         }),
         BattleEvent::PlayerDefend { .. } => None,
+        BattleEvent::PlayerItemFeedback { .. } => None,
         BattleEvent::PlayerCooperativeMagic { player, visual, .. } => {
             game.battle().and_then(|battle| {
                 let player = battle.players.get(player)?;
@@ -1066,6 +1502,10 @@ fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, eve
             Some(vec![Some(player.dying_sound), None, None])
         }),
         BattleEvent::PlayerFriendDeath { .. } => None,
+        BattleEvent::EnemyDivide { .. }
+        | BattleEvent::EnemySummon { .. }
+        | BattleEvent::EnemyTransform { .. } => None,
+        BattleEvent::EnemyEscape => Some(vec![Some(45), None, None]),
         BattleEvent::PlayerFlee {
             succeeded: true, ..
         } => Some(vec![Some(45), None, None]),
@@ -1310,6 +1750,19 @@ fn select_enemy(living: &[usize], current: usize, direction: Option<Direction>) 
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy)]
+    struct TestMap;
+
+    impl pal_core::game::CollisionMap for TestMap {
+        fn is_world_blocked(&self, _world_x: i32, _world_y: i32) -> bool {
+            false
+        }
+
+        fn world_size(&self) -> (i32, i32) {
+            (640, 400)
+        }
+    }
+
     #[test]
     fn enemy_selection_wraps_and_skips_defeated_slots() {
         let living = [1, 3, 4];
@@ -1450,6 +1903,100 @@ mod tests {
     }
 
     #[test]
+    fn victory_music_requires_positive_experience() {
+        let won = BattleEvent::Finished(BattleResult::Won);
+        assert_eq!(victory_music_track(won, 1, false), Some(3));
+        assert_eq!(victory_music_track(won, 1, true), Some(2));
+        assert_eq!(victory_music_track(won, 0, false), None);
+        assert_eq!(
+            victory_music_track(BattleEvent::Finished(BattleResult::Lost), 1, false),
+            None
+        );
+    }
+
+    #[test]
+    fn level_up_pages_are_followed_by_hidden_growth_and_learned_magic() {
+        use pal_assets::player_roles::{PlayerRoles, PLAYER_ROLE_COUNT};
+        use pal_core::party::Party;
+        use pal_core::role::Role;
+
+        fn roles(level: u16, max_hp: u16, attack: u16, magic: u16) -> PlayerRoles {
+            let mut data = vec![0; 900];
+            for (array, value) in [
+                (6, level),
+                (7, max_hp),
+                (9, max_hp),
+                (17, attack),
+                (32, magic),
+            ] {
+                let offset = array * PLAYER_ROLE_COUNT * 2;
+                data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            PlayerRoles::parse(&data).unwrap()
+        }
+
+        let before_roles = roles(1, 100, 30, 0);
+        let previous = before_roles.role(0).unwrap().clone();
+        let current_roles = roles(2, 112, 35, 9);
+        let party = Party::single(0, &current_roles).unwrap();
+        let game = GameState::new(
+            TestMap,
+            Role {
+                sprite_index: 0,
+                world_x: 0,
+                world_y: 0,
+                direction: Direction::South,
+                anim_frame: 0,
+                frames_per_direction: 4,
+            },
+            320,
+            200,
+        )
+        .with_party(party)
+        .with_player_roles(current_roles);
+        let mut hidden_growth = [0; pal_core::battle::HIDDEN_EXPERIENCE_CATEGORY_COUNT];
+        hidden_growth[HIDDEN_EXP_HEALTH] = 2;
+        hidden_growth[HIDDEN_EXP_ATTACK] = 1;
+        let settlements = [BattlePlayerSettlement {
+            role_id: 0,
+            levels_gained: 1,
+            hidden_growth,
+            learned_magics: vec![9],
+        }];
+
+        let pages = settlement_pages(&game, &[(0, previous)], &settlements);
+        assert_eq!(pages.len(), 4);
+        assert!(matches!(
+            &pages[0],
+            BattleSettlementPage::LevelUp { after, .. }
+                if after.max_hp == 110 && after.attack_strength == 34
+        ));
+        assert!(matches!(
+            pages[1],
+            BattleSettlementPage::AttributeGrowth {
+                label: 49,
+                amount: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            pages[2],
+            BattleSettlementPage::AttributeGrowth {
+                label: 51,
+                amount: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            pages[3],
+            BattleSettlementPage::LearnedMagic {
+                magic_object: 9,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn battle_event_durations_leave_time_for_action_and_settlement_feedback() {
         let action = battle_event_duration(BattleEvent::PlayerAttack {
             player: 0,
@@ -1474,8 +2021,22 @@ mod tests {
             item_object: 1,
             target: Some(0),
         });
-        assert_eq!((action, magic_animation, finished, round), (16, 22, 4, 2));
-        assert_eq!((use_item, throw_item), (25, 24));
+        let divide = battle_event_duration(BattleEvent::EnemyDivide {
+            origin: pal_assets::battle::BattlePosition { x: 0, y: 0 },
+        });
+        let summon = battle_event_duration(BattleEvent::EnemySummon {
+            caster: 0,
+            summoned_mask: 1,
+        });
+        let transform = battle_event_duration(BattleEvent::EnemyTransform {
+            enemy: 0,
+            previous_enemy_id: 0,
+            previous_y_offset: 0,
+        });
+        let escape = battle_event_duration(BattleEvent::EnemyEscape);
+        assert_eq!((action, magic_animation, finished, round), (16, 51, 4, 8));
+        assert_eq!((use_item, throw_item), (17, 16));
+        assert_eq!((divide, summon, transform, escape), (11, 60, 35, 13));
     }
 
     #[test]
@@ -1512,5 +2073,11 @@ mod tests {
             tick_battle_event_queue(&mut events, &mut ticks),
             BattleEventTick::Idle
         );
+    }
+
+    #[test]
+    fn battle_debug_reconstructs_enemy_hp_across_word_underflow() {
+        assert_eq!(enemy_hp_before_damage(59_402, 6_234), 100);
+        assert_eq!(item_total_word_damage(40, 40u16.wrapping_sub(90)), 90);
     }
 }

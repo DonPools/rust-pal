@@ -9,6 +9,7 @@ use pal_core::role::RoleSprites;
 use pal_core::script::{ScriptRuntime, ScriptVisual};
 use winit::keyboard::KeyCode;
 
+use super::battle_debug_overlay::BattleDebugSnapshot;
 use super::battle_update::{advance_post_battle, update_battle};
 use super::clock::FrameClock;
 use super::debug_render::{debug_object_snapshot, focused_debug_object};
@@ -79,6 +80,7 @@ where
             },
             &resources.magic_effect_sprites,
             &resources.player_battle_sprites,
+            &resources.enemy_battle_sprites,
         );
         let opening_intro = OpeningIntro::from_resources(
             &resources.fbp_archive,
@@ -173,6 +175,11 @@ where
                 }
                 KeyCode::F6 => {
                     self.debug.show_script = !self.debug.show_script;
+                    set_title(self.debug.title());
+                    true
+                }
+                KeyCode::F7 => {
+                    self.debug.show_battle = !self.debug.show_battle;
                     set_title(self.debug.title());
                     true
                 }
@@ -890,6 +897,26 @@ where
 
     pub(super) fn show_script_debug(&self) -> bool {
         self.debug.show_script
+    }
+
+    pub(super) fn battle_debug_snapshot(
+        &self,
+        surface_width: u32,
+        surface_height: u32,
+        scale_factor: f64,
+    ) -> Option<BattleDebugSnapshot> {
+        if !self.debug.show_battle {
+            return None;
+        }
+        let battle = self.game.battle()?;
+        Some(BattleDebugSnapshot::capture(
+            battle,
+            self.session.battle.battle_events.front().copied(),
+            self.session.battle.battle_debug_hit,
+            scale_factor,
+            surface_width,
+            surface_height,
+        ))
     }
 
     pub(super) fn minimap_frame(

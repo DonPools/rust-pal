@@ -5,6 +5,7 @@ pub mod battle;
 pub mod game;
 pub mod map;
 pub mod party;
+mod random;
 pub mod role;
 pub mod scene;
 pub mod script;

@@ -226,10 +226,10 @@ where
             } else if context.input.confirm {
                 if let Some(magic) = magics.get(*selected).filter(|magic| magic.enabled) {
                     if magic.apply_to_all {
-                        if let Some(request) =
+                        if let Some((request, success_phase)) =
                             context
                                 .game
-                                .magic_request(role_id, magic.magic_id, None, false)
+                                .initial_magic_request(role_id, magic.magic_id, None)
                         {
                             keep_menu = false;
                             if context.scripts.start(request) {
@@ -237,7 +237,7 @@ where
                                     caster_selected: *caster,
                                     magic_id: magic.magic_id,
                                     target_selected: None,
-                                    success_phase: false,
+                                    success_phase,
                                 });
                                 context.advance_script();
                             }
@@ -273,10 +273,10 @@ where
             } else if context.input.confirm {
                 let caster_role = context.game.party.members()[*caster].role_id;
                 let target_role = context.game.party.members()[*selected].role_id;
-                if let Some(request) =
+                if let Some((request, success_phase)) =
                     context
                         .game
-                        .magic_request(caster_role, *magic_id, Some(target_role), false)
+                        .initial_magic_request(caster_role, *magic_id, Some(target_role))
                 {
                     keep_menu = false;
                     if context.scripts.start(request) {
@@ -284,7 +284,7 @@ where
                             caster_selected: *caster,
                             magic_id: *magic_id,
                             target_selected: Some(*selected),
-                            success_phase: false,
+                            success_phase,
                         });
                         context.advance_script();
                     }

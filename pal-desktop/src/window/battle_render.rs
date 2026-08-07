@@ -1,21 +1,24 @@
-use pal_assets::battle::{BattleEffects, BattleSpriteArchive};
+use pal_assets::battle::{BattleEffects, BattlePosition, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::player_roles::PlayerRole;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::{
     BattleEvent, BattleMagic, BattleMagicVisual, BattlePhase, BattleResult, BattleState,
-    BattleStatus, BattleTarget,
+    BattleStatus, BattleTarget, MagicEventPhase,
 };
 use pal_core::game::BATTLE_FRAME_MS;
 
 use super::battle_timing::{
-    battle_magic_for_event, enemy_attack_frames, enemy_magic_pre_frames,
-    event_has_full_magic_visual, kept_effect_frame, magic_event_timeline,
+    battle_magic_for_event, enemy_attack_frames, enemy_escape_offset, enemy_escape_timeline,
+    enemy_magic_pre_frames, event_has_full_magic_visual, kept_effect_frame, magic_event_timeline,
     offensive_effect_frame_at, original_frames_to_ticks, player_attack_ticks, timed_frame_at,
-    timed_frames_to_ticks, MagicEventTimeline, BATTLE_FADE_TICKS,
+    timed_frames_to_ticks, EnemyEscapeTimeline, MagicEventTimeline, BATTLE_FADE_TICKS,
 };
-use super::battle_update::{ACTION_EVENT_TICKS, PLAYER_MAGIC_ANIMATION_EVENT_TICKS};
+use super::battle_update::{
+    ACTION_EVENT_TICKS, ENEMY_DIVIDE_EVENT_TICKS, ENEMY_TRANSFORM_EVENT_TICKS,
+    FLEE_FAILURE_EVENT_TICKS, FLEE_SUCCESS_EVENT_TICKS, PLAYER_MAGIC_ANIMATION_EVENT_TICKS,
+};
 use super::draw::draw_number;
 use super::menu_render::{
     draw_cursor, draw_single_line_box, draw_slash, draw_ui_box_with_shadow, selected_color,
@@ -166,6 +169,21 @@ pub fn render_battle(
     });
     let feedback_active =
         magic_timing.is_none_or(|(_, timeline, elapsed)| elapsed >= timeline.tail_start());
+    let enemy_escape_timing = matches!(event, Some(BattleEvent::EnemyEscape)).then(|| {
+        let rightmost_edge = battle
+            .enemies
+            .iter()
+            .filter(|enemy| enemy.is_alive())
+            .filter_map(|enemy| {
+                resources
+                    .enemy_sprites
+                    .decode_frame(usize::from(enemy.enemy_id), 0)
+                    .map(|frame| i32::from(enemy.position.x) + i32::from(frame.width))
+            })
+            .max()
+            .unwrap_or(0);
+        enemy_escape_timeline(rightmost_edge)
+    });
 
     if let Some(event) = event {
         render_magic_effect(
@@ -214,13 +232,22 @@ pub fn render_battle(
         let actor_state = event.and_then(|event| {
             enemy_actor_animation_state(battle, event, index, event_ticks, magic_timing)
         });
-        let frame = actor_state.map_or_else(
-            || usize::try_from(battle_ticks / speed).unwrap_or(0) % idle_frames,
+        let transform_sprite =
+            event.and_then(|event| enemy_transform_sprite_state(event, index, event_ticks));
+        let frame = transform_sprite.map_or_else(
+            || {
+                actor_state.map_or_else(
+                    || usize::try_from(battle_ticks / speed).unwrap_or(0) % idle_frames,
+                    |state| state.2,
+                )
+            },
             |state| state.2,
         );
+        let enemy_id = transform_sprite.map_or(enemy.enemy_id, |state| state.0);
+        let y_offset = transform_sprite.map_or(enemy.y_offset, |state| state.1);
         let Some(bitmap) = resources
             .enemy_sprites
-            .decode_frame(usize::from(enemy.enemy_id), frame)
+            .decode_frame(usize::from(enemy_id), frame)
         else {
             continue;
         };
@@ -236,15 +263,22 @@ pub fn render_battle(
         let (feedback_x, feedback_y, exact_flash) = event
             .map(|event| enemy_feedback_state(event, index, event_ticks, magic_timing))
             .unwrap_or((0, 0, false));
+        let (script_x, script_y, script_visibility, script_color_shift) = event
+            .map(|event| {
+                enemy_script_animation_state(battle, event, index, event_ticks, enemy_escape_timing)
+            })
+            .unwrap_or((0, 0, 64, 0));
         let enemy_offset = enemy_blow_offset;
         let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2
             + enemy_offset
             + enemy_action_x
-            + feedback_x;
-        let y = i32::from(enemy.position.y) + i32::from(enemy.y_offset) - i32::from(bitmap.height)
+            + feedback_x
+            + script_x;
+        let y = i32::from(enemy.position.y) + i32::from(y_offset) - i32::from(bitmap.height)
             + enemy_offset / 2
             + enemy_action_y
-            + feedback_y;
+            + feedback_y
+            + script_y;
         let is_hit = matches!(
             event,
             Some(
@@ -290,9 +324,12 @@ pub fn render_battle(
                     },
                 )
             })
-            .unwrap_or(64);
+            .unwrap_or(64)
+            .min(script_visibility);
         if fade_visibility < 64 {
             renderer.blit_rle_dithered(&bitmap, x, y, fade_visibility);
+        } else if script_color_shift != 0 {
+            renderer.blit_rle_color_shift(&bitmap, x, y, script_color_shift);
         } else if event.is_none()
             && targeting_enemy
             && index == selected_enemy
@@ -386,7 +423,7 @@ pub fn render_battle(
             }
             Some(BattleEvent::PlayerMagic {
                 player,
-                visual: true,
+                phase: MagicEventPhase::Visual,
                 ..
             }) if player == index => {
                 if let Some((_, _, elapsed)) = magic_timing {
@@ -410,10 +447,15 @@ pub fn render_battle(
                 player: fleeing,
                 succeeded,
             }) if succeeded || fleeing == index => {
-                let elapsed =
-                    ACTION_EVENT_TICKS.saturating_sub(event_ticks.min(ACTION_EVENT_TICKS));
-                x += i32::from(elapsed) * if index == 2 { 6 } else { 4 };
-                y += i32::from(elapsed)
+                let duration = if succeeded {
+                    FLEE_SUCCESS_EVENT_TICKS
+                } else {
+                    FLEE_FAILURE_EVENT_TICKS
+                };
+                let elapsed = duration.saturating_sub(event_ticks.min(duration));
+                let movement = if succeeded { elapsed } else { elapsed.min(3) };
+                x += i32::from(movement) * if index == 2 { 6 } else { 4 };
+                y += i32::from(movement)
                     * if index == 0 && battle.players.len() > 1 {
                         6
                     } else {
@@ -451,13 +493,18 @@ pub fn render_battle(
             }) if player == index => Some(4),
             Some(BattleEvent::EnemyMagic {
                 player,
+                phase: MagicEventPhase::Feedback,
                 auto_defended: true,
                 ..
             }) if player == index => Some(3),
-            Some(BattleEvent::EnemyMagic { player, .. }) if player == index => Some(4),
+            Some(BattleEvent::EnemyMagic {
+                player,
+                phase: MagicEventPhase::Feedback,
+                ..
+            }) if player == index => Some(4),
             Some(BattleEvent::PlayerMagic {
                 player,
-                visual: true,
+                phase: MagicEventPhase::Visual,
                 ..
             }) if player == index => Some(
                 magic_timing
@@ -520,7 +567,11 @@ pub fn render_battle(
                     auto_defended,
                     ..
                 }) => player == index && !auto_defended,
-                Some(BattleEvent::EnemyMagic { player, .. }) => player == index,
+                Some(BattleEvent::EnemyMagic {
+                    player,
+                    phase: MagicEventPhase::Feedback,
+                    ..
+                }) => player == index,
                 Some(BattleEvent::PlayerConfusedAttack { target, .. }) => target == index,
                 _ => false,
             };
@@ -665,7 +716,7 @@ fn render_shared_battle_effect(
         }
         BattleEvent::PlayerMagic {
             player,
-            visual: true,
+            phase: MagicEventPhase::Visual,
             ..
         }
         | BattleEvent::PlayerDefensiveMagic { player, .. } => {
@@ -1046,7 +1097,7 @@ fn enemy_actor_animation_state(
     match event {
         BattleEvent::EnemyMagic {
             enemy: caster,
-            visual: true,
+            phase: MagicEventPhase::Visual,
             ..
         } if caster == enemy_index => {
             let (magic, timeline, elapsed) = magic_timing?;
@@ -1077,6 +1128,30 @@ fn enemy_actor_animation_state(
                 return Some((x, y, frame));
             }
             Some((x, y, idle.saturating_sub(1)))
+        }
+        BattleEvent::EnemySummon {
+            caster,
+            summoned_mask,
+        } if caster == enemy_index => {
+            let casting_frames = usize::from(enemy.magic_frames);
+            if casting_frames == 0 {
+                return Some((0, 0, idle.saturating_sub(1)));
+            }
+            let pre_ticks = original_frames_to_ticks(casting_frames.saturating_mul(wait));
+            let total = if summoned_mask == 0 {
+                pre_ticks.max(1)
+            } else {
+                pre_ticks
+                    .saturating_add(BATTLE_FADE_TICKS.saturating_mul(2))
+                    .saturating_add(2)
+            };
+            let elapsed = total.saturating_sub(ticks_remaining.min(total));
+            let frame = idle
+                + usize::from(elapsed)
+                    .checked_div(wait)
+                    .unwrap_or(0)
+                    .min(casting_frames - 1);
+            Some((0, 0, frame))
         }
         BattleEvent::EnemyAttack {
             enemy: caster,
@@ -1175,7 +1250,11 @@ fn enemy_feedback_state(
     }
     let targets_enemy = matches!(
         event,
-        BattleEvent::PlayerMagic { enemy, .. }
+        BattleEvent::PlayerMagic {
+            enemy,
+            phase: MagicEventPhase::Feedback,
+            ..
+        }
             | BattleEvent::PlayerCooperativeMagic { enemy, .. }
             | BattleEvent::SimulatedMagic { enemy, .. }
             if enemy == enemy_index
@@ -1251,7 +1330,12 @@ fn player_feedback_offset(
             _ => (0, 0),
         };
     }
-    if let BattleEvent::EnemyMagic { player, .. } = event {
+    if let BattleEvent::EnemyMagic {
+        player,
+        phase: MagicEventPhase::Feedback,
+        ..
+    } = event
+    {
         if player != player_index {
             return (0, 0);
         }
@@ -1333,7 +1417,7 @@ fn player_item_animation_state(
 ) -> (i32, i32, Option<usize>, i16) {
     match event {
         Some(BattleEvent::PlayerUseItem { player, target, .. }) => {
-            let total = original_frames_to_ticks(25);
+            let total = original_frames_to_ticks(17);
             let elapsed = total.saturating_sub(ticks_remaining.min(total));
             let frame = original_frame_for_tick(elapsed);
             let affected = target.is_none_or(|target| target == player_index);
@@ -1350,7 +1434,7 @@ fn player_item_animation_state(
             }
         }
         Some(BattleEvent::PlayerThrowItem { player, .. }) if player == player_index => {
-            let total = original_frames_to_ticks(24);
+            let total = original_frames_to_ticks(16);
             let elapsed = total.saturating_sub(ticks_remaining.min(total));
             let frame = original_frame_for_tick(elapsed);
             let movement_steps = usize::from(frame.saturating_add(1).min(4));
@@ -1379,8 +1463,8 @@ fn render_battle_action_label(
     font: &BitmapFont,
 ) {
     let (object_id, total_frames, visible_range) = match event {
-        BattleEvent::PlayerUseItem { item_object, .. } => (item_object, 25, 4..17),
-        BattleEvent::PlayerThrowItem { item_object, .. } => (item_object, 24, 4..16),
+        BattleEvent::PlayerUseItem { item_object, .. } => (item_object, 17, 4..17),
+        BattleEvent::PlayerThrowItem { item_object, .. } => (item_object, 16, 4..16),
         _ => return,
     };
     let total = original_frames_to_ticks(total_frames);
@@ -1413,9 +1497,23 @@ fn render_battle_event(
     }
     let (x, y, damage) = match event {
         BattleEvent::PlayerAttack { enemy, damage, .. }
-        | BattleEvent::PlayerMagic { enemy, damage, .. }
         | BattleEvent::PlayerCooperativeMagic { enemy, damage, .. }
         | BattleEvent::SimulatedMagic { enemy, damage, .. } => {
+            let Some(enemy) = battle.enemies.get(enemy) else {
+                return;
+            };
+            (
+                i32::from(enemy.position.x) + 12,
+                i32::from(enemy.position.y) - 24,
+                damage,
+            )
+        }
+        BattleEvent::PlayerMagic {
+            enemy,
+            damage,
+            phase: MagicEventPhase::Feedback,
+            ..
+        } => {
             let Some(enemy) = battle.enemies.get(enemy) else {
                 return;
             };
@@ -1430,10 +1528,18 @@ fn render_battle_event(
             ..
         } => return,
         BattleEvent::EnemyAttack { player, damage, .. }
-        | BattleEvent::EnemyMagic { player, damage, .. }
         | BattleEvent::PlayerConfusedAttack {
             target: player,
             damage,
+            ..
+        } => {
+            let (x, y) = player_position(battle.players.len(), player);
+            (x + 12, y - 34, damage)
+        }
+        BattleEvent::EnemyMagic {
+            player,
+            damage,
+            phase: MagicEventPhase::Feedback,
             ..
         } => {
             let (x, y) = player_position(battle.players.len(), player);
@@ -1451,14 +1557,27 @@ fn render_battle_event(
         }
         BattleEvent::PlayerUseItem { .. }
         | BattleEvent::PlayerThrowItem { .. }
+        | BattleEvent::PlayerItemFeedback { .. }
         | BattleEvent::PlayerFlee { .. }
         | BattleEvent::PlayerDefend { .. }
         | BattleEvent::PlayerDefensiveMagic { .. }
         | BattleEvent::PlayerMagicAnimation { .. }
         | BattleEvent::PlayerFriendDeath { .. }
         | BattleEvent::PlayerDying { .. }
+        | BattleEvent::EnemyDivide { .. }
+        | BattleEvent::EnemySummon { .. }
+        | BattleEvent::EnemyTransform { .. }
+        | BattleEvent::EnemyEscape
         | BattleEvent::RoundCompleted
         | BattleEvent::Finished(_) => return,
+        BattleEvent::PlayerMagic {
+            phase: MagicEventPhase::Visual,
+            ..
+        }
+        | BattleEvent::EnemyMagic {
+            phase: MagicEventPhase::Visual,
+            ..
+        } => return,
     };
     draw_ui_number(
         renderer,
@@ -1470,6 +1589,137 @@ fn render_battle_event(
         19,
         [255, 255, 255, 255],
     );
+}
+
+fn enemy_script_animation_state(
+    battle: &BattleState,
+    event: BattleEvent,
+    enemy_index: usize,
+    ticks_remaining: u16,
+    enemy_escape_timing: Option<EnemyEscapeTimeline>,
+) -> (i32, i32, u8, i16) {
+    let Some(enemy) = battle.enemies.get(enemy_index) else {
+        return (0, 0, 64, 0);
+    };
+    match event {
+        BattleEvent::EnemyDivide { origin } => {
+            let elapsed = ENEMY_DIVIDE_EVENT_TICKS
+                .saturating_sub(ticks_remaining.min(ENEMY_DIVIDE_EVENT_TICKS));
+            let rendered = enemy_divide_position(origin, enemy.position, elapsed);
+            (
+                i32::from(rendered.x) - i32::from(enemy.position.x),
+                i32::from(rendered.y) - i32::from(enemy.position.y),
+                64,
+                0,
+            )
+        }
+        BattleEvent::EnemySummon {
+            caster,
+            summoned_mask,
+        } if summoned_mask & (1u8.checked_shl(enemy.slot as u32).unwrap_or(0)) != 0 => {
+            let pre_ticks = battle.enemies.get(caster).map_or(0, |caster| {
+                original_frames_to_ticks(
+                    usize::from(caster.magic_frames)
+                        .saturating_mul(usize::from(caster.action_wait_frames.max(1))),
+                )
+            });
+            let total = pre_ticks
+                .saturating_add(BATTLE_FADE_TICKS.saturating_mul(2))
+                .saturating_add(2);
+            let elapsed = total.saturating_sub(ticks_remaining.min(total));
+            let (visibility, color_shift) = enemy_summon_visual_state(pre_ticks, elapsed);
+            (0, 0, visibility, color_shift)
+        }
+        BattleEvent::EnemyTransform { enemy: target, .. } if target == enemy_index => {
+            let elapsed = ENEMY_TRANSFORM_EVENT_TICKS
+                .saturating_sub(ticks_remaining.min(ENEMY_TRANSFORM_EVENT_TICKS));
+            let (visibility, color_shift) = enemy_transform_visual_state(elapsed);
+            (0, 0, visibility, color_shift)
+        }
+        BattleEvent::EnemyEscape => enemy_escape_timing.map_or((0, 0, 64, 0), |timeline| {
+            (enemy_escape_offset(timeline, ticks_remaining), 0, 64, 0)
+        }),
+        _ => (0, 0, 64, 0),
+    }
+}
+
+fn enemy_summon_visual_state(pre_ticks: u16, elapsed: u16) -> (u8, i16) {
+    let first_fade_elapsed = elapsed.saturating_sub(pre_ticks);
+    if first_fade_elapsed < BATTLE_FADE_TICKS {
+        return (fade_progress(first_fade_elapsed, 64), 8);
+    }
+    let second_fade_elapsed = first_fade_elapsed
+        .saturating_sub(BATTLE_FADE_TICKS)
+        .saturating_sub(2);
+    let color_shift = if second_fade_elapsed < BATTLE_FADE_TICKS {
+        let remaining = BATTLE_FADE_TICKS.saturating_sub(second_fade_elapsed);
+        i16::try_from(
+            u32::from(remaining)
+                .saturating_mul(8)
+                .div_ceil(u32::from(BATTLE_FADE_TICKS.max(1))),
+        )
+        .unwrap_or(8)
+    } else {
+        0
+    };
+    (64, color_shift)
+}
+
+fn enemy_transform_visual_state(elapsed: u16) -> (u8, i16) {
+    if elapsed < 6 {
+        (64, i16::try_from(elapsed).unwrap_or(5))
+    } else {
+        (fade_progress(elapsed.saturating_sub(6), 64), 0)
+    }
+}
+
+fn enemy_divide_position(
+    origin: BattlePosition,
+    destination: BattlePosition,
+    elapsed: u16,
+) -> BattlePosition {
+    if elapsed >= 10 {
+        return destination;
+    }
+    let mut x = i32::from(origin.x);
+    let mut y = i32::from(origin.y);
+    for _ in 0..=elapsed {
+        x = (x + i32::from(destination.x)) / 2;
+        y = (y + i32::from(destination.y)) / 2;
+    }
+    BattlePosition {
+        x: u16::try_from(x).unwrap_or(destination.x),
+        y: u16::try_from(y).unwrap_or(destination.y),
+    }
+}
+
+fn enemy_transform_sprite_state(
+    event: BattleEvent,
+    enemy_index: usize,
+    ticks_remaining: u16,
+) -> Option<(u16, u16, usize)> {
+    let BattleEvent::EnemyTransform {
+        enemy,
+        previous_enemy_id,
+        previous_y_offset,
+    } = event
+    else {
+        return None;
+    };
+    let elapsed = ENEMY_TRANSFORM_EVENT_TICKS
+        .saturating_sub(ticks_remaining.min(ENEMY_TRANSFORM_EVENT_TICKS));
+    (enemy == enemy_index && elapsed < 6).then_some((previous_enemy_id, previous_y_offset, 0))
+}
+
+fn fade_progress(elapsed: u16, maximum: u8) -> u8 {
+    u8::try_from(
+        u32::from(elapsed.min(BATTLE_FADE_TICKS))
+            .saturating_mul(u32::from(maximum))
+            .checked_div(u32::from(BATTLE_FADE_TICKS.max(1)))
+            .unwrap_or(0),
+    )
+    .unwrap_or(maximum)
+    .min(maximum)
 }
 
 fn render_settlement(
@@ -2243,15 +2493,15 @@ mod tests {
     fn scripted_magic_animation_moves_selected_player_then_shifts_entire_party() {
         let event = Some(BattleEvent::PlayerMagicAnimation { player: Some(1) });
         assert_eq!(
-            player_magic_animation_state(event, 1, 22),
+            player_magic_animation_state(event, 1, PLAYER_MAGIC_ANIMATION_EVENT_TICKS),
             (-4, -2, Some(0), 0)
         );
         assert_eq!(
-            player_magic_animation_state(event, 1, 16),
+            player_magic_animation_state(event, 1, PLAYER_MAGIC_ANIMATION_EVENT_TICKS - 6),
             (-10, -4, Some(5), 0)
         );
         assert_eq!(
-            player_magic_animation_state(event, 1, 5),
+            player_magic_animation_state(event, 1, PLAYER_MAGIC_ANIMATION_EVENT_TICKS - 17),
             (-10, -4, Some(6), 0)
         );
         assert_eq!(player_magic_animation_state(event, 0, 1), (0, 0, None, 8));
@@ -2277,7 +2527,7 @@ mod tests {
             target: None,
             consuming: true,
         });
-        let use_total = original_frames_to_ticks(25);
+        let use_total = original_frames_to_ticks(17);
         assert_eq!(
             player_item_animation_state(use_item, 0, use_total),
             (0, 0, None, 0)
@@ -2296,7 +2546,7 @@ mod tests {
             item_object: 1,
             target: Some(0),
         });
-        let throw_total = original_frames_to_ticks(24);
+        let throw_total = original_frames_to_ticks(16);
         assert_eq!(
             player_item_animation_state(throw_item, 0, throw_total),
             (-4, -2, None, 0)
@@ -2309,6 +2559,58 @@ mod tests {
             player_item_animation_state(throw_item, 0, throw_total - 12),
             (-10, -4, Some(6), 0)
         );
+    }
+
+    #[test]
+    fn enemy_script_animations_follow_classic_frame_sequences() {
+        let origin = BattlePosition { x: 0, y: 0 };
+        let destination = BattlePosition { x: 100, y: 60 };
+        assert_eq!(
+            enemy_divide_position(origin, destination, 0),
+            BattlePosition { x: 50, y: 30 }
+        );
+        assert_eq!(
+            enemy_divide_position(origin, destination, 1),
+            BattlePosition { x: 75, y: 45 }
+        );
+        assert_eq!(
+            enemy_divide_position(origin, destination, 9),
+            BattlePosition { x: 99, y: 59 }
+        );
+        assert_eq!(enemy_divide_position(origin, destination, 10), destination);
+
+        let transform = BattleEvent::EnemyTransform {
+            enemy: 1,
+            previous_enemy_id: 7,
+            previous_y_offset: 9,
+        };
+        assert_eq!(
+            enemy_transform_sprite_state(transform, 1, ENEMY_TRANSFORM_EVENT_TICKS),
+            Some((7, 9, 0))
+        );
+        assert_eq!(
+            enemy_transform_sprite_state(transform, 1, ENEMY_TRANSFORM_EVENT_TICKS - 5),
+            Some((7, 9, 0))
+        );
+        assert_eq!(
+            enemy_transform_sprite_state(transform, 1, ENEMY_TRANSFORM_EVENT_TICKS - 6),
+            None
+        );
+        assert_eq!(enemy_transform_visual_state(0), (64, 0));
+        assert_eq!(enemy_transform_visual_state(5), (64, 5));
+        assert_eq!(enemy_transform_visual_state(6), (0, 0));
+        assert_eq!(enemy_transform_visual_state(35), (64, 0));
+
+        let pre_ticks = 4;
+        assert_eq!(enemy_summon_visual_state(pre_ticks, 0), (0, 8));
+        assert_eq!(enemy_summon_visual_state(pre_ticks, 3), (0, 8));
+        assert_eq!(enemy_summon_visual_state(pre_ticks, 4), (0, 8));
+        assert_eq!(
+            enemy_summon_visual_state(pre_ticks, pre_ticks + BATTLE_FADE_TICKS),
+            (64, 8)
+        );
+        assert_eq!(enemy_summon_visual_state(pre_ticks, 63), (64, 1));
+        assert_eq!(enemy_summon_visual_state(pre_ticks, 64), (64, 0));
     }
 
     #[test]

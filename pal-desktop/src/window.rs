@@ -14,10 +14,12 @@ use winit::keyboard::PhysicalKey;
 use winit::window::WindowBuilder;
 
 use app::DesktopApp;
+use battle_debug_overlay::BattleDebugOverlay;
 use minimap::MiniMapOverlay;
 
 mod app;
 mod ascii_font;
+mod battle_debug_overlay;
 mod battle_render;
 mod battle_timing;
 mod battle_update;
@@ -91,6 +93,11 @@ pub fn run_game_window<L>(
         pixels.surface_texture_format(),
         window.scale_factor(),
     );
+    let mut battle_debug_overlay = BattleDebugOverlay::new(
+        pixels.device(),
+        pixels.surface_texture_format(),
+        window.scale_factor(),
+    );
     let mut app = DesktopApp::new(renderer, game, resources, load_scene);
     app.render_frame(0);
 
@@ -140,6 +147,17 @@ pub fn run_game_window<L>(
                             ),
                         );
                     }
+                    let show_battle_debug = app
+                        .battle_debug_snapshot(
+                            surface_size.width,
+                            surface_size.height,
+                            window.scale_factor(),
+                        )
+                        .map(|snapshot| {
+                            battle_debug_overlay.update(pixels.device(), pixels.queue(), snapshot);
+                            true
+                        })
+                        .unwrap_or(false);
                     let render_result = pixels.render_with(|encoder, render_target, context| {
                         context.scaling_renderer.render(encoder, render_target);
                         if show_minimap {
@@ -152,6 +170,14 @@ pub fn run_game_window<L>(
                         }
                         if app.show_script_debug() {
                             debug_overlay.render(
+                                encoder,
+                                render_target,
+                                surface_size.width,
+                                surface_size.height,
+                            );
+                        }
+                        if show_battle_debug {
+                            battle_debug_overlay.render(
                                 encoder,
                                 render_target,
                                 surface_size.width,

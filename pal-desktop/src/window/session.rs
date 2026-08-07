@@ -17,6 +17,33 @@ use super::original_save::OriginalSaveEnvironment;
 use super::visual::VisualState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BattleDebugTarget {
+    Enemy,
+    Player,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BattleDebugHit {
+    pub(super) action: &'static str,
+    pub(super) source: usize,
+    pub(super) object_id: Option<u16>,
+    pub(super) target: BattleDebugTarget,
+    pub(super) target_index: usize,
+    pub(super) damage: u16,
+    pub(super) hp_before: Option<u16>,
+    pub(super) hp_after: u16,
+    pub(super) defeated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BattleDebugItemStart {
+    pub(super) player: usize,
+    pub(super) item_object: u16,
+    pub(super) target: Option<usize>,
+    pub(super) enemy_hp: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PendingSceneChange {
     source_scene: u16,
     target_scene: u16,
@@ -88,9 +115,12 @@ pub(super) struct BattlePresentationState {
     pub(super) battle_kept_effects: Vec<BattleEvent>,
     pub(super) battle_effect_sound_count: u16,
     pub(super) battle_feedback_sound_played: bool,
+    pub(super) battle_debug_hit: Option<BattleDebugHit>,
+    pub(super) battle_debug_item_start: Option<BattleDebugItemStart>,
     pub(super) battle_settlement_ticks: Option<u16>,
     pub(super) magic_effect_frame_counts: Vec<Option<usize>>,
     pub(super) player_battle_frame_counts: Vec<Option<usize>>,
+    pub(super) enemy_battle_frame_widths: Vec<Option<u16>>,
     pub(super) post_battle: Option<PostBattlePresentation>,
 }
 
@@ -199,6 +229,8 @@ impl DesktopSession {
         self.menus.magic = None;
         self.battle.battle_events.clear();
         self.battle.battle_kept_effects.clear();
+        self.battle.battle_debug_hit = None;
+        self.battle.battle_debug_item_start = None;
         self.battle.post_battle = None;
     }
 
@@ -231,6 +263,7 @@ impl DesktopSession {
         music_resources: MusicResources<'_>,
         magic_effect_sprites: &BattleSpriteArchive,
         player_battle_sprites: &BattleSpriteArchive,
+        enemy_battle_sprites: &BattleSpriteArchive,
     ) -> Self {
         let mut music = BackgroundMusic::new(
             music_resources.rix_mkf,
@@ -282,12 +315,21 @@ impl DesktopSession {
                 battle_kept_effects: Vec::new(),
                 battle_effect_sound_count: 0,
                 battle_feedback_sound_played: false,
+                battle_debug_hit: None,
+                battle_debug_item_start: None,
                 battle_settlement_ticks: None,
                 magic_effect_frame_counts: (0..magic_effect_sprites.len())
                     .map(|index| magic_effect_sprites.frame_count(index))
                     .collect(),
                 player_battle_frame_counts: (0..player_battle_sprites.len())
                     .map(|index| player_battle_sprites.frame_count(index))
+                    .collect(),
+                enemy_battle_frame_widths: (0..enemy_battle_sprites.len())
+                    .map(|index| {
+                        enemy_battle_sprites
+                            .decode_frame(index, 0)
+                            .map(|frame| frame.width)
+                    })
                     .collect(),
                 post_battle: None,
             },
