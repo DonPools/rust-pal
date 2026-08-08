@@ -1,6 +1,7 @@
 use super::{InstructionFlow, ScriptInstructionDebug, ScriptRuntime};
+use crate::script::executor::{decode_instruction, DecodeError};
 use crate::script::opcode::TriggerHandler;
-use crate::script::{ScriptEvent, ScriptOpcode};
+use crate::script::ScriptEvent;
 
 const MAX_INSTRUCTIONS_PER_ADVANCE: usize = 1024;
 
@@ -21,28 +22,32 @@ impl ScriptRuntime {
             });
         }
         for _ in 0..MAX_INSTRUCTIONS_PER_ADVANCE {
-            let Some(entry) = self.table.entry(execution.entry).copied() else {
-                self.execution = None;
-                return Some(ScriptEvent::InvalidEntry {
-                    trigger: execution.trigger,
-                    entry: execution.entry,
-                });
+            let decoded = match decode_instruction(&self.table, execution.entry) {
+                Ok(decoded) => decoded,
+                Err(DecodeError::InvalidEntry { entry }) => {
+                    self.execution = None;
+                    return Some(ScriptEvent::InvalidEntry {
+                        trigger: execution.trigger,
+                        entry,
+                    });
+                }
+                Err(DecodeError::Unsupported { entry, opcode }) => {
+                    self.execution = None;
+                    return Some(ScriptEvent::Unsupported {
+                        trigger: execution.trigger,
+                        entry,
+                        opcode,
+                    });
+                }
             };
+            let entry = decoded.instruction;
             self.last_instruction = Some(ScriptInstructionDebug {
                 object_id: execution.object_id,
-                entry: execution.entry,
+                entry: decoded.entry,
                 opcode: entry.opcode,
                 operands: entry.operands,
             });
-
-            let Some(opcode) = ScriptOpcode::from_raw(entry.opcode) else {
-                self.execution = None;
-                return Some(ScriptEvent::Unsupported {
-                    trigger: execution.trigger,
-                    entry: execution.entry,
-                    opcode: entry.opcode,
-                });
-            };
+            let opcode = decoded.opcode;
             let flow = match opcode.trigger_handler() {
                 TriggerHandler::Control => self.dispatch_control(execution, entry, opcode),
                 TriggerHandler::Presentation => {

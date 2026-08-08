@@ -18,6 +18,7 @@ use crate::random;
 use crate::scene::TriggerRequest;
 
 use super::{DialogPosition, ScriptOpcode};
+use crate::script::executor::ScriptCallFrame;
 
 #[derive(Debug, Clone, Copy)]
 struct Execution {
@@ -39,12 +40,6 @@ impl Execution {
     fn advance(&mut self) {
         self.entry = self.entry.wrapping_add(1);
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CallFrame {
-    object_id: u16,
-    return_entry: u16,
 }
 
 /// Internal result of executing one decoded trigger-script instruction.
@@ -83,7 +78,7 @@ pub struct ScriptDebugSnapshot {
 pub struct ScriptRuntime {
     table: ScriptTable,
     execution: Option<Execution>,
-    call_stack: Vec<CallFrame>,
+    call_stack: Vec<ScriptCallFrame>,
     random_state: u32,
     trigger_idle_frames: BTreeMap<u16, u16>,
     last_trigger: Option<TriggerRequest>,
@@ -144,7 +139,7 @@ impl ScriptRuntime {
         if entry == 0 || self.table.entry(entry).is_none() {
             return false;
         }
-        self.call_stack.push(CallFrame {
+        self.call_stack.push(ScriptCallFrame {
             object_id: execution.object_id,
             return_entry: execution.entry,
         });

@@ -15,9 +15,27 @@
 0 通常作为空入口。解析器要求 chunk 非空且长度是 8 的整数倍；执行时仍需验证每个
 入口和跳转目标没有越界。
 
+## 运行时模块边界
+
+脚本记录仍只有一份 `ScriptOpcode` 目录和一套底层记录解码器，但原版需要保留三种
+不同的调度语义：
+
+- `pal-core/src/script/trigger/` 执行触发、进入场景、战斗、物品和仙术脚本，按消息、
+  等待、表现或动作产出 `ScriptEvent`。
+- `pal-core/src/game/script_actions.rs` 将 `ScriptAction` 应用到 `GameState`；它是游戏
+  状态落地层，不重新解释 raw opcode。
+- `pal-core/src/game/auto_script.rs` 为当前场景的每个事件对象推进 `auto_script`，每次
+  固定更新最多执行一条对象指令；自动脚本的 idle 计数、追逐和错误保留规则属于该调度器。
+- `pal-core/src/game/equipment_scripts.rs` 在战斗开始前同步重放装备脚本，并在失败时回滚
+  角色、装备效果和脚本入口。
+
+三种模式共享 `pal-core/src/script/executor.rs` 中的记录解码、对象选择哨兵、程序计数器
+和调用帧表示，但不共享暂停、等待、入口持久化或错误处理语义。这样可以减少相同 opcode
+的解析重复，同时保留触发脚本与自动脚本之间原本不同的调度行为。
+
 ## 当前运行时覆盖
 
-最小触发脚本运行时目前实现以下 opcode：
+触发脚本运行时目前实现以下 opcode：
 
 代码中的权威指令目录是 `pal-core::script::ScriptOpcode`。它为原版 165 个有效 opcode
 提供稳定的 Rust 变体名、中文行为注释和触发脚本 handler 分类。原版编号空间中的

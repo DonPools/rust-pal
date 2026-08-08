@@ -58,6 +58,12 @@ pal-launcher -> pal-desktop -> pal-core -> pal-assets
 | `pal-desktop` | 窗口、输入、音频与 framebuffer 呈现 | 将平台事件转换为 core 可理解的命令 |
 | `pal-launcher` | 数据路径、启动参数和各层装配 | 不承载长期游戏状态或规则 |
 
+`pal-core` 内部的脚本职责也按执行模式分开：`script/trigger/` 负责可暂停并产出事件的
+触发脚本，`game/script_actions.rs` 负责将动作落地到游戏状态，`game/auto_script.rs`
+负责事件对象逐帧自动脚本，`game/equipment_scripts.rs` 负责战斗前装备脚本回放；公共
+记录解码和程序计数器位于 `script/executor.rs`。这些模块共享 opcode 目录，但不合并
+原版要求不同的调度时机。
+
 桌面运行时进一步分为平台 host 和应用状态两层。`window/mod.rs` 只负责 `winit`/`pixels`
 窗口事件、surface 调整和 framebuffer 呈现；`DesktopApp` 持有游戏、脚本、输入、表现和
 固定时间步状态。顶层流程由互斥的 `AppMode` 表示，更新顺序先由 `TickTarget` 区分开场、

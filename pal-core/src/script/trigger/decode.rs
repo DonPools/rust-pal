@@ -1,12 +1,6 @@
 use crate::role::Direction;
 
-pub(super) fn selected_object(selector: u16, current: u16) -> u16 {
-    if selector == 0 || selector == 0xffff {
-        current
-    } else {
-        selector
-    }
-}
+pub(super) use crate::script::executor::selected_object;
 
 pub(super) fn optional_direction(value: u16) -> Option<Direction> {
     (value != 0xffff)

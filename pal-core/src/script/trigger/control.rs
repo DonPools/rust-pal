@@ -3,7 +3,8 @@
 use pal_assets::script::ScriptEntry;
 
 use super::decode::{delay_80ms_ticks, selected_object};
-use super::{CallFrame, Execution, InstructionFlow, ScriptRuntime};
+use super::{Execution, InstructionFlow, ScriptRuntime};
+use crate::script::executor::ScriptCallFrame;
 use crate::script::{ScriptEvent, ScriptOpcode};
 
 impl ScriptRuntime {
@@ -66,7 +67,7 @@ impl ScriptRuntime {
                 };
             }
             Call => {
-                self.call_stack.push(CallFrame {
+                self.call_stack.push(ScriptCallFrame {
                     object_id: execution.object_id,
                     return_entry: execution.entry.wrapping_add(1),
                 });
