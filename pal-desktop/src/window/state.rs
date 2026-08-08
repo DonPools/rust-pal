@@ -33,44 +33,65 @@ impl DebugState {
     }
 }
 
-pub(super) enum FrontendState {
+pub(super) struct OpeningMenuState {
+    pub(super) menu: OpeningMenu,
+    pub(super) pending_action: Option<OpeningMenuAction>,
+}
+
+impl OpeningMenuState {
+    pub(super) fn new(menu: OpeningMenu) -> Self {
+        Self {
+            menu,
+            pending_action: None,
+        }
+    }
+}
+
+pub(super) enum AppMode {
     OpeningAnimation(Box<OpeningAnimation>),
-    OpeningMenu {
-        menu: OpeningMenu,
-        pending_action: Option<OpeningMenuAction>,
-    },
+    OpeningMenu(OpeningMenuState),
     Playing,
 }
 
-impl FrontendState {
+#[derive(Clone, Copy)]
+pub(super) enum AppModeView<'a> {
+    OpeningAnimation(&'a OpeningAnimation),
+    OpeningMenu(&'a OpeningMenu),
+    Playing,
+}
+
+impl AppMode {
     pub(super) fn is_opening_animation(&self) -> bool {
         matches!(self, Self::OpeningAnimation(_))
     }
 
     pub(super) fn is_opening_menu(&self) -> bool {
-        matches!(self, Self::OpeningMenu { .. })
+        matches!(self, Self::OpeningMenu(_))
     }
 
-    pub(super) fn opening_animation(&self) -> Option<&OpeningAnimation> {
-        match self {
-            Self::OpeningAnimation(animation) => Some(animation),
-            Self::OpeningMenu { .. } | Self::Playing => None,
-        }
+    pub(super) fn is_playing(&self) -> bool {
+        matches!(self, Self::Playing)
     }
 
-    pub(super) fn opening_menu(&self) -> Option<&OpeningMenu> {
+    pub(super) fn view(&self) -> AppModeView<'_> {
         match self {
-            Self::OpeningMenu { menu, .. } => Some(menu),
-            Self::OpeningAnimation(_) | Self::Playing => None,
+            Self::OpeningAnimation(animation) => AppModeView::OpeningAnimation(animation),
+            Self::OpeningMenu(state) => AppModeView::OpeningMenu(&state.menu),
+            Self::Playing => AppModeView::Playing,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum UpdateTarget {
+pub(super) enum TickTarget {
     OpeningAnimation,
     VisualOrDeferredAction,
     OpeningMenu,
+    Playing(PlayingTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlayingTarget {
     WaitingForKey,
     Dialog,
     PostBattle,
@@ -82,10 +103,7 @@ pub(super) enum UpdateTarget {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct UpdateConditions {
-    pub(super) opening_animation: bool,
-    pub(super) visual_or_deferred_action: bool,
-    pub(super) opening_menu: bool,
+pub(super) struct PlayingConditions {
     pub(super) waiting_for_key: bool,
     pub(super) dialog: bool,
     pub(super) post_battle: bool,
@@ -95,30 +113,24 @@ pub(super) struct UpdateConditions {
     pub(super) scene_script: bool,
 }
 
-impl UpdateConditions {
-    pub(super) fn target(self) -> UpdateTarget {
-        if self.opening_animation {
-            UpdateTarget::OpeningAnimation
-        } else if self.visual_or_deferred_action {
-            UpdateTarget::VisualOrDeferredAction
-        } else if self.opening_menu {
-            UpdateTarget::OpeningMenu
-        } else if self.waiting_for_key {
-            UpdateTarget::WaitingForKey
+impl PlayingConditions {
+    pub(super) fn target(self) -> PlayingTarget {
+        if self.waiting_for_key {
+            PlayingTarget::WaitingForKey
         } else if self.dialog {
-            UpdateTarget::Dialog
+            PlayingTarget::Dialog
         } else if self.post_battle {
-            UpdateTarget::PostBattle
+            PlayingTarget::PostBattle
         } else if self.battle && self.battle_script_ready {
-            UpdateTarget::BattleScript
+            PlayingTarget::BattleScript
         } else if self.battle {
-            UpdateTarget::Battle
+            PlayingTarget::Battle
         } else if self.menu {
-            UpdateTarget::Menu
+            PlayingTarget::Menu
         } else if self.scene_script {
-            UpdateTarget::SceneScript
+            PlayingTarget::SceneScript
         } else {
-            UpdateTarget::Exploration
+            PlayingTarget::Exploration
         }
     }
 }
@@ -143,18 +155,15 @@ impl TimingMode {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct TimingState {
-    pub(super) opening_animation: bool,
+pub(super) struct PlayingTimingState {
     pub(super) dialog_or_visual: bool,
     pub(super) battle: bool,
     pub(super) scripted_or_menu: bool,
 }
 
-impl TimingState {
+impl PlayingTimingState {
     pub(super) fn mode(self) -> TimingMode {
-        if self.opening_animation {
-            TimingMode::OpeningAnimation
-        } else if self.dialog_or_visual {
+        if self.dialog_or_visual {
             TimingMode::Ui
         } else if self.battle {
             TimingMode::Battle
@@ -171,11 +180,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_targets_preserve_desktop_priority() {
-        let all = UpdateConditions {
-            opening_animation: true,
-            visual_or_deferred_action: true,
-            opening_menu: true,
+    fn playing_targets_preserve_gameplay_priority() {
+        let all = PlayingConditions {
             waiting_for_key: true,
             dialog: true,
             post_battle: true,
@@ -184,75 +190,36 @@ mod tests {
             menu: true,
             scene_script: true,
         };
-        assert_eq!(all.target(), UpdateTarget::OpeningAnimation);
+        assert_eq!(all.target(), PlayingTarget::WaitingForKey);
         assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                ..all
-            }
-            .target(),
-            UpdateTarget::VisualOrDeferredAction
-        );
-        assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                ..all
-            }
-            .target(),
-            UpdateTarget::OpeningMenu
-        );
-        assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                opening_menu: false,
-                ..all
-            }
-            .target(),
-            UpdateTarget::WaitingForKey
-        );
-        assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                opening_menu: false,
+            PlayingConditions {
                 waiting_for_key: false,
                 ..all
             }
             .target(),
-            UpdateTarget::Dialog
+            PlayingTarget::Dialog
         );
         assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                opening_menu: false,
+            PlayingConditions {
                 waiting_for_key: false,
                 dialog: false,
                 ..all
             }
             .target(),
-            UpdateTarget::PostBattle
+            PlayingTarget::PostBattle
         );
         assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                opening_menu: false,
+            PlayingConditions {
                 waiting_for_key: false,
                 dialog: false,
                 post_battle: false,
                 ..all
             }
             .target(),
-            UpdateTarget::BattleScript
+            PlayingTarget::BattleScript
         );
         assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                opening_menu: false,
+            PlayingConditions {
                 waiting_for_key: false,
                 dialog: false,
                 post_battle: false,
@@ -261,13 +228,10 @@ mod tests {
                 ..all
             }
             .target(),
-            UpdateTarget::Menu
+            PlayingTarget::Menu
         );
         assert_eq!(
-            UpdateConditions {
-                opening_animation: false,
-                visual_or_deferred_action: false,
-                opening_menu: false,
+            PlayingConditions {
                 waiting_for_key: false,
                 dialog: false,
                 post_battle: false,
@@ -277,63 +241,56 @@ mod tests {
                 ..all
             }
             .target(),
-            UpdateTarget::SceneScript
+            PlayingTarget::SceneScript
         );
         assert_eq!(
-            UpdateConditions::default().target(),
-            UpdateTarget::Exploration
+            PlayingConditions::default().target(),
+            PlayingTarget::Exploration
         );
     }
 
     #[test]
     fn battle_script_only_preempts_a_running_battle_when_ready() {
-        let battle = UpdateConditions {
+        let battle = PlayingConditions {
             battle: true,
             battle_script_ready: true,
-            ..UpdateConditions::default()
+            ..PlayingConditions::default()
         };
-        assert_eq!(battle.target(), UpdateTarget::BattleScript);
+        assert_eq!(battle.target(), PlayingTarget::BattleScript);
         assert_eq!(
-            UpdateConditions {
+            PlayingConditions {
                 battle_script_ready: false,
                 ..battle
             }
             .target(),
-            UpdateTarget::Battle
+            PlayingTarget::Battle
         );
     }
 
     #[test]
-    fn timing_priority_matches_opening_animation_ui_battle_and_exploration() {
+    fn playing_timing_priority_matches_ui_battle_and_exploration() {
         assert_eq!(
-            TimingState {
-                opening_animation: true,
+            PlayingTimingState {
                 dialog_or_visual: true,
                 battle: true,
-                scripted_or_menu: true,
-            }
-            .mode(),
-            TimingMode::OpeningAnimation
-        );
-        assert_eq!(
-            TimingState {
-                dialog_or_visual: true,
-                battle: true,
-                ..TimingState::default()
+                ..PlayingTimingState::default()
             }
             .mode(),
             TimingMode::Ui
         );
         assert_eq!(
-            TimingState {
+            PlayingTimingState {
                 battle: true,
                 scripted_or_menu: true,
-                ..TimingState::default()
+                ..PlayingTimingState::default()
             }
             .mode(),
             TimingMode::Battle
         );
-        assert_eq!(TimingState::default().mode(), TimingMode::Exploration);
+        assert_eq!(
+            PlayingTimingState::default().mode(),
+            TimingMode::Exploration
+        );
     }
 
     #[test]
