@@ -19,7 +19,7 @@ use super::input::HeldInput;
 use super::menu_state::{FieldMenu, OpeningMenu, OpeningMenuAction};
 use super::menu_update::{update_active_menu, MenuUpdateContext};
 use super::minimap::{MiniMapCache, MiniMapFrame};
-use super::opening_intro::{OpeningIntro, OpeningIntroAction, TITLE_MUSIC};
+use super::opening_animation::{OpeningAnimation, OpeningAnimationAction, TITLE_MUSIC};
 use super::original_save::{
     latest_original_save_slot, original_save_slots, restore_original_save, RestoreOriginalSaveError,
 };
@@ -125,7 +125,7 @@ where
             &resources.player_battle_sprites,
             &resources.enemy_battle_sprites,
         );
-        let opening_intro = OpeningIntro::from_resources(
+        let opening_animation = OpeningAnimation::from_resources(
             &resources.fbp_archive,
             &resources.rng_archive,
             &resources.role_sprites,
@@ -142,7 +142,7 @@ where
             scripts,
             dialog: None,
             session,
-            frontend: FrontendState::Intro(Box::new(opening_intro)),
+            frontend: FrontendState::OpeningAnimation(Box::new(opening_animation)),
             input: HeldInput::default(),
             clock: FrameClock::new(now),
             minimap_enabled: true,
@@ -167,7 +167,7 @@ where
             self.debug.show_objects,
             self.scripts.debug_snapshot(),
             UiRenderContext {
-                opening_intro: self.frontend.intro(),
+                opening_animation: self.frontend.opening_animation(),
                 opening_menu: self.frontend.opening_menu(),
                 opening_background: &resources.opening_background,
                 dialog: self.dialog.as_ref(),
@@ -307,7 +307,7 @@ where
 
     fn timing_state(&self) -> TimingState {
         TimingState {
-            opening_intro: self.frontend.is_intro(),
+            opening_animation: self.frontend.is_opening_animation(),
             dialog_or_visual: self.session.visual.is_blocking()
                 || self.dialog.is_some()
                 || self.session.scripts.waiting_for_key,
@@ -321,7 +321,7 @@ where
 
     fn select_update_target(&self, visual_or_deferred_action: bool) -> UpdateTarget {
         UpdateConditions {
-            opening_intro: self.frontend.is_intro(),
+            opening_animation: self.frontend.is_opening_animation(),
             visual_or_deferred_action,
             opening_menu: self.frontend.is_opening_menu(),
             waiting_for_key: self.session.scripts.waiting_for_key,
@@ -428,32 +428,32 @@ where
         Ok(())
     }
 
-    fn advance_intro(
+    fn advance_opening_animation(
         &mut self,
         update_tick: Duration,
         input: pal_core::game::GameInput,
         set_title: &mut impl FnMut(&str),
     ) -> (bool, bool) {
-        let FrontendState::Intro(intro) = &mut self.frontend else {
+        let FrontendState::OpeningAnimation(animation) = &mut self.frontend else {
             return (false, false);
         };
-        let (changed, action) = intro
+        let (changed, action) = animation
             .update(
                 update_tick.as_millis() as u32,
                 input,
                 &self.resources.rng_archive,
             )
             .unwrap_or_else(|error| panic!("failed to play original opening animation: {error}"));
-        let finished = action == OpeningIntroAction::Finished;
+        let finished = action == OpeningAnimationAction::Finished;
         match action {
-            OpeningIntroAction::None => {}
-            OpeningIntroAction::PlayTitleMusic => {
+            OpeningAnimationAction::None => {}
+            OpeningAnimationAction::PlayTitleMusic => {
                 if !self.session.audio.music.play(TITLE_MUSIC, true, 2) {
                     set_title("Rust-PAL [title music unavailable]");
                 }
             }
-            OpeningIntroAction::StopTitleMusic => self.session.audio.music.stop(),
-            OpeningIntroAction::Finished => {
+            OpeningAnimationAction::StopTitleMusic => self.session.audio.music.stop(),
+            OpeningAnimationAction::Finished => {
                 self.frontend = FrontendState::OpeningMenu {
                     menu: OpeningMenu::new(original_save_slots(&self.resources.original_save_dir)),
                     pending_action: None,
@@ -487,7 +487,7 @@ where
     ) -> bool {
         let pending = match &mut self.frontend {
             FrontendState::OpeningMenu { pending_action, .. } => pending_action.take(),
-            FrontendState::Intro(_) | FrontendState::Playing => return false,
+            FrontendState::OpeningAnimation(_) | FrontendState::Playing => return false,
         };
         if let Some(action) = pending {
             match action {
@@ -535,7 +535,7 @@ where
 
         let action = match &mut self.frontend {
             FrontendState::OpeningMenu { menu, .. } => menu.update(input),
-            FrontendState::Intro(_) | FrontendState::Playing => return false,
+            FrontendState::OpeningAnimation(_) | FrontendState::Playing => return false,
         };
         if action != OpeningMenuAction::None {
             if self
@@ -731,7 +731,7 @@ where
     /// Advance elapsed-time-driven dialog playback independently of the slower
     /// fixed simulation tick used by scripts and exploration.
     fn advance_realtime_dialog_playback(&mut self, elapsed: Duration) -> bool {
-        let can_advance = !self.frontend.is_intro()
+        let can_advance = !self.frontend.is_opening_animation()
             && !self.frontend.is_opening_menu()
             && !self.session.visual.is_blocking()
             && !self.session.scripts.waiting_for_key
@@ -835,8 +835,9 @@ where
         set_title: &mut impl FnMut(&str),
     ) -> TargetOutcome {
         match target {
-            UpdateTarget::OpeningIntro => {
-                let (changed, finished) = self.advance_intro(update_tick, input, set_title);
+            UpdateTarget::OpeningAnimation => {
+                let (changed, finished) =
+                    self.advance_opening_animation(update_tick, input, set_title);
                 TargetOutcome {
                     changed,
                     visual_finalization: VisualFinalization::Defer,
@@ -916,7 +917,7 @@ where
         let (input, any_pressed) = self.input.sample();
         let mut outcome = TickOutcome::default();
 
-        let (target, visual_scene_update_due) = if self.frontend.is_intro() {
+        let (target, visual_scene_update_due) = if self.frontend.is_opening_animation() {
             (self.select_update_target(false), false)
         } else {
             // Target selection intentionally uses the visual state from before
@@ -1100,13 +1101,13 @@ where
 
 #[cfg(test)]
 pub(super) fn update_interval_ms(
-    opening_intro: bool,
+    opening_animation: bool,
     dialog_or_visual: bool,
     battle: bool,
     scripted_or_menu: bool,
 ) -> u64 {
     TimingState {
-        opening_intro,
+        opening_animation,
         dialog_or_visual,
         battle,
         scripted_or_menu,

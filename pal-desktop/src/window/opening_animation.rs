@@ -30,7 +30,7 @@ const CRANE_ANIMATION_FRAMES: usize = 8;
 pub(super) const TITLE_MUSIC: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OpeningIntroAction {
+pub(super) enum OpeningAnimationAction {
     None,
     PlayTitleMusic,
     StopTitleMusic,
@@ -38,7 +38,7 @@ pub(super) enum OpeningIntroAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpeningIntroPhase {
+enum OpeningAnimationPhase {
     Trademark {
         next_frame: usize,
         frame_accumulator_ms: u32,
@@ -72,8 +72,8 @@ struct Crane {
 }
 
 /// The DOS startup sequence from `PAL_TrademarkScreen` and `PAL_SplashScreen`.
-pub(super) struct OpeningIntro {
-    phase: OpeningIntroPhase,
+pub(super) struct OpeningAnimation {
+    phase: OpeningAnimationPhase,
     trademark_frame_count: usize,
     trademark_canvas: Vec<u8>,
     splash_up: Vec<u8>,
@@ -88,7 +88,7 @@ pub(super) struct OpeningIntro {
     splash_palette_ms: u32,
 }
 
-impl OpeningIntro {
+impl OpeningAnimation {
     pub(super) fn from_resources(
         fbp: &FbpArchive,
         rng: &RngArchive,
@@ -172,12 +172,12 @@ impl OpeningIntro {
                 as usize,
         });
         let phase = if trademark_frame_count > 1 {
-            OpeningIntroPhase::Trademark {
+            OpeningAnimationPhase::Trademark {
                 next_frame: 1,
                 frame_accumulator_ms: 0,
             }
         } else {
-            OpeningIntroPhase::TrademarkHold {
+            OpeningAnimationPhase::TrademarkHold {
                 remaining_ms: TRADEMARK_HOLD_MS,
             }
         };
@@ -203,10 +203,10 @@ impl OpeningIntro {
         elapsed_ms: u32,
         input: GameInput,
         rng: &RngArchive,
-    ) -> Result<(bool, OpeningIntroAction), String> {
-        let phase = std::mem::replace(&mut self.phase, OpeningIntroPhase::Finished);
+    ) -> Result<(bool, OpeningAnimationAction), String> {
+        let phase = std::mem::replace(&mut self.phase, OpeningAnimationPhase::Finished);
         let (next_phase, changed, action) = match phase {
-            OpeningIntroPhase::Trademark {
+            OpeningAnimationPhase::Trademark {
                 mut next_frame,
                 mut frame_accumulator_ms,
             } => {
@@ -230,71 +230,71 @@ impl OpeningIntro {
                     changed = true;
                 }
                 let next = if next_frame == self.trademark_frame_count {
-                    OpeningIntroPhase::TrademarkHold {
+                    OpeningAnimationPhase::TrademarkHold {
                         remaining_ms: TRADEMARK_HOLD_MS,
                     }
                 } else {
-                    OpeningIntroPhase::Trademark {
+                    OpeningAnimationPhase::Trademark {
                         next_frame,
                         frame_accumulator_ms,
                     }
                 };
-                (next, changed, OpeningIntroAction::None)
+                (next, changed, OpeningAnimationAction::None)
             }
-            OpeningIntroPhase::TrademarkHold { remaining_ms } => {
+            OpeningAnimationPhase::TrademarkHold { remaining_ms } => {
                 let remaining_ms = remaining_ms.saturating_sub(elapsed_ms);
                 let next = if remaining_ms == 0 {
-                    OpeningIntroPhase::TrademarkFadeOut { elapsed_ms: 0 }
+                    OpeningAnimationPhase::TrademarkFadeOut { elapsed_ms: 0 }
                 } else {
-                    OpeningIntroPhase::TrademarkHold { remaining_ms }
+                    OpeningAnimationPhase::TrademarkHold { remaining_ms }
                 };
-                (next, false, OpeningIntroAction::None)
+                (next, false, OpeningAnimationAction::None)
             }
-            OpeningIntroPhase::TrademarkFadeOut {
+            OpeningAnimationPhase::TrademarkFadeOut {
                 elapsed_ms: fade_ms,
             } => {
                 let fade_ms = fade_ms.saturating_add(elapsed_ms).min(SCREEN_FADE_MS);
                 if fade_ms == SCREEN_FADE_MS {
                     self.advance_splash_frame();
                     (
-                        OpeningIntroPhase::Splash,
+                        OpeningAnimationPhase::Splash,
                         true,
-                        OpeningIntroAction::PlayTitleMusic,
+                        OpeningAnimationAction::PlayTitleMusic,
                     )
                 } else {
                     (
-                        OpeningIntroPhase::TrademarkFadeOut {
+                        OpeningAnimationPhase::TrademarkFadeOut {
                             elapsed_ms: fade_ms,
                         },
                         true,
-                        OpeningIntroAction::None,
+                        OpeningAnimationAction::None,
                     )
                 }
             }
-            OpeningIntroPhase::Splash => {
+            OpeningAnimationPhase::Splash => {
                 if input.confirm || input.cancel {
                     self.splash_title_height = usize::from(self.title.height);
                     let remaining_palette_ms =
                         SPLASH_PALETTE_FADE_MS.saturating_sub(self.splash_palette_ms);
                     if remaining_palette_ms == 0 {
                         (
-                            OpeningIntroPhase::SplashFadeOut { elapsed_ms: 0 },
+                            OpeningAnimationPhase::SplashFadeOut { elapsed_ms: 0 },
                             true,
-                            OpeningIntroAction::StopTitleMusic,
+                            OpeningAnimationAction::StopTitleMusic,
                         )
                     } else {
                         let accelerate_ms = remaining_palette_ms
                             .div_ceil(SPLASH_SKIP_VIRTUAL_MS)
                             .saturating_mul(SPLASH_SKIP_STEP_MS);
                         (
-                            OpeningIntroPhase::SplashCompleting {
+                            OpeningAnimationPhase::SplashCompleting {
                                 elapsed_ms: 0,
                                 accelerate_ms,
                                 total_ms: accelerate_ms.saturating_add(SPLASH_SKIP_HOLD_MS),
                                 start_palette_ms: self.splash_palette_ms,
                             },
                             true,
-                            OpeningIntroAction::None,
+                            OpeningAnimationAction::None,
                         )
                     }
                 } else {
@@ -311,10 +311,14 @@ impl OpeningIntro {
                         self.advance_splash_frame();
                         changed = true;
                     }
-                    (OpeningIntroPhase::Splash, changed, OpeningIntroAction::None)
+                    (
+                        OpeningAnimationPhase::Splash,
+                        changed,
+                        OpeningAnimationAction::None,
+                    )
                 }
             }
-            OpeningIntroPhase::SplashCompleting {
+            OpeningAnimationPhase::SplashCompleting {
                 elapsed_ms: complete_ms,
                 accelerate_ms,
                 total_ms,
@@ -330,46 +334,48 @@ impl OpeningIntro {
                 }
                 if complete_ms == total_ms {
                     (
-                        OpeningIntroPhase::SplashFadeOut { elapsed_ms: 0 },
+                        OpeningAnimationPhase::SplashFadeOut { elapsed_ms: 0 },
                         true,
-                        OpeningIntroAction::StopTitleMusic,
+                        OpeningAnimationAction::StopTitleMusic,
                     )
                 } else {
                     (
-                        OpeningIntroPhase::SplashCompleting {
+                        OpeningAnimationPhase::SplashCompleting {
                             elapsed_ms: complete_ms,
                             accelerate_ms,
                             total_ms,
                             start_palette_ms,
                         },
                         true,
-                        OpeningIntroAction::None,
+                        OpeningAnimationAction::None,
                     )
                 }
             }
-            OpeningIntroPhase::SplashFadeOut {
+            OpeningAnimationPhase::SplashFadeOut {
                 elapsed_ms: fade_ms,
             } => {
                 let fade_ms = fade_ms.saturating_add(elapsed_ms).min(SCREEN_FADE_MS);
                 if fade_ms == SCREEN_FADE_MS {
                     (
-                        OpeningIntroPhase::Finished,
+                        OpeningAnimationPhase::Finished,
                         true,
-                        OpeningIntroAction::Finished,
+                        OpeningAnimationAction::Finished,
                     )
                 } else {
                     (
-                        OpeningIntroPhase::SplashFadeOut {
+                        OpeningAnimationPhase::SplashFadeOut {
                             elapsed_ms: fade_ms,
                         },
                         true,
-                        OpeningIntroAction::None,
+                        OpeningAnimationAction::None,
                     )
                 }
             }
-            OpeningIntroPhase::Finished => {
-                (OpeningIntroPhase::Finished, false, OpeningIntroAction::None)
-            }
+            OpeningAnimationPhase::Finished => (
+                OpeningAnimationPhase::Finished,
+                false,
+                OpeningAnimationAction::None,
+            ),
         };
         self.phase = next_phase;
         Ok((changed, action))
@@ -423,23 +429,24 @@ impl OpeningIntro {
     fn is_trademark_phase(&self) -> bool {
         matches!(
             self.phase,
-            OpeningIntroPhase::Trademark { .. }
-                | OpeningIntroPhase::TrademarkHold { .. }
-                | OpeningIntroPhase::TrademarkFadeOut { .. }
+            OpeningAnimationPhase::Trademark { .. }
+                | OpeningAnimationPhase::TrademarkHold { .. }
+                | OpeningAnimationPhase::TrademarkFadeOut { .. }
         )
     }
 
     fn brightness(&self) -> u8 {
         match self.phase {
-            OpeningIntroPhase::Trademark { .. } | OpeningIntroPhase::TrademarkHold { .. } => 64,
-            OpeningIntroPhase::TrademarkFadeOut { elapsed_ms }
-            | OpeningIntroPhase::SplashFadeOut { elapsed_ms } => {
+            OpeningAnimationPhase::Trademark { .. }
+            | OpeningAnimationPhase::TrademarkHold { .. } => 64,
+            OpeningAnimationPhase::TrademarkFadeOut { elapsed_ms }
+            | OpeningAnimationPhase::SplashFadeOut { elapsed_ms } => {
                 ((SCREEN_FADE_MS - elapsed_ms).saturating_mul(64) / SCREEN_FADE_MS) as u8
             }
-            OpeningIntroPhase::Splash | OpeningIntroPhase::SplashCompleting { .. } => {
+            OpeningAnimationPhase::Splash | OpeningAnimationPhase::SplashCompleting { .. } => {
                 (self.splash_palette_ms.saturating_mul(64) / SPLASH_PALETTE_FADE_MS) as u8
             }
-            OpeningIntroPhase::Finished => 0,
+            OpeningAnimationPhase::Finished => 0,
         }
     }
 
@@ -536,8 +543,8 @@ mod tests {
         }
     }
 
-    fn intro(phase: OpeningIntroPhase) -> OpeningIntro {
-        OpeningIntro {
+    fn opening_animation(phase: OpeningAnimationPhase) -> OpeningAnimation {
+        OpeningAnimation {
             phase,
             trademark_frame_count: 1,
             trademark_canvas: vec![1; RNG_FRAME_PIXELS],
@@ -560,8 +567,8 @@ mod tests {
 
     #[test]
     fn splash_composes_upper_and_lower_pictures_at_the_original_split() {
-        let intro = intro(OpeningIntroPhase::Splash);
-        let screen = intro.compose_splash_background();
+        let animation = opening_animation(OpeningAnimationPhase::Splash);
+        let screen = animation.compose_splash_background();
 
         assert!(screen[..100 * FBP_WIDTH].iter().all(|&pixel| pixel == 1));
         assert!(screen[100 * FBP_WIDTH..].iter().all(|&pixel| pixel == 2));
@@ -569,7 +576,7 @@ mod tests {
 
     #[test]
     fn splash_waits_for_input_then_stops_music_and_fades_out() {
-        let mut intro = intro(OpeningIntroPhase::Splash);
+        let mut animation = opening_animation(OpeningAnimationPhase::Splash);
         let empty_rng = RngArchive::new(&[8, 0, 0, 0, 8, 0, 0, 0]).unwrap();
         let input = GameInput {
             direction: None,
@@ -579,22 +586,22 @@ mod tests {
             ..GameInput::default()
         };
 
-        let (_, action) = intro.update(50, input, &empty_rng).unwrap();
-        assert_eq!(action, OpeningIntroAction::StopTitleMusic);
+        let (_, action) = animation.update(50, input, &empty_rng).unwrap();
+        assert_eq!(action, OpeningAnimationAction::StopTitleMusic);
         assert!(matches!(
-            intro.phase,
-            OpeningIntroPhase::SplashFadeOut { .. }
+            animation.phase,
+            OpeningAnimationPhase::SplashFadeOut { .. }
         ));
-        let (_, action) = intro
+        let (_, action) = animation
             .update(SCREEN_FADE_MS, GameInput::default(), &empty_rng)
             .unwrap();
-        assert_eq!(action, OpeningIntroAction::Finished);
-        assert_eq!(intro.brightness(), 0);
+        assert_eq!(action, OpeningAnimationAction::Finished);
+        assert_eq!(animation.brightness(), 0);
     }
 
     #[test]
     fn splash_render_applies_palette_and_title_reveal() {
-        let intro = intro(OpeningIntroPhase::Splash);
+        let animation = opening_animation(OpeningAnimationPhase::Splash);
         let mut colors = [PaletteColor { r: 0, g: 0, b: 0 }; 256];
         colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
         colors[2] = PaletteColor { r: 0, g: 63, b: 0 };
@@ -606,7 +613,7 @@ mod tests {
         let palettes = vec![set.clone(), set];
         let mut renderer = Renderer::new(Palette::default(), FBP_WIDTH, FBP_HEIGHT);
 
-        intro.render(&mut renderer, &palettes).unwrap();
+        animation.render(&mut renderer, &palettes).unwrap();
 
         assert_eq!(&renderer.screen()[0..4], &[252, 0, 0, 255]);
         let lower = 150 * FBP_WIDTH * 4;

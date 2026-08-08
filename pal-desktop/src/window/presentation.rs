@@ -20,7 +20,7 @@ use super::menu_render::{
     render_shop_menu, render_status_menu,
 };
 use super::menu_state::{ActiveMenu, OpeningMenu};
-use super::opening_intro::OpeningIntro;
+use super::opening_animation::OpeningAnimation;
 use super::scene_render::render_tile_map;
 use super::visual::VisualState;
 use super::Viewport;
@@ -28,7 +28,7 @@ use crate::renderer::Renderer;
 
 #[derive(Clone, Copy)]
 pub(super) struct UiRenderContext<'a> {
-    pub(super) opening_intro: Option<&'a OpeningIntro>,
+    pub(super) opening_animation: Option<&'a OpeningAnimation>,
     pub(super) opening_menu: Option<&'a OpeningMenu>,
     pub(super) opening_background: &'a Bitmap,
     pub(super) dialog: Option<&'a ActiveDialog>,
@@ -71,8 +71,8 @@ pub(super) fn render_game(
     script: ScriptDebugSnapshot,
     ui: UiRenderContext<'_>,
 ) {
-    if let Some(opening_intro) = ui.opening_intro {
-        opening_intro
+    if let Some(opening_animation) = ui.opening_animation {
+        opening_animation
             .render(renderer, ui.palettes)
             .expect("failed to render original opening animation");
         return;

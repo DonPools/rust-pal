@@ -33,7 +33,7 @@ mod menu_render;
 mod menu_state;
 mod menu_update;
 mod minimap;
-mod opening_intro;
+mod opening_animation;
 mod original_save;
 mod presentation;
 #[cfg(test)]

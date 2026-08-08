@@ -3,9 +3,9 @@
 use pal_core::game::{BATTLE_FRAME_MS, EXPLORATION_FRAME_MS, UPDATE_INTERVAL_MS};
 
 use super::menu_state::{OpeningMenu, OpeningMenuAction};
-use super::opening_intro::OpeningIntro;
+use super::opening_animation::OpeningAnimation;
 
-pub(super) const OPENING_INTRO_UPDATE_MS: u64 = 10;
+pub(super) const OPENING_ANIMATION_UPDATE_MS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct DebugState {
@@ -34,7 +34,7 @@ impl DebugState {
 }
 
 pub(super) enum FrontendState {
-    Intro(Box<OpeningIntro>),
+    OpeningAnimation(Box<OpeningAnimation>),
     OpeningMenu {
         menu: OpeningMenu,
         pending_action: Option<OpeningMenuAction>,
@@ -43,17 +43,17 @@ pub(super) enum FrontendState {
 }
 
 impl FrontendState {
-    pub(super) fn is_intro(&self) -> bool {
-        matches!(self, Self::Intro(_))
+    pub(super) fn is_opening_animation(&self) -> bool {
+        matches!(self, Self::OpeningAnimation(_))
     }
 
     pub(super) fn is_opening_menu(&self) -> bool {
         matches!(self, Self::OpeningMenu { .. })
     }
 
-    pub(super) fn intro(&self) -> Option<&OpeningIntro> {
+    pub(super) fn opening_animation(&self) -> Option<&OpeningAnimation> {
         match self {
-            Self::Intro(intro) => Some(intro),
+            Self::OpeningAnimation(animation) => Some(animation),
             Self::OpeningMenu { .. } | Self::Playing => None,
         }
     }
@@ -61,14 +61,14 @@ impl FrontendState {
     pub(super) fn opening_menu(&self) -> Option<&OpeningMenu> {
         match self {
             Self::OpeningMenu { menu, .. } => Some(menu),
-            Self::Intro(_) | Self::Playing => None,
+            Self::OpeningAnimation(_) | Self::Playing => None,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UpdateTarget {
-    OpeningIntro,
+    OpeningAnimation,
     VisualOrDeferredAction,
     OpeningMenu,
     WaitingForKey,
@@ -83,7 +83,7 @@ pub(super) enum UpdateTarget {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct UpdateConditions {
-    pub(super) opening_intro: bool,
+    pub(super) opening_animation: bool,
     pub(super) visual_or_deferred_action: bool,
     pub(super) opening_menu: bool,
     pub(super) waiting_for_key: bool,
@@ -97,8 +97,8 @@ pub(super) struct UpdateConditions {
 
 impl UpdateConditions {
     pub(super) fn target(self) -> UpdateTarget {
-        if self.opening_intro {
-            UpdateTarget::OpeningIntro
+        if self.opening_animation {
+            UpdateTarget::OpeningAnimation
         } else if self.visual_or_deferred_action {
             UpdateTarget::VisualOrDeferredAction
         } else if self.opening_menu {
@@ -125,7 +125,7 @@ impl UpdateConditions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TimingMode {
-    Intro,
+    OpeningAnimation,
     Ui,
     Battle,
     Exploration,
@@ -134,7 +134,7 @@ pub(super) enum TimingMode {
 impl TimingMode {
     pub(super) const fn interval_ms(self) -> u64 {
         match self {
-            Self::Intro => OPENING_INTRO_UPDATE_MS,
+            Self::OpeningAnimation => OPENING_ANIMATION_UPDATE_MS,
             Self::Ui => UPDATE_INTERVAL_MS,
             Self::Battle => BATTLE_FRAME_MS,
             Self::Exploration => EXPLORATION_FRAME_MS,
@@ -144,7 +144,7 @@ impl TimingMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TimingState {
-    pub(super) opening_intro: bool,
+    pub(super) opening_animation: bool,
     pub(super) dialog_or_visual: bool,
     pub(super) battle: bool,
     pub(super) scripted_or_menu: bool,
@@ -152,8 +152,8 @@ pub(super) struct TimingState {
 
 impl TimingState {
     pub(super) fn mode(self) -> TimingMode {
-        if self.opening_intro {
-            TimingMode::Intro
+        if self.opening_animation {
+            TimingMode::OpeningAnimation
         } else if self.dialog_or_visual {
             TimingMode::Ui
         } else if self.battle {
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn update_targets_preserve_desktop_priority() {
         let all = UpdateConditions {
-            opening_intro: true,
+            opening_animation: true,
             visual_or_deferred_action: true,
             opening_menu: true,
             waiting_for_key: true,
@@ -184,10 +184,10 @@ mod tests {
             menu: true,
             scene_script: true,
         };
-        assert_eq!(all.target(), UpdateTarget::OpeningIntro);
+        assert_eq!(all.target(), UpdateTarget::OpeningAnimation);
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 ..all
             }
             .target(),
@@ -195,7 +195,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 ..all
             }
@@ -204,7 +204,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 ..all
@@ -214,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 waiting_for_key: false,
@@ -225,7 +225,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 waiting_for_key: false,
@@ -237,7 +237,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 waiting_for_key: false,
@@ -250,7 +250,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 waiting_for_key: false,
@@ -265,7 +265,7 @@ mod tests {
         );
         assert_eq!(
             UpdateConditions {
-                opening_intro: false,
+                opening_animation: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 waiting_for_key: false,
@@ -304,16 +304,16 @@ mod tests {
     }
 
     #[test]
-    fn timing_priority_matches_intro_ui_battle_and_exploration() {
+    fn timing_priority_matches_opening_animation_ui_battle_and_exploration() {
         assert_eq!(
             TimingState {
-                opening_intro: true,
+                opening_animation: true,
                 dialog_or_visual: true,
                 battle: true,
                 scripted_or_menu: true,
             }
             .mode(),
-            TimingMode::Intro
+            TimingMode::OpeningAnimation
         );
         assert_eq!(
             TimingState {
