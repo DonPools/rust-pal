@@ -71,7 +71,8 @@ use field::{
 };
 pub use snapshot::GameSnapshot;
 use snapshot::{
-    SavedPlayerRole, SavedRole, SavedSceneObject, SavedTrailPoint, SnapshotData, SNAPSHOT_VERSION,
+    SavedPartySlot, SavedPlayerRole, SavedRole, SavedSceneObject, SavedTrailPoint, SnapshotData,
+    SNAPSHOT_VERSION,
 };
 use state_support::{apply_role_attribute, unique_script_entries, valid_role_attribute};
 pub use state_support::{AutoScriptError, AutoScriptUpdate};
@@ -120,6 +121,7 @@ pub struct GameState<M = Map> {
     viewport_locked: bool,
     party_followers: Vec<Role>,
     extra_follower_ids: Vec<u16>,
+    party_slots: [PartySlotState; MAX_PARTY_MEMBERS],
     party_trail: [TrailPoint; MAX_PARTY_MEMBERS],
     save_scenes: Option<[AssetScene; SAVE_SCENE_CAPACITY]>,
     save_event_objects: Vec<AssetEventObject>,
@@ -136,8 +138,43 @@ struct TrailPoint {
     direction: Direction,
 }
 
+/// Runtime counterpart of Classic's fixed `rgParty` slot state.
+///
+/// Scripts may position or pose an inactive slot immediately before assigning a
+/// role to it, so these values cannot live only on the currently rendered roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartySlotState {
+    world_x: i32,
+    world_y: i32,
+    direction: Direction,
+    anim_frame: u8,
+}
+
+impl PartySlotState {
+    fn from_role(role: &Role) -> Self {
+        Self {
+            world_x: role.world_x,
+            world_y: role.world_y,
+            direction: role.direction,
+            anim_frame: role.anim_frame,
+        }
+    }
+
+    fn apply_to(self, role: &mut Role) {
+        role.world_x = self.world_x;
+        role.world_y = self.world_y;
+        role.direction = self.direction;
+        role.anim_frame = self.anim_frame;
+    }
+}
+
 impl<M: CollisionMap> GameState<M> {
     pub fn new(map: M, player: Role, viewport_width: u32, viewport_height: u32) -> Self {
+        let player_slot = PartySlotState::from_role(&player);
+        let follower_slot = PartySlotState {
+            world_y: player.world_y - 1,
+            ..player_slot
+        };
         let initial_trail = TrailPoint {
             world_x: player.world_x,
             world_y: player.world_y,
@@ -190,6 +227,13 @@ impl<M: CollisionMap> GameState<M> {
             viewport_locked: false,
             party_followers: Vec::new(),
             extra_follower_ids: Vec::new(),
+            party_slots: std::array::from_fn(|index| {
+                if index == 0 {
+                    player_slot
+                } else {
+                    follower_slot
+                }
+            }),
             party_trail: [initial_trail; MAX_PARTY_MEMBERS],
             save_scenes: None,
             save_event_objects: Vec::new(),
@@ -2761,6 +2805,7 @@ impl<M: CollisionMap> GameState<M> {
             camera_y: self.camera.y,
             party_followers: self.party_followers.clone(),
             extra_follower_ids: self.extra_follower_ids.clone(),
+            party_slots: self.current_party_slots(),
             party_trail: self.party_trail,
             player_roles: self.player_roles.clone(),
         }
@@ -2830,6 +2875,11 @@ impl<M: CollisionMap> GameState<M> {
                 .map(SavedRole::from)
                 .collect(),
             extra_follower_ids: snapshot.extra_follower_ids,
+            party_slots: snapshot
+                .party_slots
+                .iter()
+                .map(SavedPartySlot::from)
+                .collect(),
             party_trail: snapshot
                 .party_trail
                 .iter()
@@ -2934,6 +2984,13 @@ impl<M: CollisionMap> GameState<M> {
             .party_trail
             .into_iter()
             .map(SavedTrailPoint::into_point)
+            .collect::<Option<Vec<_>>>()?
+            .try_into()
+            .ok()?;
+        let party_slots = data
+            .party_slots
+            .into_iter()
+            .map(SavedPartySlot::into_slot)
             .collect::<Option<Vec<_>>>()?
             .try_into()
             .ok()?;
@@ -3064,6 +3121,7 @@ impl<M: CollisionMap> GameState<M> {
             camera_y: data.camera_y,
             party_followers,
             extra_follower_ids: data.extra_follower_ids,
+            party_slots,
             party_trail,
             player_roles: Some(player_roles),
         })
@@ -3109,6 +3167,7 @@ impl<M: CollisionMap> GameState<M> {
         self.camera.y = snapshot.camera_y;
         self.party_followers = snapshot.party_followers;
         self.extra_follower_ids = snapshot.extra_follower_ids;
+        self.party_slots = snapshot.party_slots;
         self.party_trail = snapshot.party_trail;
         self.player_roles = snapshot.player_roles;
         self.pending_auto_sounds.clear();
@@ -3174,7 +3233,7 @@ impl<M: CollisionMap> GameState<M> {
         let Some(leader) = save.player_roles.role(usize::from(role_ids[0])) else {
             return false;
         };
-        let player = Role {
+        let mut player = Role {
             sprite_index: usize::from(leader.scene_sprite_num),
             world_x: i32::from(save.viewport_x) + i32::from(save.party[0].x),
             world_y: i32::from(save.viewport_y) + i32::from(save.party[0].y),
@@ -3182,6 +3241,26 @@ impl<M: CollisionMap> GameState<M> {
             anim_frame: 0,
             frames_per_direction: leader.frames_per_direction(),
         };
+        let mut party_slots = [PartySlotState::from_role(&player); MAX_PARTY_MEMBERS];
+        for (slot, member) in party_slots.iter_mut().zip(&save.party) {
+            let frames_per_direction = save
+                .player_roles
+                .role(usize::from(member.role_id))
+                .map_or(3, PlayerRole::frames_per_direction)
+                .max(1);
+            let absolute_frame = usize::from(member.frame);
+            let saved_direction = u16::try_from(absolute_frame / usize::from(frames_per_direction))
+                .ok()
+                .and_then(Direction::from_pal)
+                .unwrap_or(direction);
+            *slot = PartySlotState {
+                world_x: i32::from(save.viewport_x) + i32::from(member.x),
+                world_y: i32::from(save.viewport_y) + i32::from(member.y),
+                direction: saved_direction,
+                anim_frame: (absolute_frame % usize::from(frames_per_direction)) as u8,
+            };
+        }
+        party_slots[0].apply_to(&mut player);
         let trail = match save
             .trail
             .iter()
@@ -3315,6 +3394,7 @@ impl<M: CollisionMap> GameState<M> {
         self.chase_range = save.chase_range;
         self.chase_speed_change_cycles = save.chase_speed_change_cycles;
         self.viewport_locked = false;
+        self.party_slots = party_slots;
         self.party_trail = trail;
         self.extra_follower_ids = extra_follower_ids;
         self.save_scenes = Some(save_scenes);
@@ -3538,6 +3618,11 @@ impl<M: CollisionMap> GameState<M> {
                 frame,
                 party_index,
             } => {
+                let slot_index = usize::from(party_index);
+                if slot_index >= MAX_PARTY_MEMBERS {
+                    return false;
+                }
+                self.sync_active_party_slots();
                 self.player.direction = direction;
                 if party_index == 0 {
                     self.player.anim_frame = frame;
@@ -3548,6 +3633,9 @@ impl<M: CollisionMap> GameState<M> {
                     follower.direction = direction;
                     follower.anim_frame = frame;
                 }
+                let slot = &mut self.party_slots[slot_index];
+                slot.direction = direction;
+                slot.anim_frame = frame;
             }
             ScriptAction::SetPlayerSprite {
                 role_id,
@@ -3567,6 +3655,7 @@ impl<M: CollisionMap> GameState<M> {
                 let frames_per_direction = role.frames_per_direction();
                 self.party.sync_from_roles(roles);
                 if reload && self.active_battle.is_none() {
+                    self.sync_active_party_slots();
                     if self
                         .party
                         .leader()
@@ -4160,6 +4249,7 @@ impl<M: CollisionMap> GameState<M> {
             }
             ScriptAction::CollapseParty => self.collapse_party(),
             ScriptAction::SetParty { members } => {
+                self.sync_active_party_slots();
                 let role_ids = members.into_iter().flatten().collect::<Vec<_>>();
                 let Some(player_roles) = self.player_roles.as_ref() else {
                     return false;
@@ -4173,12 +4263,11 @@ impl<M: CollisionMap> GameState<M> {
                     .expect("a successfully replaced party is non-empty");
                 self.player.sprite_index = usize::from(leader.attributes.scene_sprite_num);
                 self.player.frames_per_direction = leader.attributes.frames_per_direction();
-                self.player.anim_frame = 0;
                 self.extra_follower_ids.clear();
                 self.rebuild_party_followers();
-                self.collapse_party();
             }
             ScriptAction::SetPartyFollowers { followers } => {
+                self.sync_active_party_slots();
                 let follower_ids = followers.into_iter().flatten().collect::<Vec<_>>();
                 let Some(player_roles) = self.player_roles.as_ref() else {
                     return false;
@@ -5496,16 +5585,32 @@ impl<M: CollisionMap> GameState<M> {
         }
         self.party_followers = follower_roles
             .into_iter()
-            .map(|attributes| Role {
-                sprite_index: usize::from(attributes.scene_sprite_num),
-                world_x: self.player.world_x,
-                world_y: self.player.world_y,
-                direction: self.player.direction,
-                anim_frame: 0,
-                frames_per_direction: attributes.frames_per_direction(),
+            .enumerate()
+            .map(|(index, attributes)| {
+                let slot = self.party_slots[index + 1];
+                Role {
+                    sprite_index: usize::from(attributes.scene_sprite_num),
+                    world_x: slot.world_x,
+                    world_y: slot.world_y,
+                    direction: slot.direction,
+                    anim_frame: slot.anim_frame,
+                    frames_per_direction: attributes.frames_per_direction(),
+                }
             })
             .collect();
-        self.update_party_followers(false);
+    }
+
+    fn current_party_slots(&self) -> [PartySlotState; MAX_PARTY_MEMBERS] {
+        let mut slots = self.party_slots;
+        slots[0] = PartySlotState::from_role(&self.player);
+        for (slot, follower) in slots.iter_mut().skip(1).zip(&self.party_followers) {
+            *slot = PartySlotState::from_role(follower);
+        }
+        slots
+    }
+
+    fn sync_active_party_slots(&mut self) {
+        self.party_slots = self.current_party_slots();
     }
 
     fn record_party_step(&mut self, old_position: (i32, i32), direction: Direction) {
@@ -5570,6 +5675,15 @@ impl<M: CollisionMap> GameState<M> {
             follower.direction = self.player.direction;
             follower.anim_frame = 0;
         }
+        self.party_slots[0] = PartySlotState::from_role(&self.player);
+        for slot in self.party_slots.iter_mut().skip(1) {
+            *slot = PartySlotState {
+                world_x: self.player.world_x,
+                world_y: self.player.world_y - 1,
+                direction: self.player.direction,
+                anim_frame: 0,
+            };
+        }
     }
 
     fn place_party(&mut self) {
@@ -5590,12 +5704,22 @@ impl<M: CollisionMap> GameState<M> {
             point.world_y = self.player.world_y + dy * index as i32;
             point.direction = self.player.direction;
         }
-        for (index, follower) in self.party_followers.iter_mut().enumerate() {
-            let distance = index as i32 + 1;
-            follower.world_x = self.player.world_x + dx * distance;
-            follower.world_y = self.player.world_y + dy * distance;
-            follower.direction = self.player.direction;
-            follower.anim_frame = 0;
+        for (index, slot) in self.party_slots.iter_mut().enumerate() {
+            *slot = PartySlotState {
+                world_x: self.player.world_x + dx * index as i32,
+                world_y: self.player.world_y + dy * index as i32,
+                direction: self.player.direction,
+                anim_frame: 0,
+            };
+        }
+        self.party_slots[0].apply_to(&mut self.player);
+        for (slot, follower) in self
+            .party_slots
+            .iter()
+            .skip(1)
+            .zip(&mut self.party_followers)
+        {
+            slot.apply_to(follower);
         }
     }
 
@@ -7010,6 +7134,50 @@ mod tests {
     }
 
     #[test]
+    fn party_setup_preserves_position_and_pose_of_an_inactive_slot() {
+        let player_roles = PlayerRoles::parse(&vec![0; 900]).unwrap();
+        let party = Party::single(0, &player_roles).unwrap();
+        let mut state = state(&[]).with_party(party).with_player_roles(player_roles);
+        state.player.direction = Direction::West;
+
+        // Scene 22 uses this same ordering: position every fixed party slot,
+        // pose slots 0 and 1, then assign the second role to slot 1.
+        assert!(state.apply_script_action(ScriptAction::SetPlayerPosition {
+            tile_x: 34,
+            tile_y: 86,
+            half: 1,
+        }));
+        assert!(state.apply_script_action(ScriptAction::SetPlayerPose {
+            direction: Direction::East,
+            frame: 0,
+            party_index: 0,
+        }));
+        assert!(state.apply_script_action(ScriptAction::SetPlayerPose {
+            direction: Direction::East,
+            frame: 1,
+            party_index: 1,
+        }));
+        assert!(state.apply_script_action(ScriptAction::SetParty {
+            members: [Some(0), Some(1), None],
+        }));
+
+        assert_eq!((state.player.world_x, state.player.world_y), (1104, 1384));
+        let follower = &state.party_followers()[0];
+        assert_eq!((follower.world_x, follower.world_y), (1120, 1392));
+        assert_eq!(follower.direction, Direction::East);
+        assert_eq!(follower.anim_frame, 1);
+
+        let snapshot = state
+            .decode_snapshot(&state.encode_snapshot().unwrap())
+            .unwrap();
+        state.restore_snapshot(snapshot, test_map());
+        let follower = &state.party_followers()[0];
+        assert_eq!((follower.world_x, follower.world_y), (1120, 1392));
+        assert_eq!(follower.direction, Direction::East);
+        assert_eq!(follower.anim_frame, 1);
+    }
+
+    #[test]
     fn batch_object_state_requires_a_complete_global_range() {
         let mut first = blocking_object(1, 1);
         first.id = 4;
@@ -7755,7 +7923,7 @@ mod tests {
             .is_none());
         let wrong_version = String::from_utf8(encoded)
             .unwrap()
-            .replace("\"version\":20", "\"version\":19");
+            .replace(&format!("\"version\":{SNAPSHOT_VERSION}"), "\"version\":0");
         assert!(state.decode_snapshot(wrong_version.as_bytes()).is_none());
     }
 

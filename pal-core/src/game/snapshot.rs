@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::battle::{BattlePoison, BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS};
 
-use super::{Direction, Party, Role, SceneObject, TrailPoint, TriggerRequest, MAX_PARTY_MEMBERS};
+use super::{
+    Direction, Party, PartySlotState, Role, SceneObject, TrailPoint, TriggerRequest,
+    MAX_PARTY_MEMBERS,
+};
 
 /// In-memory development snapshot of platform-independent mutable game state.
 #[derive(Debug, Clone)]
@@ -45,6 +48,7 @@ pub struct GameSnapshot {
     pub(super) camera_y: i32,
     pub(super) party_followers: Vec<Role>,
     pub(super) extra_follower_ids: Vec<u16>,
+    pub(super) party_slots: [PartySlotState; MAX_PARTY_MEMBERS],
     pub(super) party_trail: [TrailPoint; MAX_PARTY_MEMBERS],
     pub(super) player_roles: Option<PlayerRoles>,
 }
@@ -59,8 +63,8 @@ impl GameSnapshot {
     }
 }
 
-// Version 20 preserves mutable global-object script fields changed by opcode 0x0090.
-pub(super) const SNAPSHOT_VERSION: u16 = 20;
+// Version 21 preserves fixed party slots that scripts may prepare before adding a member.
+pub(super) const SNAPSHOT_VERSION: u16 = 21;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
@@ -100,6 +104,7 @@ pub(super) struct SnapshotData {
     pub(super) camera_y: i32,
     pub(super) party_followers: Vec<SavedRole>,
     pub(super) extra_follower_ids: Vec<u16>,
+    pub(super) party_slots: Vec<SavedPartySlot>,
     pub(super) party_trail: Vec<SavedTrailPoint>,
     pub(super) player_roles: Vec<SavedPlayerRole>,
 }
@@ -144,6 +149,14 @@ pub(super) struct SavedTrailPoint {
     world_x: i32,
     world_y: i32,
     direction: u16,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct SavedPartySlot {
+    world_x: i32,
+    world_y: i32,
+    direction: u16,
+    anim_frame: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -293,6 +306,28 @@ impl SavedTrailPoint {
             world_x: self.world_x,
             world_y: self.world_y,
             direction: Direction::from_pal(self.direction)?,
+        })
+    }
+}
+
+impl From<&PartySlotState> for SavedPartySlot {
+    fn from(slot: &PartySlotState) -> Self {
+        Self {
+            world_x: slot.world_x,
+            world_y: slot.world_y,
+            direction: slot.direction as u16,
+            anim_frame: slot.anim_frame,
+        }
+    }
+}
+
+impl SavedPartySlot {
+    pub(super) fn into_slot(self) -> Option<PartySlotState> {
+        Some(PartySlotState {
+            world_x: self.world_x,
+            world_y: self.world_y,
+            direction: Direction::from_pal(self.direction)?,
+            anim_frame: self.anim_frame,
         })
     }
 }
