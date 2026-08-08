@@ -19,7 +19,7 @@ use super::input::HeldInput;
 use super::menu_state::{FieldMenu, OpeningMenu, OpeningMenuAction};
 use super::menu_update::{update_active_menu, MenuUpdateContext};
 use super::minimap::{MiniMapCache, MiniMapFrame};
-use super::opening_intro::{OpeningIntro, OpeningIntroAction, TITLE_MUSIC};
+use super::opening_animation::{OpeningAnimation, OpeningAnimationAction, TITLE_MUSIC};
 use super::original_save::{
     latest_original_save_slot, original_save_slots, restore_original_save, RestoreOriginalSaveError,
 };
@@ -27,7 +27,10 @@ use super::presentation::{render_game, UiRenderContext};
 use super::script_driver::{advance_script, auto_script_error_title, ScriptRenderResources};
 use super::session::{DesktopSession, MusicResources};
 use super::snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
-use super::state::{DebugState, FrontendState, TimingState, UpdateConditions, UpdateTarget};
+use super::state::{
+    AppMode, DebugState, OpeningMenuState, PlayingConditions, PlayingTarget, PlayingTimingState,
+    TickTarget, TimingMode,
+};
 use super::types::{GameResources, LoadedScene};
 use super::UI_TIME_QUANTUM_MS;
 
@@ -92,7 +95,7 @@ pub(super) struct DesktopApp<L> {
     scripts: ScriptRuntime,
     dialog: Option<ActiveDialog>,
     session: DesktopSession,
-    frontend: FrontendState,
+    app_mode: AppMode,
     input: HeldInput,
     clock: FrameClock,
     minimap_enabled: bool,
@@ -125,7 +128,7 @@ where
             &resources.player_battle_sprites,
             &resources.enemy_battle_sprites,
         );
-        let opening_intro = OpeningIntro::from_resources(
+        let opening_animation = OpeningAnimation::from_resources(
             &resources.fbp_archive,
             &resources.rng_archive,
             &resources.role_sprites,
@@ -142,7 +145,7 @@ where
             scripts,
             dialog: None,
             session,
-            frontend: FrontendState::Intro(Box::new(opening_intro)),
+            app_mode: AppMode::OpeningAnimation(Box::new(opening_animation)),
             input: HeldInput::default(),
             clock: FrameClock::new(now),
             minimap_enabled: true,
@@ -167,8 +170,7 @@ where
             self.debug.show_objects,
             self.scripts.debug_snapshot(),
             UiRenderContext {
-                opening_intro: self.frontend.intro(),
-                opening_menu: self.frontend.opening_menu(),
+                app_mode: self.app_mode.view(),
                 opening_background: &resources.opening_background,
                 dialog: self.dialog.as_ref(),
                 active_menu: session.menus.active_menu.as_ref(),
@@ -237,7 +239,7 @@ where
                     true
                 }
                 KeyCode::KeyM
-                    if matches!(&self.frontend, FrontendState::Playing)
+                    if self.app_mode.is_playing()
                         && self.game.battle().is_none()
                         && self.session.battle.post_battle.is_none()
                         && !self.scripts.is_active()
@@ -249,7 +251,7 @@ where
                     true
                 }
                 KeyCode::F5
-                    if !self.frontend.is_opening_menu()
+                    if !self.app_mode.is_opening_menu()
                         && !self.scripts.is_active()
                         && self.dialog.is_none() =>
                 {
@@ -261,7 +263,7 @@ where
                     true
                 }
                 KeyCode::F9
-                    if !self.frontend.is_opening_menu()
+                    if !self.app_mode.is_opening_menu()
                         && !self.scripts.is_active()
                         && self.dialog.is_none() =>
                 {
@@ -301,29 +303,29 @@ where
     }
 
     fn stop_exploration_walking_animation(&mut self) -> bool {
-        (self.select_update_target(false) == UpdateTarget::Exploration)
+        (self.select_tick_target(false) == TickTarget::Playing(PlayingTarget::Exploration))
             && self.game.stop_party_walking_animation()
     }
 
-    fn timing_state(&self) -> TimingState {
-        TimingState {
-            opening_intro: self.frontend.is_intro(),
-            dialog_or_visual: self.session.visual.is_blocking()
-                || self.dialog.is_some()
-                || self.session.scripts.waiting_for_key,
-            battle: self.game.battle().is_some() || self.session.battle.post_battle.is_some(),
-            scripted_or_menu: self.frontend.is_opening_menu()
-                || self.scripts.is_active()
-                || self.battle_scripts.is_active()
-                || self.session.has_active_menu(),
+    fn timing_mode(&self) -> TimingMode {
+        match &self.app_mode {
+            AppMode::OpeningAnimation(_) => TimingMode::OpeningAnimation,
+            AppMode::OpeningMenu(_) => TimingMode::Ui,
+            AppMode::Playing => PlayingTimingState {
+                dialog_or_visual: self.session.visual.is_blocking()
+                    || self.dialog.is_some()
+                    || self.session.scripts.waiting_for_key,
+                battle: self.game.battle().is_some() || self.session.battle.post_battle.is_some(),
+                scripted_or_menu: self.scripts.is_active()
+                    || self.battle_scripts.is_active()
+                    || self.session.has_active_menu(),
+            }
+            .mode(),
         }
     }
 
-    fn select_update_target(&self, visual_or_deferred_action: bool) -> UpdateTarget {
-        UpdateConditions {
-            opening_intro: self.frontend.is_intro(),
-            visual_or_deferred_action,
-            opening_menu: self.frontend.is_opening_menu(),
+    fn select_playing_target(&self) -> PlayingTarget {
+        PlayingConditions {
             waiting_for_key: self.session.scripts.waiting_for_key,
             dialog: self.dialog.is_some(),
             post_battle: self.session.battle.post_battle.is_some(),
@@ -334,6 +336,18 @@ where
             scene_script: self.scripts.is_active(),
         }
         .target()
+    }
+
+    fn select_tick_target(&self, visual_or_deferred_action: bool) -> TickTarget {
+        match &self.app_mode {
+            AppMode::OpeningAnimation(_) => TickTarget::OpeningAnimation,
+            AppMode::OpeningMenu(_) if visual_or_deferred_action => {
+                TickTarget::VisualOrDeferredAction
+            }
+            AppMode::OpeningMenu(_) => TickTarget::OpeningMenu,
+            AppMode::Playing if visual_or_deferred_action => TickTarget::VisualOrDeferredAction,
+            AppMode::Playing => TickTarget::Playing(self.select_playing_target()),
+        }
     }
 
     fn advance_active_script(&mut self, set_title: &mut impl FnMut(&str)) {
@@ -428,36 +442,35 @@ where
         Ok(())
     }
 
-    fn advance_intro(
+    fn advance_opening_animation(
         &mut self,
         update_tick: Duration,
         input: pal_core::game::GameInput,
         set_title: &mut impl FnMut(&str),
     ) -> (bool, bool) {
-        let FrontendState::Intro(intro) = &mut self.frontend else {
+        let AppMode::OpeningAnimation(animation) = &mut self.app_mode else {
             return (false, false);
         };
-        let (changed, action) = intro
+        let (changed, action) = animation
             .update(
                 update_tick.as_millis() as u32,
                 input,
                 &self.resources.rng_archive,
             )
             .unwrap_or_else(|error| panic!("failed to play original opening animation: {error}"));
-        let finished = action == OpeningIntroAction::Finished;
+        let finished = action == OpeningAnimationAction::Finished;
         match action {
-            OpeningIntroAction::None => {}
-            OpeningIntroAction::PlayTitleMusic => {
+            OpeningAnimationAction::None => {}
+            OpeningAnimationAction::PlayTitleMusic => {
                 if !self.session.audio.music.play(TITLE_MUSIC, true, 2) {
                     set_title("Rust-PAL [title music unavailable]");
                 }
             }
-            OpeningIntroAction::StopTitleMusic => self.session.audio.music.stop(),
-            OpeningIntroAction::Finished => {
-                self.frontend = FrontendState::OpeningMenu {
-                    menu: OpeningMenu::new(original_save_slots(&self.resources.original_save_dir)),
-                    pending_action: None,
-                };
+            OpeningAnimationAction::StopTitleMusic => self.session.audio.music.stop(),
+            OpeningAnimationAction::Finished => {
+                self.app_mode = AppMode::OpeningMenu(OpeningMenuState::new(OpeningMenu::new(
+                    original_save_slots(&self.resources.original_save_dir),
+                )));
                 self.session.visual.restore_original_environment(false, 0);
                 if !self.session.audio.music.play(OPENING_MENU_MUSIC, true, 1) {
                     set_title("Rust-PAL [opening music unavailable]");
@@ -485,14 +498,14 @@ where
         input: pal_core::game::GameInput,
         set_title: &mut impl FnMut(&str),
     ) -> bool {
-        let pending = match &mut self.frontend {
-            FrontendState::OpeningMenu { pending_action, .. } => pending_action.take(),
-            FrontendState::Intro(_) | FrontendState::Playing => return false,
+        let pending = match &mut self.app_mode {
+            AppMode::OpeningMenu(state) => state.pending_action.take(),
+            AppMode::OpeningAnimation(_) | AppMode::Playing => return false,
         };
         if let Some(action) = pending {
             match action {
                 OpeningMenuAction::StartNewGame => {
-                    self.frontend = FrontendState::Playing;
+                    self.app_mode = AppMode::Playing;
                     self.session.clear_transient_interaction();
                     self.session.audio.music.stop();
                     self.session.visual.prepare_scene_fade_in();
@@ -511,7 +524,7 @@ where
                 OpeningMenuAction::LoadSlot(slot) => {
                     match self.restore_original_slot(slot, true, false) {
                         Ok(()) => {
-                            self.frontend = FrontendState::Playing;
+                            self.app_mode = AppMode::Playing;
                             set_title(&format!("Rust-PAL [save slot {slot} loaded]"));
                         }
                         Err(RestoreOriginalSaveError::SceneUnavailable) => {
@@ -533,9 +546,9 @@ where
             return true;
         }
 
-        let action = match &mut self.frontend {
-            FrontendState::OpeningMenu { menu, .. } => menu.update(input),
-            FrontendState::Intro(_) | FrontendState::Playing => return false,
+        let action = match &mut self.app_mode {
+            AppMode::OpeningMenu(state) => state.menu.update(input),
+            AppMode::OpeningAnimation(_) | AppMode::Playing => return false,
         };
         if action != OpeningMenuAction::None {
             if self
@@ -543,8 +556,8 @@ where
                 .visual
                 .queue(ScriptVisual::FadeOut { speed: 1 })
             {
-                if let FrontendState::OpeningMenu { pending_action, .. } = &mut self.frontend {
-                    *pending_action = Some(action);
+                if let AppMode::OpeningMenu(state) = &mut self.app_mode {
+                    state.pending_action = Some(action);
                 }
             } else {
                 set_title("Rust-PAL [opening transition is already active]");
@@ -725,28 +738,25 @@ where
     }
 
     fn current_update_tick(&self) -> Duration {
-        Duration::from_millis(self.timing_state().mode().interval_ms())
+        Duration::from_millis(self.timing_mode().interval_ms())
     }
 
-    /// Advance elapsed-time-driven dialog playback independently of the slower
-    /// fixed simulation tick used by scripts and exploration.
-    fn advance_realtime_dialog_playback(&mut self, elapsed: Duration) -> bool {
-        let can_advance = !self.frontend.is_intro()
-            && !self.frontend.is_opening_menu()
-            && !self.session.visual.is_blocking()
-            && !self.session.scripts.waiting_for_key
-            && self
-                .dialog
-                .as_ref()
-                .is_some_and(|dialog| !dialog.awaiting_input);
-        if !can_advance {
+    /// Advance elapsed-time-driven state independently of the fixed simulation
+    /// tick used by scripts, battles, and exploration.
+    fn advance_realtime(&mut self, elapsed: Duration) -> bool {
+        if !self.app_mode.is_playing() {
             return false;
         }
+        self.advance_dialog_reveal(elapsed)
+    }
 
-        let dialog = self
-            .dialog
-            .as_mut()
-            .expect("dialog availability was checked above");
+    fn advance_dialog_reveal(&mut self, elapsed: Duration) -> bool {
+        if self.session.visual.is_blocking() || self.session.scripts.waiting_for_key {
+            return false;
+        }
+        let Some(dialog) = self.dialog.as_mut().filter(|dialog| !dialog.awaiting_input) else {
+            return false;
+        };
         let before = (dialog.revealed_glyphs, dialog.awaiting_input);
         let _ = advance_dialog_playback(
             &self.resources.text,
@@ -825,9 +835,9 @@ where
         true
     }
 
-    fn advance_update_target(
+    fn advance_tick_target(
         &mut self,
-        target: UpdateTarget,
+        target: TickTarget,
         update_tick: Duration,
         input: pal_core::game::GameInput,
         any_pressed: bool,
@@ -835,8 +845,9 @@ where
         set_title: &mut impl FnMut(&str),
     ) -> TargetOutcome {
         match target {
-            UpdateTarget::OpeningIntro => {
-                let (changed, finished) = self.advance_intro(update_tick, input, set_title);
+            TickTarget::OpeningAnimation => {
+                let (changed, finished) =
+                    self.advance_opening_animation(update_tick, input, set_title);
                 TargetOutcome {
                     changed,
                     visual_finalization: VisualFinalization::Defer,
@@ -847,13 +858,27 @@ where
                     },
                 }
             }
-            UpdateTarget::VisualOrDeferredAction => {
+            TickTarget::VisualOrDeferredAction => {
                 TargetOutcome::run(visual_scene_update_due && self.update_auto_scripts(set_title))
             }
-            UpdateTarget::OpeningMenu => {
+            TickTarget::OpeningMenu => {
                 TargetOutcome::run(self.advance_opening_menu(input, set_title))
             }
-            UpdateTarget::WaitingForKey => {
+            TickTarget::Playing(target) => {
+                self.advance_playing_target(target, input, any_pressed, set_title)
+            }
+        }
+    }
+
+    fn advance_playing_target(
+        &mut self,
+        target: PlayingTarget,
+        input: pal_core::game::GameInput,
+        any_pressed: bool,
+        set_title: &mut impl FnMut(&str),
+    ) -> TargetOutcome {
+        match target {
+            PlayingTarget::WaitingForKey => {
                 if any_pressed {
                     self.session.scripts.waiting_for_key = false;
                     self.advance_active_script(set_title);
@@ -862,26 +887,26 @@ where
                     TargetOutcome::run(false)
                 }
             }
-            UpdateTarget::Dialog => {
+            PlayingTarget::Dialog => {
                 TargetOutcome::run(self.advance_dialog(input, any_pressed, set_title))
             }
-            UpdateTarget::PostBattle => {
+            PlayingTarget::PostBattle => {
                 advance_post_battle(any_pressed, &mut self.game, &mut self.session);
                 TargetOutcome::run(true)
             }
-            UpdateTarget::BattleScript => {
+            PlayingTarget::BattleScript => {
                 let changed = self.advance_battle(input, any_pressed, set_title);
                 TargetOutcome::defer(changed)
             }
-            UpdateTarget::Battle => {
+            PlayingTarget::Battle => {
                 TargetOutcome::run(self.advance_battle(input, any_pressed, set_title))
             }
-            UpdateTarget::Menu => TargetOutcome::run(self.advance_menu(input, set_title)),
-            UpdateTarget::SceneScript => {
+            PlayingTarget::Menu => TargetOutcome::run(self.advance_menu(input, set_title)),
+            PlayingTarget::SceneScript => {
                 self.advance_scene_script(set_title);
                 TargetOutcome::run(true)
             }
-            UpdateTarget::Exploration => {
+            PlayingTarget::Exploration => {
                 let (changed, opened_menu) = self.advance_exploration(input, set_title);
                 if opened_menu {
                     TargetOutcome::defer(changed)
@@ -898,7 +923,7 @@ where
             || self.dialog.is_some()
             || self.session.scripts.waiting_for_key
             || self.session.has_active_menu();
-        !self.frontend.is_opening_menu() && script_execution_paused
+        !self.app_mode.is_opening_menu() && script_execution_paused
     }
 
     fn finish_tick_visuals(&mut self, set_title: &mut impl FnMut(&str)) -> bool {
@@ -916,8 +941,8 @@ where
         let (input, any_pressed) = self.input.sample();
         let mut outcome = TickOutcome::default();
 
-        let (target, visual_scene_update_due) = if self.frontend.is_intro() {
-            (self.select_update_target(false), false)
+        let (target, visual_scene_update_due) = if self.app_mode.is_opening_animation() {
+            (self.select_tick_target(false), false)
         } else {
             // Target selection intentionally uses the visual state from before
             // update(), so a visual finishing now cannot also advance gameplay.
@@ -933,11 +958,11 @@ where
 
             let deferred_action_handled = selected_load_handled || last_save_load_handled;
             (
-                self.select_update_target(visual_was_blocking || deferred_action_handled),
+                self.select_tick_target(visual_was_blocking || deferred_action_handled),
                 visual_scene_update_due,
             )
         };
-        let target_outcome = self.advance_update_target(
+        let target_outcome = self.advance_tick_target(
             target,
             update_tick,
             input,
@@ -958,7 +983,7 @@ where
     }
 
     fn needs_continuous_ui_redraw(&self) -> bool {
-        self.frontend.is_opening_menu() || (self.dialog.is_none() && self.session.has_active_menu())
+        self.app_mode.is_opening_menu() || (self.dialog.is_none() && self.session.has_active_menu())
     }
 
     fn next_wakeup(&self, now: Instant) -> Instant {
@@ -980,7 +1005,7 @@ where
     ) -> AdvanceResult {
         self.session.audio.music.poll();
         let frame_elapsed = self.clock.begin_frame(now);
-        let mut changed = self.advance_realtime_dialog_playback(frame_elapsed);
+        let mut changed = self.advance_realtime(frame_elapsed);
         let mut exit = false;
 
         // Keep one timing mode for this catch-up cycle. State transitions affect
@@ -1059,7 +1084,7 @@ where
         surface_height: u32,
     ) -> Option<&MiniMapFrame> {
         let visible = self.minimap_enabled
-            && matches!(&self.frontend, FrontendState::Playing)
+            && self.app_mode.is_playing()
             && !self.debug.show_script
             && self.game.battle().is_none()
             && self.session.battle.post_battle.is_none()
@@ -1107,18 +1132,21 @@ where
 
 #[cfg(test)]
 pub(super) fn update_interval_ms(
-    opening_intro: bool,
+    opening_animation: bool,
     dialog_or_visual: bool,
     battle: bool,
     scripted_or_menu: bool,
 ) -> u64 {
-    TimingState {
-        opening_intro,
-        dialog_or_visual,
-        battle,
-        scripted_or_menu,
+    if opening_animation {
+        TimingMode::OpeningAnimation
+    } else {
+        PlayingTimingState {
+            dialog_or_visual,
+            battle,
+            scripted_or_menu,
+        }
+        .mode()
     }
-    .mode()
     .interval_ms()
 }
 
