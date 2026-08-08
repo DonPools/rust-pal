@@ -110,6 +110,7 @@ pub(super) struct PostBattlePresentation {
     pub(super) pages: Vec<BattleSettlementPage>,
     pub(super) page: usize,
     pub(super) ticks_remaining: u16,
+    pub(super) presented_page: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,8 +157,32 @@ fn draw_battle_fighter_sprites(renderer: &mut Renderer, sprites: &mut [BattleFig
 }
 
 impl PostBattlePresentation {
-    pub(super) fn current_page(&self) -> Option<&BattleSettlementPage> {
-        self.pages.get(self.page)
+    pub(super) fn visible_pages(&self) -> (bool, &[BattleSettlementPage]) {
+        classic_post_battle_page_stack(&self.pages, self.page)
+    }
+
+    pub(super) fn mark_current_page_presented(&mut self) {
+        if self.pages.get(self.page).is_some() {
+            self.presented_page = Some(self.page);
+        }
+    }
+}
+
+/// Classic keeps drawing reward notices onto the current screen. A primary level-up page is the
+/// only notice that restores the backed-up battlefield first, so it starts a new visible stack.
+fn classic_post_battle_page_stack(
+    pages: &[BattleSettlementPage],
+    current: usize,
+) -> (bool, &[BattleSettlementPage]) {
+    let Some(visible) = pages.get(..=current) else {
+        return (true, &[]);
+    };
+    match visible
+        .iter()
+        .rposition(|page| matches!(page, BattleSettlementPage::LevelUp { .. }))
+    {
+        Some(start) => (false, &visible[start..]),
+        None => (true, visible),
     }
 }
 
@@ -170,6 +195,16 @@ pub fn render_battle(
     battle: &BattleState,
     resources: BattleRenderResources<'_>,
     state: BattleRenderState<'_>,
+) {
+    render_battle_frame(renderer, battle, resources, state, true);
+}
+
+pub(super) fn render_battle_frame(
+    renderer: &mut Renderer,
+    battle: &BattleState,
+    resources: BattleRenderResources<'_>,
+    state: BattleRenderState<'_>,
+    settlement_visible: bool,
 ) {
     let BattleRenderState {
         selected_enemy,
@@ -709,7 +744,7 @@ pub fn render_battle(
             resources.cash,
         );
     }
-    if event.is_none() {
+    if event.is_none() && settlement_visible {
         if let BattlePhase::Finished(result) = battle.phase() {
             render_settlement(
                 renderer,
@@ -1933,16 +1968,26 @@ fn render_settlement(
     }
 }
 
-pub(super) fn render_post_battle_page(
+pub(super) fn render_post_battle_pages(
     renderer: &mut Renderer,
     presentation: &PostBattlePresentation,
     ui_sprites: &[RleBitmap],
     text: &TextLibrary,
     font: &BitmapFont,
 ) {
-    let Some(page) = presentation.current_page() else {
-        return;
-    };
+    for page in presentation.visible_pages().1 {
+        render_post_battle_page(renderer, presentation, page, ui_sprites, text, font);
+    }
+}
+
+fn render_post_battle_page(
+    renderer: &mut Renderer,
+    presentation: &PostBattlePresentation,
+    page: &BattleSettlementPage,
+    ui_sprites: &[RleBitmap],
+    text: &TextLibrary,
+    font: &BitmapFont,
+) {
     match page {
         BattleSettlementPage::LevelUp { before, after } => {
             let property_length = (48usize..=55)
@@ -2601,6 +2646,7 @@ fn player_position(count: usize, index: usize) -> (i32, i32) {
 mod tests {
     use super::*;
     use pal_assets::palette::{Palette, PaletteColor};
+    use pal_assets::player_roles::{PlayerRoles, PLAYER_ROLE_COUNT};
 
     fn fighter_sprite(color: u8, depth_x: i32, depth_y: i32) -> BattleFighterSprite {
         BattleFighterSprite {
@@ -2613,11 +2659,70 @@ mod tests {
         }
     }
 
+    fn player_role() -> PlayerRole {
+        let data = vec![0; 75 * PLAYER_ROLE_COUNT * 2];
+        PlayerRoles::parse(&data).unwrap().role(0).unwrap().clone()
+    }
+
     #[test]
     fn battle_animation_clock_uses_original_forty_millisecond_frames() {
         assert_eq!(battle_animation_ticks(3), 0);
         assert_eq!(battle_animation_ticks(4), 1);
         assert_eq!(battle_animation_ticks(8), 2);
+    }
+
+    #[test]
+    fn classic_post_battle_notices_accumulate_and_primary_level_up_resets_the_screen() {
+        let role = player_role();
+        let pages = vec![
+            BattleSettlementPage::AttributeGrowth {
+                role_id: 0,
+                label: 49,
+                amount: 1,
+            },
+            BattleSettlementPage::LearnedMagic {
+                role_id: 0,
+                magic_object: 1,
+            },
+            BattleSettlementPage::LevelUp {
+                before: Box::new(role.clone()),
+                after: Box::new(role.clone()),
+            },
+            BattleSettlementPage::AttributeGrowth {
+                role_id: 0,
+                label: 51,
+                amount: 2,
+            },
+            BattleSettlementPage::LevelUp {
+                before: Box::new(role.clone()),
+                after: Box::new(role),
+            },
+            BattleSettlementPage::LearnedMagic {
+                role_id: 0,
+                magic_object: 2,
+            },
+        ];
+
+        let (summary_visible, visible) = classic_post_battle_page_stack(&pages, 1);
+        assert!(summary_visible);
+        assert_eq!(visible.len(), 2);
+
+        let (summary_visible, visible) = classic_post_battle_page_stack(&pages, 3);
+        assert!(!summary_visible);
+        assert_eq!(visible.len(), 2);
+        assert!(matches!(visible[0], BattleSettlementPage::LevelUp { .. }));
+
+        let (summary_visible, visible) = classic_post_battle_page_stack(&pages, 5);
+        assert!(!summary_visible);
+        assert_eq!(visible.len(), 2);
+        assert!(matches!(visible[0], BattleSettlementPage::LevelUp { .. }));
+        assert!(matches!(
+            visible[1],
+            BattleSettlementPage::LearnedMagic {
+                magic_object: 2,
+                ..
+            }
+        ));
     }
 
     #[test]

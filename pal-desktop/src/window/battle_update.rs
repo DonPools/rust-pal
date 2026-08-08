@@ -119,6 +119,7 @@ pub(super) fn update_battle(
                 pages,
                 page: 0,
                 ticks_remaining: battle_milliseconds_to_ticks(POST_BATTLE_PAGE_MS),
+                presented_page: None,
             });
             return None;
         }
@@ -247,7 +248,12 @@ pub(super) fn advance_post_battle(
     let Some(presentation) = services.battle.post_battle.as_mut() else {
         return false;
     };
-    if !advance_countdown(&mut presentation.ticks_remaining, any_pressed) {
+    if !advance_post_battle_countdown(
+        presentation.page,
+        presentation.presented_page,
+        &mut presentation.ticks_remaining,
+        any_pressed,
+    ) {
         return false;
     }
     presentation.page += 1;
@@ -347,6 +353,19 @@ fn advance_countdown(ticks: &mut u16, skip: bool) -> bool {
     }
     *ticks = ticks.saturating_sub(1);
     *ticks == 0
+}
+
+fn advance_post_battle_countdown(
+    current_page: usize,
+    presented_page: Option<usize>,
+    ticks: &mut u16,
+    skip: bool,
+) -> bool {
+    // PAL_WaitForAnyKey clears stale input only after the new notice has reached the screen.
+    if presented_page != Some(current_page) {
+        return false;
+    }
+    advance_countdown(ticks, skip)
 }
 
 fn commit_battle_action(
@@ -1996,6 +2015,16 @@ mod tests {
         let mut skipped = None;
         assert!(wait_elapsed(&mut skipped, settlement_ticks, true));
         assert_eq!(skipped, None);
+    }
+
+    #[test]
+    fn post_battle_notice_discards_input_until_the_page_has_been_presented() {
+        let mut ticks = battle_milliseconds_to_ticks(POST_BATTLE_PAGE_MS);
+        assert!(!advance_post_battle_countdown(2, Some(1), &mut ticks, true));
+        assert_eq!(ticks, battle_milliseconds_to_ticks(POST_BATTLE_PAGE_MS));
+
+        assert!(advance_post_battle_countdown(2, Some(2), &mut ticks, true));
+        assert_eq!(ticks, 0);
     }
 
     #[test]

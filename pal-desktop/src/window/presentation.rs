@@ -10,7 +10,7 @@ use pal_core::script::ScriptDebugSnapshot;
 
 use super::battle_render::BattleMenuState;
 use super::battle_render::{
-    render_battle, render_post_battle_page, BattleRenderResources, BattleRenderState,
+    render_battle_frame, render_post_battle_pages, BattleRenderResources, BattleRenderState,
     PostBattlePresentation,
 };
 use super::debug_render::{focused_debug_object, render_collision_overlay, render_object_overlay};
@@ -115,7 +115,10 @@ pub(super) fn render_game(
             .map(|presentation| &presentation.battle)
             .or_else(|| game.battle())
         {
-            render_battle(
+            let settlement_visible = ui
+                .post_battle
+                .is_none_or(|presentation| presentation.visible_pages().0);
+            render_battle_frame(
                 renderer,
                 battle,
                 BattleRenderResources {
@@ -148,9 +151,10 @@ pub(super) fn render_game(
                     },
                     kept_effects: ui.battle_kept_effects,
                 },
+                settlement_visible,
             );
             if let Some(presentation) = ui.post_battle {
-                render_post_battle_page(renderer, presentation, ui.ui_sprites, ui.text, ui.font);
+                render_post_battle_pages(renderer, presentation, ui.ui_sprites, ui.text, ui.font);
             } else if let BattleMenuState::Status { selected } = ui.battle_menu {
                 render_status_menu(
                     renderer,

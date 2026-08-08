@@ -158,6 +158,9 @@ where
                 visual: &session.visual,
             },
         );
+        if let Some(presentation) = self.session.battle.post_battle.as_mut() {
+            presentation.mark_current_page_presented();
+        }
     }
 
     pub(super) fn handle_key_event(
