@@ -67,7 +67,7 @@ impl FrontendState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum UpdateLane {
+pub(super) enum UpdateTarget {
     OpeningIntro,
     VisualOrDeferredAction,
     OpeningMenu,
@@ -82,7 +82,7 @@ pub(super) enum UpdateLane {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct UpdateLaneState {
+pub(super) struct UpdateConditions {
     pub(super) opening_intro: bool,
     pub(super) visual_or_deferred_action: bool,
     pub(super) opening_menu: bool,
@@ -95,30 +95,30 @@ pub(super) struct UpdateLaneState {
     pub(super) scene_script: bool,
 }
 
-impl UpdateLaneState {
-    pub(super) fn lane(self) -> UpdateLane {
+impl UpdateConditions {
+    pub(super) fn target(self) -> UpdateTarget {
         if self.opening_intro {
-            UpdateLane::OpeningIntro
+            UpdateTarget::OpeningIntro
         } else if self.visual_or_deferred_action {
-            UpdateLane::VisualOrDeferredAction
+            UpdateTarget::VisualOrDeferredAction
         } else if self.opening_menu {
-            UpdateLane::OpeningMenu
+            UpdateTarget::OpeningMenu
         } else if self.waiting_for_key {
-            UpdateLane::WaitingForKey
+            UpdateTarget::WaitingForKey
         } else if self.dialog {
-            UpdateLane::Dialog
+            UpdateTarget::Dialog
         } else if self.post_battle {
-            UpdateLane::PostBattle
+            UpdateTarget::PostBattle
         } else if self.battle && self.battle_script_ready {
-            UpdateLane::BattleScript
+            UpdateTarget::BattleScript
         } else if self.battle {
-            UpdateLane::Battle
+            UpdateTarget::Battle
         } else if self.menu {
-            UpdateLane::Menu
+            UpdateTarget::Menu
         } else if self.scene_script {
-            UpdateLane::SceneScript
+            UpdateTarget::SceneScript
         } else {
-            UpdateLane::Exploration
+            UpdateTarget::Exploration
         }
     }
 }
@@ -171,8 +171,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_lanes_preserve_desktop_priority() {
-        let all = UpdateLaneState {
+    fn update_targets_preserve_desktop_priority() {
+        let all = UpdateConditions {
             opening_intro: true,
             visual_or_deferred_action: true,
             opening_menu: true,
@@ -184,47 +184,47 @@ mod tests {
             menu: true,
             scene_script: true,
         };
-        assert_eq!(all.lane(), UpdateLane::OpeningIntro);
+        assert_eq!(all.target(), UpdateTarget::OpeningIntro);
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::VisualOrDeferredAction
+            .target(),
+            UpdateTarget::VisualOrDeferredAction
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::OpeningMenu
+            .target(),
+            UpdateTarget::OpeningMenu
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::WaitingForKey
+            .target(),
+            UpdateTarget::WaitingForKey
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
                 waiting_for_key: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::Dialog
+            .target(),
+            UpdateTarget::Dialog
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
@@ -232,11 +232,11 @@ mod tests {
                 dialog: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::PostBattle
+            .target(),
+            UpdateTarget::PostBattle
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
@@ -245,11 +245,11 @@ mod tests {
                 post_battle: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::BattleScript
+            .target(),
+            UpdateTarget::BattleScript
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
@@ -260,11 +260,11 @@ mod tests {
                 battle_script_ready: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::Menu
+            .target(),
+            UpdateTarget::Menu
         );
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 opening_intro: false,
                 visual_or_deferred_action: false,
                 opening_menu: false,
@@ -276,27 +276,30 @@ mod tests {
                 menu: false,
                 ..all
             }
-            .lane(),
-            UpdateLane::SceneScript
+            .target(),
+            UpdateTarget::SceneScript
         );
-        assert_eq!(UpdateLaneState::default().lane(), UpdateLane::Exploration);
+        assert_eq!(
+            UpdateConditions::default().target(),
+            UpdateTarget::Exploration
+        );
     }
 
     #[test]
     fn battle_script_only_preempts_a_running_battle_when_ready() {
-        let battle = UpdateLaneState {
+        let battle = UpdateConditions {
             battle: true,
             battle_script_ready: true,
-            ..UpdateLaneState::default()
+            ..UpdateConditions::default()
         };
-        assert_eq!(battle.lane(), UpdateLane::BattleScript);
+        assert_eq!(battle.target(), UpdateTarget::BattleScript);
         assert_eq!(
-            UpdateLaneState {
+            UpdateConditions {
                 battle_script_ready: false,
                 ..battle
             }
-            .lane(),
-            UpdateLane::Battle
+            .target(),
+            UpdateTarget::Battle
         );
     }
 
