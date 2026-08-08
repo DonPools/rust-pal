@@ -741,24 +741,22 @@ where
         Duration::from_millis(self.timing_mode().interval_ms())
     }
 
-    /// Advance elapsed-time-driven dialog playback independently of the slower
-    /// fixed simulation tick used by scripts and exploration.
-    fn advance_realtime_dialog_playback(&mut self, elapsed: Duration) -> bool {
-        let can_advance = self.app_mode.is_playing()
-            && !self.session.visual.is_blocking()
-            && !self.session.scripts.waiting_for_key
-            && self
-                .dialog
-                .as_ref()
-                .is_some_and(|dialog| !dialog.awaiting_input);
-        if !can_advance {
+    /// Advance elapsed-time-driven state independently of the fixed simulation
+    /// tick used by scripts, battles, and exploration.
+    fn advance_realtime(&mut self, elapsed: Duration) -> bool {
+        if !self.app_mode.is_playing() {
             return false;
         }
+        self.advance_dialog_reveal(elapsed)
+    }
 
-        let dialog = self
-            .dialog
-            .as_mut()
-            .expect("dialog availability was checked above");
+    fn advance_dialog_reveal(&mut self, elapsed: Duration) -> bool {
+        if self.session.visual.is_blocking() || self.session.scripts.waiting_for_key {
+            return false;
+        }
+        let Some(dialog) = self.dialog.as_mut().filter(|dialog| !dialog.awaiting_input) else {
+            return false;
+        };
         let before = (dialog.revealed_glyphs, dialog.awaiting_input);
         let _ = advance_dialog_playback(
             &self.resources.text,
@@ -1007,7 +1005,7 @@ where
     ) -> AdvanceResult {
         self.session.audio.music.poll();
         let frame_elapsed = self.clock.begin_frame(now);
-        let mut changed = self.advance_realtime_dialog_playback(frame_elapsed);
+        let mut changed = self.advance_realtime(frame_elapsed);
         let mut exit = false;
 
         // Keep one timing mode for this catch-up cycle. State transitions affect
