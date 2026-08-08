@@ -1,4 +1,4 @@
-//! Physical-resolution battle diagnostics rendered above the scaled game framebuffer.
+//! Read-only battle assistance rendered beside the scaled game framebuffer.
 
 use std::collections::HashMap;
 use std::env;
@@ -7,16 +7,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use encoding_rs::BIG5;
 use fontdue::{Font, FontSettings};
-use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleState, MagicEventPhase};
+use pal_assets::text::TextLibrary;
+use pal_core::battle::{BattleState, BattleStatus};
 use pixels::wgpu;
 
-use super::session::{BattleDebugHit, BattleDebugTarget};
+use super::game_viewport::SurfaceRect;
 
 const SURFACE_MARGIN: f32 = 12.0;
-const MAX_PANEL_WIDTH: f32 = 520.0;
+const MAX_PANEL_WIDTH: f32 = 300.0;
+const MAX_RASTER_SCALE: f32 = 1.5;
 
-const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 const PANEL: [u8; 4] = [8, 15, 24, 205];
 const PANEL_BORDER: [u8; 4] = [86, 111, 137, 220];
 const CARD: [u8; 4] = [18, 29, 43, 184];
@@ -56,94 +58,46 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tone {
-    Neutral,
-    Accent,
-    Good,
-    Warning,
-    Danger,
-}
-
-impl Tone {
-    fn color(self) -> [u8; 4] {
-        match self {
-            Self::Neutral => TEXT,
-            Self::Accent => ACCENT,
-            Self::Good => GOOD,
-            Self::Warning => WARNING,
-            Self::Danger => DANGER,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EventView {
-    title: String,
-    detail: String,
-    tone: Tone,
+struct StatusView {
+    label: &'static str,
+    rounds: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EnemyView {
     index: usize,
-    object_id: u16,
-    enemy_id: u16,
+    name: String,
     hp: u16,
-    hp_signed: i16,
     max_hp: u16,
     alive: bool,
     level: u16,
-    attack_signed: i16,
-    effective_attack: u16,
-    defense_raw: u16,
-    defense_signed: i16,
-    effective_defense: u16,
-    simulated_magic_defense: u16,
+    attack: u16,
+    defense: u16,
     physical_resistance: u16,
+    elemental_resistance: [u16; pal_assets::battle::MAGIC_ELEMENT_COUNT],
+    statuses: Vec<StatusView>,
+    poisoned: bool,
 }
 
 impl EnemyView {
     fn display_hp(&self) -> u16 {
-        u16::try_from(self.hp_signed.max(0))
+        u16::try_from((self.hp as i16).max(0))
             .unwrap_or(0)
             .min(self.max_hp)
     }
 
-    fn hp_summary(&self) -> String {
-        if self.hp > self.max_hp || self.hp_signed < 0 {
-            format!(
-                "HP {}/{} · raw {} ({})",
-                self.display_hp(),
-                self.max_hp,
-                self.hp,
-                self.hp_signed
-            )
-        } else {
-            format!("HP {}/{}", self.display_hp(), self.max_hp)
+    fn status_summary(&self) -> String {
+        let mut labels = self
+            .statuses
+            .iter()
+            .map(|status| format!("{}{}", status.label, status.rounds))
+            .collect::<Vec<_>>();
+        if self.poisoned {
+            labels.push("毒".to_owned());
         }
+        labels.join(" · ")
     }
-
-    fn defense_summary(&self) -> String {
-        if self.effective_defense == self.simulated_magic_defense {
-            format!("防 {}→{}", self.defense_signed, self.effective_defense)
-        } else {
-            format!(
-                "防 {}→{} / 模 {}",
-                self.defense_signed, self.effective_defense, self.simulated_magic_defense
-            )
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PlayerView {
-    index: usize,
-    hp: u16,
-    max_hp: u16,
-    attack: u16,
-    magic: u16,
-    defense: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,21 +105,16 @@ pub(super) struct BattleDebugSnapshot {
     scale_factor: f64,
     surface_width: u32,
     surface_height: u32,
-    enemy_team: u16,
     round: u32,
-    phase: &'static str,
-    active_player: Option<usize>,
-    current_event: EventView,
-    last_hit: EventView,
+    selected_enemy: Option<usize>,
     enemies: Vec<EnemyView>,
-    players: Vec<PlayerView>,
 }
 
 impl BattleDebugSnapshot {
     pub(super) fn capture(
         battle: &BattleState,
-        current_event: Option<BattleEvent>,
-        last_hit: Option<BattleDebugHit>,
+        text: &TextLibrary,
+        selected_enemy: Option<usize>,
         scale_factor: f64,
         surface_width: u32,
         surface_height: u32,
@@ -174,57 +123,67 @@ impl BattleDebugSnapshot {
             .enemies
             .iter()
             .enumerate()
+            .filter(|(_, enemy)| enemy.object_id != 0)
             .map(|(index, enemy)| EnemyView {
                 index,
-                object_id: enemy.object_id,
-                enemy_id: enemy.enemy_id,
+                name: text
+                    .word(usize::from(enemy.object_id))
+                    .and_then(decode_big5)
+                    .unwrap_or_else(|| format!("敌人 {}", index + 1)),
                 hp: enemy.hp,
-                hp_signed: enemy.hp as i16,
                 max_hp: enemy.max_hp,
                 alive: enemy.is_alive(),
                 level: enemy.level,
-                attack_signed: enemy.attack_strength as i16,
-                effective_attack: enemy.effective_attack_strength(),
-                defense_raw: enemy.defense,
-                defense_signed: enemy.defense as i16,
-                effective_defense: enemy.effective_defense(),
-                simulated_magic_defense: enemy.simulated_magic_defense(),
+                attack: enemy.effective_attack_strength(),
+                defense: enemy.effective_defense(),
                 physical_resistance: enemy.physical_resistance,
+                elemental_resistance: enemy.elemental_resistance,
+                statuses: BattleStatus::ALL
+                    .into_iter()
+                    .filter_map(|status| {
+                        let rounds = enemy.statuses.duration(status);
+                        (rounds != 0).then_some(StatusView {
+                            label: status_label(status),
+                            rounds,
+                        })
+                    })
+                    .collect(),
+                poisoned: enemy.poisons.iter().any(|poison| poison.object_id != 0),
             })
             .collect::<Vec<_>>();
-        let players = battle
-            .players
-            .iter()
-            .enumerate()
-            .map(|(index, player)| PlayerView {
-                index,
-                hp: player.hp,
-                max_hp: player.max_hp,
-                attack: player.attack_strength,
-                magic: player.magic_strength,
-                defense: player.defense,
-            })
-            .collect();
-        let phase = match battle.phase() {
-            BattlePhase::AwaitingCommand => "进行中",
-            BattlePhase::Finished(BattleResult::Won) => "胜利",
-            BattlePhase::Finished(BattleResult::Lost) => "失败",
-            BattlePhase::Finished(BattleResult::Fled) => "已逃离",
-            BattlePhase::Finished(BattleResult::Terminated) => "已终止",
-        };
         Self {
             scale_factor,
             surface_width,
             surface_height,
-            enemy_team: battle.enemy_team,
             round: battle.round(),
-            phase,
-            active_player: battle.active_player(),
-            current_event: current_event.map_or_else(no_current_event, current_event_view),
-            last_hit: last_hit.map_or_else(no_last_hit, last_hit_view),
+            selected_enemy: selected_enemy
+                .filter(|index| enemies.iter().any(|enemy| enemy.index == *index)),
             enemies,
-            players,
         }
+    }
+
+    fn selected_enemy(&self) -> Option<&EnemyView> {
+        let selected = self.selected_enemy?;
+        self.enemies.iter().find(|enemy| enemy.index == selected)
+    }
+}
+
+fn decode_big5(text: &[u8]) -> Option<String> {
+    let (decoded, _, had_errors) = BIG5.decode(text);
+    (!had_errors && !decoded.is_empty()).then(|| decoded.into_owned())
+}
+
+fn status_label(status: BattleStatus) -> &'static str {
+    match status {
+        BattleStatus::Confused => "乱",
+        BattleStatus::Paralyzed => "定",
+        BattleStatus::Sleep => "眠",
+        BattleStatus::Silence => "封",
+        BattleStatus::Puppet => "傀",
+        BattleStatus::Bravery => "勇",
+        BattleStatus::Protect => "护",
+        BattleStatus::Haste => "速",
+        BattleStatus::DualAttack => "连",
     }
 }
 
@@ -233,10 +192,14 @@ pub(super) struct BattleDebugOverlay {
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     texture: wgpu::Texture,
+    pixels: Vec<u8>,
     width: u32,
     height: u32,
+    display_width: u32,
+    display_height: u32,
     scale_factor: f64,
     font: UiFont,
+    cached_snapshot: Option<BattleDebugSnapshot>,
 }
 
 impl BattleDebugOverlay {
@@ -308,10 +271,14 @@ impl BattleDebugOverlay {
             bind_group,
             pipeline,
             texture,
+            pixels: Vec::new(),
             width: 1,
             height: 1,
+            display_width: 1,
+            display_height: 1,
             scale_factor,
             font,
+            cached_snapshot: None,
         }
     }
 
@@ -321,7 +288,14 @@ impl BattleDebugOverlay {
         queue: &wgpu::Queue,
         snapshot: BattleDebugSnapshot,
     ) {
-        let frame = rasterize_snapshot(&mut self.font, &snapshot);
+        if !replace_changed_snapshot(&mut self.cached_snapshot, snapshot) {
+            return;
+        }
+        let snapshot = self
+            .cached_snapshot
+            .as_ref()
+            .expect("changed battle debug snapshot was cached");
+        let frame = rasterize_snapshot(&mut self.font, snapshot, &mut self.pixels);
         if self.width != frame.width || self.height != frame.height {
             let (texture, bind_group) =
                 create_texture(device, &self.bind_group_layout, frame.width, frame.height);
@@ -330,6 +304,8 @@ impl BattleDebugOverlay {
             self.width = frame.width;
             self.height = frame.height;
         }
+        self.display_width = frame.display_width;
+        self.display_height = frame.display_height;
         self.scale_factor = snapshot.scale_factor;
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -338,7 +314,7 @@ impl BattleDebugOverlay {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &frame.pixels,
+            &self.pixels,
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(frame.width * 4),
@@ -356,20 +332,20 @@ impl BattleDebugOverlay {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         render_target: &wgpu::TextureView,
-        surface_width: u32,
-        surface_height: u32,
+        panel: SurfaceRect,
     ) {
         let margin = physical(SURFACE_MARGIN, self.scale_factor);
         let width = self
-            .width
-            .min(surface_width.saturating_sub(margin.saturating_mul(2)));
+            .display_width
+            .min(panel.width.saturating_sub(margin.saturating_mul(2)));
         let height = self
-            .height
-            .min(surface_height.saturating_sub(margin.saturating_mul(2)));
+            .display_height
+            .min(panel.height.saturating_sub(margin.saturating_mul(2)));
         if width == 0 || height == 0 {
             return;
         }
-        let x = right_aligned_x(surface_width, margin, width);
+        let x = panel.x + panel.width.saturating_sub(width) / 2;
+        let y = panel.y + panel.height.saturating_sub(height) / 2;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("battle_debug_overlay_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -384,604 +360,226 @@ impl BattleDebugOverlay {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_viewport(
-            x as f32,
-            margin as f32,
-            width as f32,
-            height as f32,
-            0.0,
-            1.0,
-        );
-        pass.set_scissor_rect(x, margin, width, height);
+        pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0.0, 1.0);
+        pass.set_scissor_rect(x, y, width, height);
         pass.draw(0..4, 0..1);
     }
 }
 
-fn right_aligned_x(surface_width: u32, margin: u32, panel_width: u32) -> u32 {
-    surface_width
-        .saturating_sub(margin)
-        .saturating_sub(panel_width)
+fn replace_changed_snapshot(
+    cached: &mut Option<BattleDebugSnapshot>,
+    snapshot: BattleDebugSnapshot,
+) -> bool {
+    if cached.as_ref() == Some(&snapshot) {
+        return false;
+    }
+    *cached = Some(snapshot);
+    true
 }
 
 struct RasterFrame {
-    pixels: Vec<u8>,
     width: u32,
     height: u32,
+    display_width: u32,
+    display_height: u32,
 }
 
-fn rasterize_snapshot(font: &mut UiFont, snapshot: &BattleDebugSnapshot) -> RasterFrame {
-    const HEADER_HEIGHT: f32 = 42.0;
-    const EVENTS_HEIGHT: f32 = 76.0;
-    const SECTION_LABEL_HEIGHT: f32 = 16.0;
+fn rasterize_snapshot(
+    font: &mut UiFont,
+    snapshot: &BattleDebugSnapshot,
+    pixels: &mut Vec<u8>,
+) -> RasterFrame {
+    const HEADER_HEIGHT: f32 = 38.0;
+    const TARGET_HEIGHT: f32 = 92.0;
+    const SECTION_LABEL_HEIGHT: f32 = 18.0;
     const ENEMY_STEP: f32 = 44.0;
-    const PLAYER_STEP: f32 = 27.0;
 
-    let scale = normalized_scale(snapshot.scale_factor);
-    let logical_surface_width = snapshot.surface_width as f32 / scale;
-    let logical_surface_height = snapshot.surface_height as f32 / scale;
+    let display_scale = normalized_scale(snapshot.scale_factor);
+    let raster_scale = display_scale.min(MAX_RASTER_SCALE);
+    let logical_surface_width = snapshot.surface_width as f32 / display_scale;
+    let logical_surface_height = snapshot.surface_height as f32 / display_scale;
     let panel_width =
         MAX_PANEL_WIDTH.min((logical_surface_width - SURFACE_MARGIN * 2.0).max(280.0));
-    let enemy_height = if snapshot.enemies.is_empty() {
-        0.0
-    } else {
-        SECTION_LABEL_HEIGHT + snapshot.enemies.len() as f32 * ENEMY_STEP
-    };
-    let player_height = if snapshot.players.is_empty() {
-        0.0
-    } else {
-        SECTION_LABEL_HEIGHT + snapshot.players.len() as f32 * PLAYER_STEP
-    };
-    let panel_height = (HEADER_HEIGHT + EVENTS_HEIGHT + enemy_height + player_height + 8.0)
+    let target_height = snapshot.selected_enemy().map_or(0.0, |_| TARGET_HEIGHT);
+    let enemy_height = SECTION_LABEL_HEIGHT + snapshot.enemies.len() as f32 * ENEMY_STEP;
+    let panel_height = (HEADER_HEIGHT + target_height + enemy_height + 8.0)
         .min((logical_surface_height - SURFACE_MARGIN * 2.0).max(140.0));
-    let width = physical(panel_width, snapshot.scale_factor);
-    let height = physical(panel_height, snapshot.scale_factor);
-    let mut pixels = vec![0; width as usize * height as usize * 4];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&TRANSPARENT);
-    }
+    let width = physical(panel_width, f64::from(raster_scale));
+    let height = physical(panel_height, f64::from(raster_scale));
+    let display_width = physical(panel_width, f64::from(display_scale));
+    let display_height = physical(panel_height, f64::from(display_scale));
+    pixels.resize(width as usize * height as usize * 4, 0);
+    pixels.fill(0);
     let mut painter = Painter {
-        pixels: &mut pixels,
+        pixels,
         width,
         height,
-        scale,
+        scale: raster_scale,
         font,
     };
     painter.rounded_rect(0.0, 0.0, panel_width, panel_height, 10.0, PANEL_BORDER);
     painter.rounded_rect(1.0, 1.0, panel_width - 2.0, panel_height - 2.0, 9.0, PANEL);
 
-    let action = snapshot
-        .active_player
-        .map_or_else(|| "敌方行动".to_owned(), |player| format!("P{player} 选令"));
-    painter.text(14.0, 9.0, 16.0, "战斗调试", ACCENT, None);
+    painter.text(14.0, 8.0, 15.0, "战斗助手", ACCENT, None);
     painter.text(
-        102.0,
-        12.0,
-        10.5,
-        &format!(
-            "队 {} · 回合 {} · {}",
-            snapshot.enemy_team, snapshot.round, snapshot.phase
-        ),
-        TEXT,
-        Some(RectF::new(102.0, 7.0, panel_width - 202.0, 27.0)),
+        panel_width - 112.0,
+        11.0,
+        10.0,
+        &format!("第 {} 回合 · F7 隐藏", snapshot.round),
+        MUTED,
+        Some(RectF::new(panel_width - 116.0, 6.0, 104.0, 24.0)),
     );
-    painter.badge(panel_width - 92.0, 9.0, 80.0, 20.0, &action, Tone::Accent);
 
     let content_x = 12.0;
     let content_width = panel_width - 24.0;
-    draw_event_card(
-        &mut painter,
-        content_x,
-        HEADER_HEIGHT,
-        content_width,
-        "当前",
-        &snapshot.current_event,
-    );
-    draw_event_card(
-        &mut painter,
-        content_x,
-        HEADER_HEIGHT + 38.0,
-        content_width,
-        "最近",
-        &snapshot.last_hit,
-    );
-    let enemies_y = HEADER_HEIGHT + EVENTS_HEIGHT;
-    let players_y = draw_enemies(
+    let enemies_y = snapshot.selected_enemy().map_or(HEADER_HEIGHT, |enemy| {
+        draw_target_card(&mut painter, enemy, content_x, HEADER_HEIGHT, content_width);
+        HEADER_HEIGHT + TARGET_HEIGHT
+    });
+    draw_enemy_overview(
         &mut painter,
         &snapshot.enemies,
+        snapshot.selected_enemy,
         content_x,
         enemies_y,
         content_width,
         panel_height,
     );
-    draw_players(
-        &mut painter,
-        &snapshot.players,
-        content_x,
-        players_y,
-        content_width,
-        panel_height,
-    );
 
     RasterFrame {
-        pixels,
         width,
         height,
+        display_width,
+        display_height,
     }
 }
 
-fn draw_event_card(
-    painter: &mut Painter<'_>,
-    x: f32,
-    y: f32,
-    width: f32,
-    label: &str,
-    event: &EventView,
-) {
-    painter.rounded_rect(x, y, width, 34.0, 6.0, CARD_BORDER);
-    painter.rounded_rect(x + 1.0, y + 1.0, width - 2.0, 32.0, 5.0, CARD);
-    painter.text(x + 8.0, y + 5.0, 9.0, label, MUTED, None);
+fn draw_target_card(painter: &mut Painter<'_>, enemy: &EnemyView, x: f32, y: f32, width: f32) {
+    painter.rounded_rect(x, y, width, 86.0, 5.0, ACCENT);
+    painter.rounded_rect(x + 1.0, y + 1.0, width - 2.0, 84.0, 4.0, CARD);
+    painter.text(x + 8.0, y + 5.0, 9.0, "当前目标", MUTED, None);
     painter.text(
-        x + 48.0,
+        x + 66.0,
         y + 4.0,
-        10.5,
-        &event.title,
-        event.tone.color(),
-        Some(RectF::new(x + 48.0, y + 1.0, width - 56.0, 16.0)),
+        11.0,
+        &format!("{}  Lv.{}", enemy.name, enemy.level),
+        ACCENT,
+        Some(RectF::new(x + 66.0, y + 1.0, width - 74.0, 18.0)),
     );
     painter.text(
         x + 8.0,
-        y + 19.0,
-        9.2,
-        &event.detail,
+        y + 23.0,
+        10.0,
+        &format!("HP  {} / {}", enemy.display_hp(), enemy.max_hp),
         TEXT,
-        Some(RectF::new(x + 8.0, y + 16.0, width - 16.0, 16.0)),
+        None,
     );
+    painter.bar(
+        x + 104.0,
+        y + 28.0,
+        width - 116.0,
+        5.0,
+        enemy.display_hp(),
+        enemy.max_hp,
+        hp_color(enemy),
+    );
+    painter.text(
+        x + 8.0,
+        y + 42.0,
+        9.5,
+        &format!(
+            "攻击 {}   防御 {}   物抗 {}",
+            enemy.attack, enemy.defense, enemy.physical_resistance
+        ),
+        TEXT,
+        Some(RectF::new(x + 8.0, y + 38.0, width - 16.0, 17.0)),
+    );
+    let [wind, thunder, water, fire, earth] = enemy.elemental_resistance;
+    painter.text(
+        x + 8.0,
+        y + 58.0,
+        9.0,
+        &format!("风 {wind}  雷 {thunder}  水 {water}  火 {fire}  土 {earth}"),
+        MUTED,
+        Some(RectF::new(x + 8.0, y + 55.0, width - 16.0, 16.0)),
+    );
+    let statuses = enemy.status_summary();
+    if !statuses.is_empty() {
+        painter.text(
+            x + 8.0,
+            y + 73.0,
+            8.5,
+            &format!("状态  {statuses}"),
+            WARNING,
+            Some(RectF::new(x + 8.0, y + 70.0, width - 16.0, 14.0)),
+        );
+    }
 }
 
-fn draw_enemies(
+fn hp_color(enemy: &EnemyView) -> [u8; 4] {
+    if !enemy.alive {
+        DANGER
+    } else if enemy.max_hp != 0 && u32::from(enemy.display_hp()) * 4 <= u32::from(enemy.max_hp) {
+        WARNING
+    } else {
+        GOOD
+    }
+}
+
+fn draw_enemy_overview(
     painter: &mut Painter<'_>,
     enemies: &[EnemyView],
-    x: f32,
-    y: f32,
-    width: f32,
-    panel_height: f32,
-) -> f32 {
-    if enemies.is_empty() {
-        return y;
-    }
-    painter.text(x + 2.0, y + 1.0, 10.5, "敌人", MUTED, None);
-    let mut card_y = y + 16.0;
-    for enemy in enemies {
-        if card_y + 40.0 > panel_height - 7.0 {
-            break;
-        }
-        painter.rounded_rect(x, card_y, width, 40.0, 6.0, CARD_BORDER);
-        painter.rounded_rect(x + 1.0, card_y + 1.0, width - 2.0, 38.0, 5.0, CARD);
-        let status = if enemy.alive { "存活" } else { "倒下" };
-        let status_color = if enemy.alive { GOOD } else { DANGER };
-        painter.text(
-            x + 8.0,
-            card_y + 4.0,
-            10.5,
-            &format!(
-                "E{} · 对象 {} / 定义 {} · Lv{}",
-                enemy.index, enemy.object_id, enemy.enemy_id, enemy.level
-            ),
-            ACCENT,
-            Some(RectF::new(x + 8.0, card_y + 1.0, width - 58.0, 17.0)),
-        );
-        painter.text(
-            x + width - 42.0,
-            card_y + 4.0,
-            9.5,
-            status,
-            status_color,
-            None,
-        );
-        painter.text(
-            x + 8.0,
-            card_y + 21.0,
-            9.4,
-            &format!(
-                "{} · 攻 {}→{} · {} · 物抗 {}",
-                enemy.hp_summary(),
-                enemy.attack_signed,
-                enemy.effective_attack,
-                enemy.defense_summary(),
-                enemy.physical_resistance
-            ),
-            if enemy.alive { TEXT } else { DANGER },
-            Some(RectF::new(x + 8.0, card_y + 18.0, width - 108.0, 18.0)),
-        );
-        painter.bar(
-            x + width - 92.0,
-            card_y + 27.0,
-            78.0,
-            4.0,
-            enemy.display_hp(),
-            enemy.max_hp,
-            status_color,
-        );
-        card_y += 44.0;
-    }
-    card_y + 2.0
-}
-
-fn draw_players(
-    painter: &mut Painter<'_>,
-    players: &[PlayerView],
+    selected_enemy: Option<usize>,
     x: f32,
     y: f32,
     width: f32,
     panel_height: f32,
 ) {
-    if players.is_empty() || y + 16.0 > panel_height - 7.0 {
-        return;
-    }
-    painter.text(x + 2.0, y + 1.0, 10.5, "我方", MUTED, None);
-    let mut row_y = y + 16.0;
-    for player in players {
-        if row_y + 23.0 > panel_height - 7.0 {
+    painter.text(x + 2.0, y + 1.0, 10.0, "敌方概览", MUTED, None);
+    let mut row_y = y + 18.0;
+    for enemy in enemies {
+        if row_y + 40.0 > panel_height - 6.0 {
             break;
         }
-        painter.rounded_rect(x, row_y, width, 23.0, 5.0, CARD);
+        let selected = selected_enemy == Some(enemy.index);
+        painter.rounded_rect(
+            x,
+            row_y,
+            width,
+            40.0,
+            4.0,
+            if selected { ACCENT } else { CARD_BORDER },
+        );
+        painter.rounded_rect(x + 1.0, row_y + 1.0, width - 2.0, 38.0, 3.0, CARD);
         painter.text(
             x + 8.0,
-            row_y + 5.0,
-            9.6,
-            &format!(
-                "P{} · HP {}/{} · 攻 {}  灵 {}  防 {}",
-                player.index, player.hp, player.max_hp, player.attack, player.magic, player.defense
-            ),
-            TEXT,
-            Some(RectF::new(x + 8.0, row_y + 2.0, width - 16.0, 18.0)),
+            row_y + 4.0,
+            10.0,
+            &format!("{}  Lv.{}", enemy.name, enemy.level),
+            if selected { ACCENT } else { TEXT },
+            Some(RectF::new(x + 8.0, row_y + 1.0, width - 58.0, 17.0)),
         );
-        row_y += 27.0;
-    }
-}
-
-fn no_current_event() -> EventView {
-    EventView {
-        title: "等待下一项行动".to_owned(),
-        detail: "当前没有正在播放的战斗反馈".to_owned(),
-        tone: Tone::Neutral,
-    }
-}
-
-fn no_last_hit() -> EventView {
-    EventView {
-        title: "尚无伤害记录".to_owned(),
-        detail: "造成伤害后会保留最近一次结算".to_owned(),
-        tone: Tone::Neutral,
-    }
-}
-
-fn current_event_view(event: BattleEvent) -> EventView {
-    match event {
-        BattleEvent::PlayerAttack {
-            player,
-            enemy,
-            damage,
-            critical,
-            defeated,
-            ..
-        } => EventView {
-            title: format!("我方 P{player} 普通攻击 → 敌人 E{enemy}"),
-            detail: format!(
-                "伤害 {damage}{} · {}",
-                if critical { " · 暴击" } else { "" },
-                defeated_label(defeated)
-            ),
-            tone: defeated_tone(defeated),
-        },
-        BattleEvent::PlayerMagic {
-            player,
-            enemy,
-            magic_object,
-            damage,
-            phase,
-            defeated,
-            ..
-        } => EventView {
-            title: format!("我方 P{player} 施放仙术 {magic_object} → 敌人 E{enemy}"),
-            detail: format!(
-                "{} · 伤害 {damage} · {}",
-                magic_phase_label(phase),
-                defeated_label(defeated)
-            ),
-            tone: defeated_tone(defeated),
-        },
-        BattleEvent::EnemyAttack {
-            enemy,
-            player,
-            damage,
-            protected_by,
-            auto_defended,
-            defeated,
-        } => EventView {
-            title: format!("敌人 E{enemy} 普通攻击 → 我方 P{player}"),
-            detail: format!(
-                "伤害 {damage}{}{} · {}",
-                if auto_defended {
-                    " · 自动防御"
-                } else {
-                    ""
-                },
-                protected_by.map_or_else(String::new, |cover| format!(" · P{cover} 援护")),
-                defeated_label(defeated)
-            ),
-            tone: if auto_defended {
-                Tone::Good
-            } else {
-                defeated_tone(defeated)
-            },
-        },
-        BattleEvent::EnemyMagic {
-            enemy,
-            player,
-            magic_object,
-            damage,
-            phase,
-            auto_defended,
-            defeated,
-            ..
-        } => EventView {
-            title: format!("敌人 E{enemy} 施放仙术 {magic_object} → 我方 P{player}"),
-            detail: format!(
-                "{} · 伤害 {damage}{} · {}",
-                magic_phase_label(phase),
-                if auto_defended {
-                    " · 自动防御"
-                } else {
-                    ""
-                },
-                defeated_label(defeated)
-            ),
-            tone: defeated_tone(defeated),
-        },
-        BattleEvent::EnemyConfusedAttack {
-            enemy,
-            target,
-            damage,
-            defeated,
-        } => EventView {
-            title: format!("混乱敌人 E{enemy} 攻击同伴 E{target}"),
-            detail: format!("伤害 {damage} · {}", defeated_label(defeated)),
-            tone: Tone::Warning,
-        },
-        BattleEvent::PlayerConfusedAttack {
-            player,
-            target,
-            damage,
-            defeated,
-        } => EventView {
-            title: format!("混乱队员 P{player} 攻击同伴 P{target}"),
-            detail: format!("伤害 {damage} · {}", defeated_label(defeated)),
-            tone: Tone::Warning,
-        },
-        BattleEvent::SimulatedMagic {
-            enemy,
-            magic,
-            damage,
-            defeated,
-            ..
-        } => EventView {
-            title: format!("脚本模拟仙术 {} → 敌人 E{enemy}", magic.object_id),
-            detail: format!(
-                "伤害 raw {damage} / i16 {} · {}",
-                damage as i16,
-                defeated_label(defeated)
-            ),
-            tone: if damage as i16 <= 0 {
-                Tone::Warning
-            } else {
-                defeated_tone(defeated)
-            },
-        },
-        BattleEvent::PlayerUseItem {
-            player,
-            item_object,
-            target,
-            ..
-        } => EventView {
-            title: format!("我方 P{player} 使用物品 {item_object}"),
-            detail: target.map_or_else(
-                || "作用目标：全体队员".to_owned(),
-                |target| format!("作用目标：我方 P{target}"),
-            ),
-            tone: Tone::Accent,
-        },
-        BattleEvent::PlayerThrowItem {
-            player,
-            item_object,
-            target,
-        } => EventView {
-            title: format!("我方 P{player} 投掷物品 {item_object}"),
-            detail: target.map_or_else(
-                || "作用目标：全体敌人".to_owned(),
-                |target| format!("作用目标：敌人 E{target}"),
-            ),
-            tone: Tone::Accent,
-        },
-        BattleEvent::PlayerItemFeedback {
-            player,
-            item_object,
-            ..
-        } => EventView {
-            title: format!("物品 {item_object} 效果结算"),
-            detail: format!("执行者：我方 P{player}"),
-            tone: Tone::Accent,
-        },
-        BattleEvent::PlayerFlee { player, succeeded } => EventView {
-            title: format!("我方 P{player} 尝试逃跑"),
-            detail: if succeeded {
-                "逃跑成功"
-            } else {
-                "逃跑失败"
-            }
-            .to_owned(),
-            tone: if succeeded { Tone::Good } else { Tone::Warning },
-        },
-        BattleEvent::PlayerDefend { player } => EventView {
-            title: format!("我方 P{player} 防御"),
-            detail: "本回合物理防御提高".to_owned(),
-            tone: Tone::Good,
-        },
-        BattleEvent::PlayerDefensiveMagic {
-            player,
-            magic_object,
-            ..
-        } => EventView {
-            title: format!("我方 P{player} 施放辅助仙术 {magic_object}"),
-            detail: "辅助效果正在结算".to_owned(),
-            tone: Tone::Good,
-        },
-        BattleEvent::PlayerCooperativeMagic {
-            player,
-            enemy,
-            magic_object,
-            damage,
-            defeated,
-            ..
-        } => EventView {
-            title: format!("我方 P{player} 合体仙术 {magic_object} → 敌人 E{enemy}"),
-            detail: format!("伤害 {damage} · {}", defeated_label(defeated)),
-            tone: defeated_tone(defeated),
-        },
-        BattleEvent::PlayerMagicAnimation { player } => EventView {
-            title: "脚本施法动画".to_owned(),
-            detail: player.map_or_else(
-                || "全队动画".to_owned(),
-                |player| format!("动画角色：我方 P{player}"),
-            ),
-            tone: Tone::Accent,
-        },
-        BattleEvent::PlayerFriendDeath { player } => EventView {
-            title: format!("我方 P{player} 响应队友倒下"),
-            detail: "正在执行队友死亡脚本".to_owned(),
-            tone: Tone::Danger,
-        },
-        BattleEvent::PlayerDying { player } => EventView {
-            title: format!("我方 P{player} 进入濒死状态"),
-            detail: "正在执行濒死脚本".to_owned(),
-            tone: Tone::Danger,
-        },
-        BattleEvent::EnemyDivide { .. } => EventView {
-            title: "敌人分裂".to_owned(),
-            detail: "正在生成分裂后的敌人".to_owned(),
-            tone: Tone::Warning,
-        },
-        BattleEvent::EnemySummon {
-            caster,
-            summoned_mask,
-        } => EventView {
-            title: format!("敌人 E{caster} 召唤同伴"),
-            detail: format!("新敌人槽位掩码 0b{summoned_mask:05b}"),
-            tone: Tone::Warning,
-        },
-        BattleEvent::EnemyTransform { enemy, .. } => EventView {
-            title: format!("敌人 E{enemy} 变身"),
-            detail: "敌人属性与外观已经更新".to_owned(),
-            tone: Tone::Warning,
-        },
-        BattleEvent::EnemyEscape => EventView {
-            title: "敌人逃跑".to_owned(),
-            detail: "正在播放敌方退场反馈".to_owned(),
-            tone: Tone::Neutral,
-        },
-        BattleEvent::RoundCompleted => EventView {
-            title: "本回合结束".to_owned(),
-            detail: "正在处理状态、毒与下一回合".to_owned(),
-            tone: Tone::Neutral,
-        },
-        BattleEvent::Finished(result) => EventView {
-            title: "战斗结束".to_owned(),
-            detail: match result {
-                BattleResult::Won => "胜利",
-                BattleResult::Lost => "失败",
-                BattleResult::Fled => "逃跑",
-                BattleResult::Terminated => "脚本终止",
-            }
-            .to_owned(),
-            tone: if result == BattleResult::Won {
-                Tone::Good
-            } else {
-                Tone::Warning
-            },
-        },
-    }
-}
-
-fn last_hit_view(hit: BattleDebugHit) -> EventView {
-    let action = match hit.action {
-        "P.ATTACK" => "我方普通攻击",
-        "P.MAGIC" => "我方攻击仙术",
-        "COOP" => "合体仙术",
-        "SIM.MAGIC" => "脚本模拟仙术",
-        "E.CONF" => "混乱敌人攻击",
-        "E.ATTACK" => "敌方普通攻击",
-        "E.MAGIC" => "敌方攻击仙术",
-        "P.CONF" => "混乱队员攻击",
-        "ITEM.TOTAL" => "整件投掷物品净变化",
-        _ => "伤害结算",
-    };
-    let source = if hit.action.starts_with('P') || hit.action == "COOP" {
-        format!("我方 P{}", hit.source)
-    } else if hit.action.starts_with('E') {
-        format!("敌人 E{}", hit.source)
-    } else {
-        "战斗脚本".to_owned()
-    };
-    let target = match hit.target {
-        BattleDebugTarget::Enemy => format!("敌人 E{}", hit.target_index),
-        BattleDebugTarget::Player => format!("我方 P{}", hit.target_index),
-    };
-    let before = hit
-        .hp_before
-        .map_or_else(|| "?".to_owned(), |hp| hp.to_string());
-    let object = hit
-        .object_id
-        .map_or_else(String::new, |object| format!(" · 关联对象 {object}"));
-    let signed = hit.damage as i16;
-    EventView {
-        title: format!("{action} · {source} → {target}"),
-        detail: format!(
-            "伤害 raw {} / i16 {} · 生命 {} → {}{} · {}",
-            hit.damage,
-            signed,
-            before,
-            hit.hp_after,
-            object,
-            defeated_label(hit.defeated)
-        ),
-        tone: if signed < 0 {
-            Tone::Warning
-        } else {
-            defeated_tone(hit.defeated)
-        },
-    }
-}
-
-fn magic_phase_label(phase: MagicEventPhase) -> &'static str {
-    match phase {
-        MagicEventPhase::Visual => "动画阶段",
-        MagicEventPhase::Feedback => "伤害阶段",
-    }
-}
-
-fn defeated_label(defeated: bool) -> &'static str {
-    if defeated {
-        "目标倒下"
-    } else {
-        "目标存活"
-    }
-}
-
-fn defeated_tone(defeated: bool) -> Tone {
-    if defeated {
-        Tone::Danger
-    } else {
-        Tone::Neutral
+        if !enemy.alive {
+            painter.text(x + width - 42.0, row_y + 4.0, 9.0, "倒下", DANGER, None);
+        }
+        painter.text(
+            x + 8.0,
+            row_y + 22.0,
+            9.0,
+            &format!("HP {}/{}", enemy.display_hp(), enemy.max_hp),
+            if enemy.alive { MUTED } else { DANGER },
+            None,
+        );
+        painter.bar(
+            x + width - 96.0,
+            row_y + 28.0,
+            82.0,
+            4.0,
+            enemy.display_hp(),
+            enemy.max_hp,
+            hp_color(enemy),
+        );
+        row_y += 44.0;
     }
 }
 
@@ -1222,13 +820,6 @@ impl Painter<'_> {
         }
     }
 
-    fn badge(&mut self, x: f32, y: f32, width: f32, height: f32, text: &str, tone: Tone) {
-        let mut background = tone.color();
-        background[3] = 42;
-        self.rounded_rect(x, y, width, height, height / 2.0, background);
-        self.text(x + 9.0, y + 5.0, 10.5, text, tone.color(), None);
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn bar(
         &mut self,
@@ -1384,101 +975,88 @@ fn physical(logical: f32, scale_factor: f64) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn automatic_defense_is_explained_in_simplified_chinese() {
-        let event = current_event_view(BattleEvent::EnemyAttack {
-            enemy: 0,
-            player: 0,
-            damage: 0,
-            protected_by: None,
-            auto_defended: true,
-            defeated: false,
-        });
-        assert!(event.title.contains("敌人"));
-        assert!(event.detail.contains("自动防御"));
-        assert_eq!(event.tone, Tone::Good);
-    }
-
-    #[test]
-    fn item_total_shows_classic_word_hp_after_lethal_damage() {
-        let event = last_hit_view(BattleDebugHit {
-            action: "ITEM.TOTAL",
-            source: 0,
-            object_id: Some(153),
-            target: BattleDebugTarget::Enemy,
-            target_index: 0,
-            damage: 90,
-            hp_before: Some(40),
-            hp_after: 40u16.wrapping_sub(90),
-            defeated: true,
-        });
-        assert!(event.title.contains("整件投掷物品"));
-        assert!(event.detail.contains("raw 90 / i16 90"));
-        assert!(event.detail.contains("40 → 65486"));
-        assert_eq!(event.tone, Tone::Danger);
-    }
-
-    #[test]
-    fn source_over_blending_preserves_opaque_text_on_a_translucent_panel() {
-        let mut pixel = vec![0, 0, 0, 0];
-        blend_pixel(&mut pixel, 1, 1, 0, 0, PANEL);
-        blend_pixel(&mut pixel, 1, 1, 0, 0, TEXT);
-        assert_eq!(pixel, TEXT);
-    }
-
-    #[test]
-    fn default_window_keeps_the_fifth_enemy_card_visible() {
-        let enemy = EnemyView {
-            index: 0,
-            object_id: 153,
-            enemy_id: 42,
-            hp: 40,
-            hp_signed: 40,
-            max_hp: 40,
+    fn enemy(index: usize) -> EnemyView {
+        EnemyView {
+            index,
+            name: format!("敌人 {}", index + 1),
+            hp: 80,
+            max_hp: 120,
             alive: true,
-            level: 0,
-            attack_signed: 8,
-            effective_attack: 44,
-            defense_raw: u16::MAX - 5,
-            defense_signed: -6,
-            effective_defense: 18,
-            simulated_magic_defense: 18,
-            physical_resistance: 0,
-        };
-        let mut defeated = enemy.clone();
-        defeated.hp = 40u16.wrapping_sub(90);
-        defeated.hp_signed = defeated.hp as i16;
-        defeated.alive = false;
-        assert_eq!(defeated.display_hp(), 0);
-        let snapshot = BattleDebugSnapshot {
-            scale_factor: 1.0,
-            surface_width: 640,
-            surface_height: 400,
-            enemy_team: 18,
-            round: 1,
-            phase: "进行中",
-            active_player: Some(0),
-            current_event: no_current_event(),
-            last_hit: no_last_hit(),
-            enemies: vec![enemy; 5],
-            players: Vec::new(),
-        };
-        let mut font = UiFont {
+            level: 12,
+            attack: 82,
+            defense: 64,
+            physical_resistance: 2,
+            elemental_resistance: [1, 2, 3, 4, 5],
+            statuses: Vec::new(),
+            poisoned: false,
+        }
+    }
+
+    fn snapshot(selected_enemy: Option<usize>) -> BattleDebugSnapshot {
+        BattleDebugSnapshot {
+            scale_factor: 2.0,
+            surface_width: 600,
+            surface_height: 800,
+            round: 3,
+            selected_enemy,
+            enemies: vec![enemy(0), enemy(1)],
+        }
+    }
+
+    fn test_font() -> UiFont {
+        UiFont {
             font: None,
             name: "测试点阵".to_owned(),
             glyphs: HashMap::new(),
-        };
-
-        let frame = rasterize_snapshot(&mut font, &snapshot);
-
-        assert_eq!((frame.width, frame.height), (520, 362));
-        let panel_pixel = pixel(&frame, 5, 330);
-        assert!((20..500).any(|x| pixel(&frame, x, 330) != panel_pixel));
-        assert_eq!(right_aligned_x(640, 12, frame.width), 108);
+        }
     }
 
-    fn pixel(frame: &RasterFrame, x: u32, y: u32) -> [u8; 4] {
-        let index = (y as usize * frame.width as usize + x as usize) * 4;
-        frame.pixels[index..index + 4].try_into().unwrap()
+    #[test]
+    fn decodes_original_big5_enemy_names() {
+        assert_eq!(
+            decode_big5(&[0xa4, 0xa4, 0xa4, 0xe5]).as_deref(),
+            Some("中文")
+        );
+        assert_eq!(decode_big5(&[]), None);
+    }
+
+    #[test]
+    fn enemy_summary_only_contains_player_facing_statuses() {
+        let mut enemy = enemy(0);
+        enemy.statuses = vec![StatusView {
+            label: "眠",
+            rounds: 2,
+        }];
+        enemy.poisoned = true;
+
+        assert_eq!(enemy.status_summary(), "眠2 · 毒");
+    }
+
+    #[test]
+    fn target_details_only_take_space_during_enemy_selection() {
+        let mut font = test_font();
+        let mut pixels = Vec::new();
+        let overview = rasterize_snapshot(&mut font, &snapshot(None), &mut pixels);
+        let overview_height = overview.display_height;
+        let selected = rasterize_snapshot(&mut font, &snapshot(Some(0)), &mut pixels);
+
+        assert_eq!((overview.width, overview.display_width), (420, 560));
+        assert_eq!(selected.display_height - overview_height, 184);
+        assert_eq!(
+            pixels.len(),
+            selected.width as usize * selected.height as usize * 4
+        );
+    }
+
+    #[test]
+    fn unchanged_snapshot_skips_panel_rasterization() {
+        let snapshot = snapshot(None);
+        let mut cached = None;
+
+        assert!(replace_changed_snapshot(&mut cached, snapshot.clone()));
+        assert!(!replace_changed_snapshot(&mut cached, snapshot.clone()));
+        let mut selected = snapshot;
+        selected.selected_enemy = Some(1);
+        assert!(replace_changed_snapshot(&mut cached, selected));
     }
 }

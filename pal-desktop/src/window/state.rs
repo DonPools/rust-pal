@@ -27,7 +27,7 @@ impl DebugState {
             (true, false, false, false) => "Rust-PAL [Collision]",
             (false, true, false, false) => "Rust-PAL [Objects]",
             (false, false, true, false) => "Rust-PAL [Script]",
-            (false, false, false, true) => "Rust-PAL [战斗调试]",
+            (false, false, false, true) => "Rust-PAL [战斗助手]",
             _ => "Rust-PAL [Debug]",
         }
     }
@@ -344,7 +344,7 @@ mod tests {
                 ..DebugState::default()
             }
             .title(),
-            "Rust-PAL [战斗调试]"
+            "Rust-PAL [战斗助手]"
         );
     }
 }

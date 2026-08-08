@@ -1025,6 +1025,10 @@ where
         self.debug.show_script
     }
 
+    pub(super) fn battle_assist_requested(&self) -> bool {
+        self.debug.show_battle && self.game.battle().is_some()
+    }
+
     pub(super) fn battle_debug_snapshot(
         &self,
         surface_width: u32,
@@ -1037,8 +1041,11 @@ where
         let battle = self.game.battle()?;
         Some(BattleDebugSnapshot::capture(
             battle,
-            self.session.battle.battle_events.front().copied(),
-            self.session.battle.battle_debug_hit,
+            &self.resources.text,
+            self.session
+                .battle
+                .battle_targeting_enemy
+                .then_some(self.session.battle.battle_selected_enemy),
             scale_factor,
             surface_width,
             surface_height,
