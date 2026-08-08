@@ -74,7 +74,10 @@ pub(super) fn render_game(
         AppModeView::OpeningAnimation(animation) => animation
             .render(renderer, ui.palettes)
             .expect("failed to render original opening animation"),
-        AppModeView::OpeningMenu(menu) => render_composited_frame(
+        AppModeView::OpeningMenu(menu) => {
+            render_opening_menu_frame(renderer, role_sprites, menu, &ui)
+        }
+        AppModeView::Playing => render_playing_frame(
             renderer,
             game,
             role_sprites,
@@ -82,29 +85,32 @@ pub(super) fn render_game(
             show_objects,
             script,
             &ui,
-            RenderScene::OpeningMenu(menu),
-        ),
-        AppModeView::Playing => render_composited_frame(
-            renderer,
-            game,
-            role_sprites,
-            show_collision,
-            show_objects,
-            script,
-            &ui,
-            RenderScene::Playing,
         ),
     }
 }
 
-#[derive(Clone, Copy)]
-enum RenderScene<'a> {
-    OpeningMenu(&'a OpeningMenu),
-    Playing,
+fn render_opening_menu_frame(
+    renderer: &mut Renderer,
+    role_sprites: &RoleSprites,
+    menu: &OpeningMenu,
+    ui: &UiRenderContext<'_>,
+) {
+    prepare_palette(renderer, ui);
+    if !ui.visual.render_override(renderer) {
+        render_opening_menu(
+            renderer,
+            ui.opening_background,
+            ui.text,
+            ui.font,
+            ui.ui_sprites,
+            *menu,
+            ui.ui_ticks,
+        );
+    }
+    ui.visual.apply_post_effects(renderer, role_sprites);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_composited_frame(
+fn render_playing_frame(
     renderer: &mut Renderer,
     game: &GameState,
     role_sprites: &RoleSprites,
@@ -112,34 +118,20 @@ fn render_composited_frame(
     show_objects: bool,
     script: ScriptDebugSnapshot,
     ui: &UiRenderContext<'_>,
-    scene: RenderScene<'_>,
 ) {
     prepare_palette(renderer, ui);
     if !ui.visual.render_override(renderer) {
-        match scene {
-            RenderScene::OpeningMenu(menu) => render_opening_menu(
-                renderer,
-                ui.opening_background,
-                ui.text,
-                ui.font,
-                ui.ui_sprites,
-                *menu,
-                ui.ui_ticks,
-            ),
-            RenderScene::Playing => render_battle_or_world(
-                renderer,
-                game,
-                role_sprites,
-                show_collision,
-                show_objects,
-                script,
-                ui,
-            ),
-        }
+        render_battle_or_world(
+            renderer,
+            game,
+            role_sprites,
+            show_collision,
+            show_objects,
+            script,
+            ui,
+        );
     }
-    if matches!(scene, RenderScene::Playing) {
-        render_dialog_or_menu(renderer, game, ui);
-    }
+    render_dialog_or_menu(renderer, game, ui);
     ui.visual.apply_post_effects(renderer, role_sprites);
 }
 
