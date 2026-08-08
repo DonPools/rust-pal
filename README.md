@@ -60,12 +60,12 @@ pal-launcher -> pal-desktop -> pal-core -> pal-assets
 
 桌面运行时进一步分为平台 host 和应用状态两层。`window/mod.rs` 只负责 `winit`/`pixels`
 窗口事件、surface 调整和 framebuffer 呈现；`DesktopApp` 持有游戏、脚本、输入、表现和
-固定时间步状态。更新顺序由显式 `UpdateLane` 状态机决定，开场阶段由 `FrontendState`
+固定时间步状态。更新顺序由显式 `UpdateTarget` 状态机决定，开场阶段由 `FrontendState`
 保证互斥，活动菜单由单一 `ActiveMenu` 表示。桌面会话按脚本、菜单、战斗表现、音频、
 视觉和持久化分组，避免平台事件循环直接组合非法状态。
 
 ```text
-winit event -> DesktopApp::advance -> UpdateLane -> core/script/battle/menu
+winit event -> DesktopApp::advance -> UpdateTarget -> core/script/battle/menu
                   |                       |
                   +---- render_frame <----+
                             |

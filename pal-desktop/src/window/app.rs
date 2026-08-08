@@ -27,7 +27,7 @@ use super::presentation::{render_game, UiRenderContext};
 use super::script_driver::{advance_script, auto_script_error_title, ScriptRenderResources};
 use super::session::{DesktopSession, MusicResources};
 use super::snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
-use super::state::{DebugState, FrontendState, TimingState, UpdateLane, UpdateLaneState};
+use super::state::{DebugState, FrontendState, TimingState, UpdateConditions, UpdateTarget};
 use super::types::{GameResources, LoadedScene};
 use super::UI_TIME_QUANTUM_MS;
 
@@ -37,6 +37,49 @@ const DIALOG_POLL_INTERVAL_MS: u64 = 8;
 pub(super) struct AdvanceResult {
     pub(super) exit: bool,
     pub(super) wait_until: Instant,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TickOutcome {
+    changed: bool,
+    exit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisualFinalization {
+    Run,
+    Defer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccumulatorAction {
+    ConsumeTick,
+    Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TargetOutcome {
+    changed: bool,
+    visual_finalization: VisualFinalization,
+    accumulator_action: AccumulatorAction,
+}
+
+impl TargetOutcome {
+    const fn run(changed: bool) -> Self {
+        Self {
+            changed,
+            visual_finalization: VisualFinalization::Run,
+            accumulator_action: AccumulatorAction::ConsumeTick,
+        }
+    }
+
+    const fn defer(changed: bool) -> Self {
+        Self {
+            changed,
+            visual_finalization: VisualFinalization::Defer,
+            accumulator_action: AccumulatorAction::ConsumeTick,
+        }
+    }
 }
 
 pub(super) struct DesktopApp<L> {
@@ -258,7 +301,7 @@ where
     }
 
     fn stop_exploration_walking_animation(&mut self) -> bool {
-        (self.update_lane(false) == UpdateLane::Exploration)
+        (self.select_update_target(false) == UpdateTarget::Exploration)
             && self.game.stop_party_walking_animation()
     }
 
@@ -276,8 +319,8 @@ where
         }
     }
 
-    fn update_lane(&self, visual_or_deferred_action: bool) -> UpdateLane {
-        UpdateLaneState {
+    fn select_update_target(&self, visual_or_deferred_action: bool) -> UpdateTarget {
+        UpdateConditions {
             opening_intro: self.frontend.is_intro(),
             visual_or_deferred_action,
             opening_menu: self.frontend.is_opening_menu(),
@@ -290,7 +333,7 @@ where
             menu: self.session.has_active_menu(),
             scene_script: self.scripts.is_active(),
         }
-        .lane()
+        .target()
     }
 
     fn advance_active_script(&mut self, set_title: &mut impl FnMut(&str)) {
@@ -636,7 +679,7 @@ where
             original_save_dir: &self.resources.original_save_dir,
             set_title,
         })
-        .expect("active menu update lane must contain a menu")
+        .expect("active menu update target must contain a menu")
     }
 
     fn advance_exploration(
@@ -681,6 +724,255 @@ where
         }
     }
 
+    fn current_update_tick(&self) -> Duration {
+        Duration::from_millis(self.timing_state().mode().interval_ms())
+    }
+
+    /// Advance elapsed-time-driven dialog playback independently of the slower
+    /// fixed simulation tick used by scripts and exploration.
+    fn advance_realtime_dialog_playback(&mut self, elapsed: Duration) -> bool {
+        let can_advance = !self.frontend.is_intro()
+            && !self.frontend.is_opening_menu()
+            && !self.session.visual.is_blocking()
+            && !self.session.scripts.waiting_for_key
+            && self
+                .dialog
+                .as_ref()
+                .is_some_and(|dialog| !dialog.awaiting_input);
+        if !can_advance {
+            return false;
+        }
+
+        let dialog = self
+            .dialog
+            .as_mut()
+            .expect("dialog availability was checked above");
+        let before = (dialog.revealed_glyphs, dialog.awaiting_input);
+        let _ = advance_dialog_playback(
+            &self.resources.text,
+            dialog,
+            &mut self.session.scripts.dialog_delay_ms,
+            u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX),
+            false,
+        );
+        let after = (dialog.revealed_glyphs, dialog.awaiting_input);
+        before != after
+    }
+
+    fn advance_visual(&mut self, set_title: &mut impl FnMut(&str)) -> bool {
+        if !self.session.visual.needs_update() {
+            return false;
+        }
+        match self.session.visual.update(
+            self.renderer.screen(),
+            &self.resources.palettes,
+            &self.resources.fbp_archive,
+            &self.resources.rng_archive,
+            &self.resources.role_sprites,
+        ) {
+            Ok(changed) => changed,
+            Err(error) => {
+                set_title(&format!("Rust-PAL [visual error: {error}]"));
+                false
+            }
+        }
+    }
+
+    fn restore_selected_slot_if_ready(&mut self, set_title: &mut impl FnMut(&str)) -> bool {
+        let Some(slot) = (!self.session.visual.is_blocking())
+            .then(|| self.session.persistence.pending_load_slot.take())
+            .flatten()
+        else {
+            return false;
+        };
+
+        match self.restore_original_slot(slot, true, true) {
+            Ok(()) => set_title(&format!("Rust-PAL [save slot {slot} loaded]")),
+            Err(RestoreOriginalSaveError::SceneUnavailable) => {
+                self.session.visual.queue(ScriptVisual::FadeIn { speed: 1 });
+                self.session.sync_music(self.game.current_music);
+                set_title("Rust-PAL [save scene unavailable]");
+            }
+            Err(RestoreOriginalSaveError::Unavailable | RestoreOriginalSaveError::Invalid) => {
+                self.session.visual.queue(ScriptVisual::FadeIn { speed: 1 });
+                self.session.sync_music(self.game.current_music);
+                set_title("Rust-PAL [invalid save slot]");
+            }
+        }
+        true
+    }
+
+    fn restore_last_save_if_requested(&mut self, set_title: &mut impl FnMut(&str)) -> bool {
+        if !std::mem::take(&mut self.session.persistence.load_last_save_requested) {
+            return false;
+        }
+
+        let slot = self
+            .session
+            .persistence
+            .current_save_slot
+            .or_else(|| latest_original_save_slot(&self.resources.original_save_dir));
+        match slot.map(|slot| self.restore_original_slot(slot, false, false)) {
+            Some(Ok(())) => set_title("Rust-PAL [Original save loaded]"),
+            Some(Err(RestoreOriginalSaveError::SceneUnavailable)) => {
+                set_title("Rust-PAL [Original save scene unavailable]")
+            }
+            Some(Err(
+                RestoreOriginalSaveError::Unavailable | RestoreOriginalSaveError::Invalid,
+            )) => set_title("Rust-PAL [Invalid original save]"),
+            None => set_title("Rust-PAL [No original save]"),
+        }
+        true
+    }
+
+    fn advance_update_target(
+        &mut self,
+        target: UpdateTarget,
+        update_tick: Duration,
+        input: pal_core::game::GameInput,
+        any_pressed: bool,
+        visual_scene_update_due: bool,
+        set_title: &mut impl FnMut(&str),
+    ) -> TargetOutcome {
+        match target {
+            UpdateTarget::OpeningIntro => {
+                let (changed, finished) = self.advance_intro(update_tick, input, set_title);
+                TargetOutcome {
+                    changed,
+                    visual_finalization: VisualFinalization::Defer,
+                    accumulator_action: if finished {
+                        AccumulatorAction::Reset
+                    } else {
+                        AccumulatorAction::ConsumeTick
+                    },
+                }
+            }
+            UpdateTarget::VisualOrDeferredAction => {
+                TargetOutcome::run(visual_scene_update_due && self.update_auto_scripts(set_title))
+            }
+            UpdateTarget::OpeningMenu => {
+                TargetOutcome::run(self.advance_opening_menu(input, set_title))
+            }
+            UpdateTarget::WaitingForKey => {
+                if any_pressed {
+                    self.session.scripts.waiting_for_key = false;
+                    self.advance_active_script(set_title);
+                    TargetOutcome::run(true)
+                } else {
+                    TargetOutcome::run(false)
+                }
+            }
+            UpdateTarget::Dialog => {
+                TargetOutcome::run(self.advance_dialog(input, any_pressed, set_title))
+            }
+            UpdateTarget::PostBattle => {
+                advance_post_battle(any_pressed, &mut self.game, &mut self.session);
+                TargetOutcome::run(true)
+            }
+            UpdateTarget::BattleScript => {
+                let changed = self.advance_battle(input, any_pressed, set_title);
+                TargetOutcome::defer(changed)
+            }
+            UpdateTarget::Battle => {
+                TargetOutcome::run(self.advance_battle(input, any_pressed, set_title))
+            }
+            UpdateTarget::Menu => TargetOutcome::run(self.advance_menu(input, set_title)),
+            UpdateTarget::SceneScript => {
+                self.advance_scene_script(set_title);
+                TargetOutcome::run(true)
+            }
+            UpdateTarget::Exploration => {
+                let (changed, opened_menu) = self.advance_exploration(input, set_title);
+                if opened_menu {
+                    TargetOutcome::defer(changed)
+                } else {
+                    TargetOutcome::run(changed)
+                }
+            }
+        }
+    }
+
+    fn should_queue_automatic_scene_fade_in(&self) -> bool {
+        let script_execution_paused = (!self.scripts.is_active()
+            && !self.battle_scripts.is_active())
+            || self.dialog.is_some()
+            || self.session.scripts.waiting_for_key
+            || self.session.has_active_menu();
+        !self.frontend.is_opening_menu() && script_execution_paused
+    }
+
+    fn finish_tick_visuals(&mut self, set_title: &mut impl FnMut(&str)) -> bool {
+        let mut changed = self.should_queue_automatic_scene_fade_in()
+            && self.session.visual.queue_automatic_scene_fade_in();
+        changed |= self.start_pending_visual(set_title);
+        changed
+    }
+
+    fn advance_fixed_tick(
+        &mut self,
+        update_tick: Duration,
+        set_title: &mut impl FnMut(&str),
+    ) -> TickOutcome {
+        let (input, any_pressed) = self.input.sample();
+        let mut outcome = TickOutcome::default();
+
+        let (target, visual_scene_update_due) = if self.frontend.is_intro() {
+            (self.select_update_target(false), false)
+        } else {
+            // Target selection intentionally uses the visual state from before
+            // update(), so a visual finishing now cannot also advance gameplay.
+            let visual_was_blocking = self.session.visual.is_blocking();
+            let visual_scene_update_due = self.session.visual.scene_update_due();
+            outcome.changed |= self.advance_visual(set_title);
+            outcome.exit =
+                self.session.persistence.quit_requested && !self.session.visual.is_blocking();
+
+            let selected_load_handled = self.restore_selected_slot_if_ready(set_title);
+            let last_save_load_handled = self.restore_last_save_if_requested(set_title);
+            outcome.changed |= selected_load_handled || last_save_load_handled;
+
+            let deferred_action_handled = selected_load_handled || last_save_load_handled;
+            (
+                self.select_update_target(visual_was_blocking || deferred_action_handled),
+                visual_scene_update_due,
+            )
+        };
+        let target_outcome = self.advance_update_target(
+            target,
+            update_tick,
+            input,
+            any_pressed,
+            visual_scene_update_due,
+            set_title,
+        );
+        outcome.changed |= target_outcome.changed;
+
+        if target_outcome.visual_finalization == VisualFinalization::Run {
+            outcome.changed |= self.finish_tick_visuals(set_title);
+        }
+        match target_outcome.accumulator_action {
+            AccumulatorAction::ConsumeTick => self.clock.consume(update_tick),
+            AccumulatorAction::Reset => self.clock.reset_accumulator(),
+        }
+        outcome
+    }
+
+    fn needs_continuous_ui_redraw(&self) -> bool {
+        self.frontend.is_opening_menu() || (self.dialog.is_none() && self.session.has_active_menu())
+    }
+
+    fn next_wakeup(&self, now: Instant) -> Instant {
+        let simulation_wait = self
+            .current_update_tick()
+            .saturating_sub(self.clock.accumulator());
+        let dialog_wait = self
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| !dialog.awaiting_input)
+            .then_some(Duration::from_millis(DIALOG_POLL_INTERVAL_MS));
+        now + dialog_wait.map_or(simulation_wait, |wait| simulation_wait.min(wait))
+    }
+
     pub(super) fn advance(
         &mut self,
         now: Instant,
@@ -688,201 +980,25 @@ where
     ) -> AdvanceResult {
         self.session.audio.music.poll();
         let frame_elapsed = self.clock.begin_frame(now);
-        let mut changed = false;
+        let mut changed = self.advance_realtime_dialog_playback(frame_elapsed);
         let mut exit = false;
 
-        // Dialog glyphs use the original 8 ms timing quantum rather than the
-        // slower simulation step used by scripts and exploration.
-        if !self.frontend.is_intro()
-            && !self.frontend.is_opening_menu()
-            && !self.session.visual.is_blocking()
-            && !self.session.scripts.waiting_for_key
-            && self
-                .dialog
-                .as_ref()
-                .is_some_and(|dialog| !dialog.awaiting_input)
-        {
-            let before = self
-                .dialog
-                .as_ref()
-                .map(|dialog| (dialog.revealed_glyphs, dialog.awaiting_input));
-            let _ = advance_dialog_playback(
-                &self.resources.text,
-                self.dialog.as_mut().expect("dialog was checked above"),
-                &mut self.session.scripts.dialog_delay_ms,
-                u32::try_from(frame_elapsed.as_millis()).unwrap_or(u32::MAX),
-                false,
-            );
-            let after = self
-                .dialog
-                .as_ref()
-                .map(|dialog| (dialog.revealed_glyphs, dialog.awaiting_input));
-            changed |= before != after;
-        }
-
-        let update_tick = Duration::from_millis(self.timing_state().mode().interval_ms());
+        // Keep one timing mode for this catch-up cycle. State transitions affect
+        // the wake-up interval calculated after the loop.
+        let update_tick = self.current_update_tick();
         while self.clock.accumulator() >= update_tick {
-            let (input, any_pressed) = self.input.sample();
-            if self.frontend.is_intro() {
-                let (intro_changed, finished) = self.advance_intro(update_tick, input, set_title);
-                changed |= intro_changed;
-                if finished {
-                    self.clock.reset_accumulator();
-                } else {
-                    self.clock.consume(update_tick);
-                }
-                continue;
-            }
-
-            let visual_was_blocking = self.session.visual.is_blocking();
-            let visual_scene_update_due = self.session.visual.scene_update_due();
-            if self.session.visual.needs_update() {
-                match self.session.visual.update(
-                    self.renderer.screen(),
-                    &self.resources.palettes,
-                    &self.resources.fbp_archive,
-                    &self.resources.rng_archive,
-                    &self.resources.role_sprites,
-                ) {
-                    Ok(visual_changed) => changed |= visual_changed,
-                    Err(error) => set_title(&format!("Rust-PAL [visual error: {error}]")),
-                }
-            }
-            if self.session.persistence.quit_requested && !self.session.visual.is_blocking() {
-                exit = true;
-            }
-
-            let selected_load_slot = (!self.session.visual.is_blocking())
-                .then(|| self.session.persistence.pending_load_slot.take())
-                .flatten();
-            if let Some(slot) = selected_load_slot {
-                match self.restore_original_slot(slot, true, true) {
-                    Ok(()) => set_title(&format!("Rust-PAL [save slot {slot} loaded]")),
-                    Err(RestoreOriginalSaveError::SceneUnavailable) => {
-                        self.session.visual.queue(ScriptVisual::FadeIn { speed: 1 });
-                        self.session.sync_music(self.game.current_music);
-                        set_title("Rust-PAL [save scene unavailable]");
-                    }
-                    Err(
-                        RestoreOriginalSaveError::Unavailable | RestoreOriginalSaveError::Invalid,
-                    ) => {
-                        self.session.visual.queue(ScriptVisual::FadeIn { speed: 1 });
-                        self.session.sync_music(self.game.current_music);
-                        set_title("Rust-PAL [invalid save slot]");
-                    }
-                }
-                changed = true;
-            }
-
-            let load_last_save_requested =
-                std::mem::take(&mut self.session.persistence.load_last_save_requested);
-            if load_last_save_requested {
-                let slot = self
-                    .session
-                    .persistence
-                    .current_save_slot
-                    .or_else(|| latest_original_save_slot(&self.resources.original_save_dir));
-                match slot.map(|slot| self.restore_original_slot(slot, false, false)) {
-                    Some(Ok(())) => set_title("Rust-PAL [Original save loaded]"),
-                    Some(Err(RestoreOriginalSaveError::SceneUnavailable)) => {
-                        set_title("Rust-PAL [Original save scene unavailable]")
-                    }
-                    Some(Err(
-                        RestoreOriginalSaveError::Unavailable | RestoreOriginalSaveError::Invalid,
-                    )) => set_title("Rust-PAL [Invalid original save]"),
-                    None => set_title("Rust-PAL [No original save]"),
-                }
-                changed = true;
-            }
-
-            let visual_or_deferred =
-                visual_was_blocking || selected_load_slot.is_some() || load_last_save_requested;
-            let lane = self.update_lane(visual_or_deferred);
-            let mut skip_post_tick = false;
-            match lane {
-                UpdateLane::OpeningIntro => {
-                    unreachable!("opening intro is handled before desktop update lanes")
-                }
-                UpdateLane::VisualOrDeferredAction => {
-                    if visual_scene_update_due {
-                        changed |= self.update_auto_scripts(set_title);
-                    }
-                }
-                UpdateLane::OpeningMenu => {
-                    changed |= self.advance_opening_menu(input, set_title);
-                }
-                UpdateLane::WaitingForKey => {
-                    if any_pressed {
-                        self.session.scripts.waiting_for_key = false;
-                        self.advance_active_script(set_title);
-                        changed = true;
-                    }
-                }
-                UpdateLane::Dialog => {
-                    changed |= self.advance_dialog(input, any_pressed, set_title);
-                }
-                UpdateLane::PostBattle => {
-                    advance_post_battle(any_pressed, &mut self.game, &mut self.session);
-                    changed = true;
-                }
-                UpdateLane::BattleScript => {
-                    changed |= self.advance_battle(input, any_pressed, set_title);
-                    skip_post_tick = true;
-                }
-                UpdateLane::Battle => {
-                    changed |= self.advance_battle(input, any_pressed, set_title);
-                }
-                UpdateLane::Menu => {
-                    changed = self.advance_menu(input, set_title);
-                }
-                UpdateLane::SceneScript => {
-                    self.advance_scene_script(set_title);
-                    changed = true;
-                }
-                UpdateLane::Exploration => {
-                    let (exploration_changed, opened_menu) =
-                        self.advance_exploration(input, set_title);
-                    changed |= exploration_changed;
-                    skip_post_tick = opened_menu;
-                }
-            }
-            if skip_post_tick {
-                self.clock.consume(update_tick);
-                continue;
-            }
-
-            let script_is_paused = (!self.scripts.is_active() && !self.battle_scripts.is_active())
-                || self.dialog.is_some()
-                || self.session.scripts.waiting_for_key
-                || self.session.has_active_menu();
-            if !self.frontend.is_opening_menu()
-                && script_is_paused
-                && self.session.visual.queue_automatic_scene_fade_in()
-            {
-                changed = true;
-            }
-            changed |= self.start_pending_visual(set_title);
-            self.clock.consume(update_tick);
+            let outcome = self.advance_fixed_tick(update_tick, set_title);
+            changed |= outcome.changed;
+            exit |= outcome.exit;
         }
 
-        if self.frontend.is_opening_menu()
-            || (self.dialog.is_none() && self.session.has_active_menu())
-        {
-            changed = true;
-        }
-        let next_update_tick = Duration::from_millis(self.timing_state().mode().interval_ms());
-        let simulation_wait = next_update_tick.saturating_sub(self.clock.accumulator());
-        let dialog_wait = self
-            .dialog
-            .as_ref()
-            .is_some_and(|dialog| !dialog.awaiting_input)
-            .then_some(Duration::from_millis(DIALOG_POLL_INTERVAL_MS));
+        changed |= self.needs_continuous_ui_redraw();
         if changed {
             self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(now)));
         }
         AdvanceResult {
             exit,
-            wait_until: now + dialog_wait.map_or(simulation_wait, |wait| simulation_wait.min(wait)),
+            wait_until: self.next_wakeup(now),
         }
     }
 
