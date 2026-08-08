@@ -4767,6 +4767,33 @@ impl<M: CollisionMap> GameState<M> {
                     object.auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
+                SetSelectedObjectPose => {
+                    if entry.operands[0] != 0 {
+                        let target_id = if entry.operands[0] == 0xffff {
+                            object_id
+                        } else {
+                            entry.operands[0]
+                        };
+                        let direction = Direction::from_pal(entry.operands[1]).ok_or(
+                            AutoScriptError::Unsupported {
+                                object_id,
+                                entry: script_entry,
+                                opcode: entry.opcode,
+                            },
+                        )?;
+                        let Some(target) = self.object_mut(target_id) else {
+                            return Err(AutoScriptError::MissingObject {
+                                object_id,
+                                entry: script_entry,
+                                target_id,
+                            });
+                        };
+                        target.direction = direction;
+                        target.current_frame = entry.operands[2];
+                    }
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
                 SetObjectTriggerScript => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
                         object_id
@@ -4952,7 +4979,6 @@ impl<M: CollisionMap> GameState<M> {
                 | SetObjectPositionRelative
                 | SetObjectPosition
                 | SetPartyMemberPose
-                | SetSelectedObjectPose
                 | SetEquipmentEffect
                 | EquipItem
                 | AdjustPlayerAttribute
@@ -5179,6 +5205,31 @@ impl<M: CollisionMap> GameState<M> {
                     object.direction = Direction::South;
                     object.current_frame = entry.operands[0];
                 }
+                SetSelectedObjectPose => {
+                    if entry.operands[0] != 0 {
+                        let target_id = if entry.operands[0] == 0xffff {
+                            object_id
+                        } else {
+                            entry.operands[0]
+                        };
+                        let direction = Direction::from_pal(entry.operands[1]).ok_or(
+                            AutoScriptError::Unsupported {
+                                object_id,
+                                entry: script_entry,
+                                opcode: entry.opcode,
+                            },
+                        )?;
+                        let Some(target) = self.object_mut(target_id) else {
+                            return Err(AutoScriptError::MissingObject {
+                                object_id,
+                                entry: script_entry,
+                                target_id,
+                            });
+                        };
+                        target.direction = direction;
+                        target.current_frame = entry.operands[2];
+                    }
+                }
                 PlaySound => self.pending_auto_sounds.push(entry.operands[0]),
                 SetObjectState => {
                     let target_id = if entry.operands[0] == 0 || entry.operands[0] == 0xffff {
@@ -5248,7 +5299,6 @@ impl<M: CollisionMap> GameState<M> {
                 | SetObjectPositionRelative
                 | SetObjectPosition
                 | SetPartyMemberPose
-                | SetSelectedObjectPose
                 | SetEquipmentEffect
                 | EquipItem
                 | AdjustPlayerAttribute
@@ -8051,6 +8101,31 @@ mod tests {
     }
 
     #[test]
+    fn auto_script_sets_selected_object_pose() {
+        let script_data = [
+            [0x0000, 0, 0, 0],
+            [0x0016, 417, Direction::East as u16, 1],
+            [0x0000, 0, 0, 0],
+        ]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+        let scripts = ScriptTable::parse(&script_data).unwrap();
+        let mut owner = blocking_object(80, 80);
+        owner.id = 412;
+        owner.auto_script = 1;
+        let mut target = blocking_object(100, 100);
+        target.id = 417;
+        target.direction = Direction::North;
+        let mut state = state(&[]).with_scene_objects(vec![owner, target]);
+
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert_eq!(state.scene_objects[0].auto_script, 2);
+        assert_eq!(state.scene_objects[1].direction, Direction::East);
+        assert_eq!(state.scene_objects[1].current_frame, 1);
+    }
+
+    #[test]
     fn auto_script_calls_immediate_world_subscript() {
         let script_data = [
             [0x0000, 0, 0, 0],
@@ -8059,6 +8134,7 @@ mod tests {
             [0x0000, 0, 0, 0],
             [0x0049, 0xffff, 1, 0],
             [0x0014, 2, 0, 0],
+            [0x0016, 1, Direction::East as u16, 1],
             [0x0000, 0, 0, 0],
         ]
         .into_iter()
@@ -8074,6 +8150,8 @@ mod tests {
 
         assert!(state.update_auto_scripts(&scripts).unwrap());
         assert_eq!(state.scene_objects[0].auto_script, 2);
+        assert_eq!(state.scene_objects[0].direction, Direction::East);
+        assert_eq!(state.scene_objects[0].current_frame, 1);
         assert_eq!(state.scene_objects[1].state, 1);
         assert_eq!(state.scene_objects[1].direction, Direction::South);
         assert_eq!(state.scene_objects[1].current_frame, 2);
