@@ -44,6 +44,11 @@ impl Renderer {
         &mut self.screen
     }
 
+    /// Palette currently used for indexed-resource conversion.
+    pub(crate) fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
     /// 检查是否有更新需要渲染
     pub fn is_dirty(&self) -> bool {
         self.dirty
