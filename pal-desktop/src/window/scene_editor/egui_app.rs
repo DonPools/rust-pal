@@ -25,7 +25,10 @@ use super::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::renderer::Renderer;
 
 const DOCK_STATE_KEY: &str = "scene_editor_dock_state_v2";
-const MESSAGE_WIDTH: usize = 640;
+// Render the original 320px-wide dialog layout, then let egui enlarge it with
+// nearest-neighbor filtering. This keeps the PAL bitmap glyphs crisp and makes
+// them comfortably readable on modern high-DPI displays.
+const MESSAGE_WIDTH: usize = 320;
 const MESSAGE_HEIGHT: usize = 80;
 
 const TEXT: Color32 = Color32::from_rgb(220, 226, 232);
@@ -733,6 +736,7 @@ where
                         .color(MUTED)
                         .italics(),
                 );
+                self.instruction_links_ui(ui, record);
                 if opcode == ScriptOpcode::PrintMessage {
                     self.inline_message_ui(ui, record);
                 }
@@ -768,6 +772,75 @@ where
         });
     }
 
+    fn instruction_links_ui(&mut self, ui: &mut egui::Ui, record: ScriptRecordInspection) {
+        let object_ids = self.model.selected_object_references();
+        let script_targets = instruction_script_targets(record);
+        if object_ids.is_empty() && script_targets.is_empty() {
+            return;
+        }
+
+        let mut locate_object = None;
+        let mut navigate_script = None;
+        ui.add_space(5.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Go to").strong().color(MUTED));
+            for object_id in object_ids {
+                let valid = self
+                    .model
+                    .script_references
+                    .scene_for_object(object_id)
+                    .is_some();
+                let response = ui.add_enabled(
+                    valid,
+                    egui::Button::new(
+                        RichText::new(format!("Object #{object_id}"))
+                            .monospace()
+                            .color(ACCENT),
+                    )
+                    .frame(false),
+                );
+                if response
+                    .on_hover_text(if valid {
+                        "Locate this event object"
+                    } else {
+                        "This event object is not indexed in any scene"
+                    })
+                    .clicked()
+                {
+                    locate_object = Some(object_id);
+                }
+            }
+            for (label, entry) in script_targets {
+                let valid = self.model.scripts.entry(entry).is_some();
+                let response = ui.add_enabled(
+                    valid,
+                    egui::Button::new(
+                        RichText::new(format!("{label} @{entry:04X}"))
+                            .monospace()
+                            .color(AUTO),
+                    )
+                    .frame(false),
+                );
+                if response
+                    .on_hover_text(if valid {
+                        "Navigate to this script entry"
+                    } else {
+                        "This entry is outside the script table"
+                    })
+                    .clicked()
+                {
+                    navigate_script = Some(entry);
+                }
+            }
+        });
+
+        if let Some(object_id) = locate_object {
+            self.model.locate_object_reference(object_id);
+        } else if let Some(entry) = navigate_script {
+            self.model.navigate_to_entry(entry);
+        }
+    }
+
     fn inline_message_ui(&self, ui: &mut egui::Ui, record: ScriptRecordInspection) {
         let message_id = record.instruction.operands[0];
         ui.add_space(6.0);
@@ -799,7 +872,7 @@ where
         }
         if let Some(texture) = self.message_texture {
             ui.label(RichText::new("Original in-game text").color(MUTED));
-            let scale = (ui.available_width() / MESSAGE_WIDTH as f32).clamp(0.25, 1.0);
+            let scale = (ui.available_width() / MESSAGE_WIDTH as f32).clamp(0.5, 2.0);
             ui.add(
                 egui::Image::new((
                     texture.id(),
@@ -875,7 +948,7 @@ where
         });
         if let Some(texture) = self.message_texture {
             let available = ui.available_width();
-            let scale = (available / MESSAGE_WIDTH as f32).clamp(0.25, 2.0);
+            let scale = (available / MESSAGE_WIDTH as f32).clamp(0.5, 2.0);
             ui.add(
                 egui::Image::new((
                     texture.id(),
@@ -1008,6 +1081,54 @@ fn flow_explanation(record: ScriptRecordInspection) -> String {
         }
         ScriptControlFlow::Unknown => "The resulting control flow is unknown.".to_owned(),
     }
+}
+
+fn instruction_script_targets(record: ScriptRecordInspection) -> Vec<(&'static str, u16)> {
+    use ScriptOpcode::*;
+
+    let mut targets = Vec::new();
+    let mut push = |label, entry| {
+        if entry != 0 && !targets.iter().any(|(_, target)| *target == entry) {
+            targets.push((label, entry));
+        }
+    };
+
+    match record.flow {
+        ScriptControlFlow::Jump {
+            target,
+            conditional: true,
+        } => push("Branch", target),
+        ScriptControlFlow::Jump { target, .. } => push("Jump", target),
+        ScriptControlFlow::Call { target, .. } => push("Call", target),
+        ScriptControlFlow::Next
+        | ScriptControlFlow::Stop
+        | ScriptControlFlow::Random { .. }
+        | ScriptControlFlow::Unknown => {}
+    }
+
+    let Some(opcode) = record.opcode else {
+        return targets;
+    };
+    let [op0, op1, op2] = record.instruction.operands;
+    match opcode {
+        StopAndReplace => push("Replacement", op0),
+        SetObjectAutoScript => push("Auto", op1),
+        SetObjectTriggerScript => push("Trigger", op1),
+        SetObjectScript => push("Object script", op1),
+        SetSceneScripts => {
+            push("Scene enter", op1);
+            push("Scene teleport", op2);
+        }
+        StartBattle => {
+            push("On lost", op1);
+            push("On fled", op2);
+        }
+        PlaceUsedItemObject | SetEnemyStatus | SummonEnemy => push("On failure", op2),
+        FleeBattle | CollectEnemy => push("On failure", op0),
+        DivideEnemy => push("On failure", op1),
+        _ => {}
+    }
+    targets
 }
 
 fn opcode_explanation(
@@ -1325,6 +1446,37 @@ mod tests {
             "Show fbp with sprite"
         );
         assert_eq!(object_selector_label(u16::MAX, Some(911)), "#911 (current)");
+    }
+
+    #[test]
+    fn exposes_object_script_and_flow_navigation_targets() {
+        let object_trigger = ScriptRecordInspection {
+            entry: 0x13ab,
+            instruction: ScriptEntry {
+                opcode: ScriptOpcode::SetObjectTriggerScript.raw(),
+                operands: [20, 0x1370, 0],
+            },
+            opcode: Some(ScriptOpcode::SetObjectTriggerScript),
+            flow: ScriptControlFlow::Next,
+        };
+        assert_eq!(
+            instruction_script_targets(object_trigger),
+            vec![("Trigger", 0x1370)]
+        );
+
+        let call = ScriptRecordInspection {
+            entry: 10,
+            instruction: ScriptEntry {
+                opcode: ScriptOpcode::Call.raw(),
+                operands: [20, 7, 0],
+            },
+            opcode: Some(ScriptOpcode::Call),
+            flow: ScriptControlFlow::Call {
+                target: 20,
+                return_entry: 11,
+            },
+        };
+        assert_eq!(instruction_script_targets(call), vec![("Call", 20)]);
     }
 
     #[test]

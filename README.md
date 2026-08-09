@@ -270,9 +270,10 @@ cargo run -p pal-launcher -- --scene-editor --scene=3
 `F`、`R` 分别后退、前进和返回根入口。选择普通指令时会列出指向该 entry 的场景、事件对象、
 跳转和调用，引用行也可点击定位；按 `O` 或点击 `OBJECT REFS` 可定位指令引用的事件对象。
 `Inspector` 的 `Meaning` 卡片会把常用操作数和实际控制流解释为可读文本，原始 opcode
-和操作数收进可展开的 `Raw instruction`。选择 `PrintMessage` 时，卡片内会直接用原版字库
-预览对应的 `M.MSG` 文本，独立的 `Message` 页签仍可查看完整预览和 Big5 原始字节。该模式
-只读取原始资源，不执行脚本，也不会写回资源或存档。
+和操作数收进可展开的 `Raw instruction`；识别到事件对象或脚本入口时，卡片会提供可点击的
+`Object #ID` 和 `@ENTRY` 导航。选择 `PrintMessage` 时，卡片内会直接用原版字库预览对应的
+`M.MSG` 文本，独立的 `Message` 页签仍可查看完整预览和 Big5 原始字节。该模式只读取原始
+资源，不执行脚本，也不会写回资源或存档。
 
 启动时可用 `--music=midi` 或 `--music=rix` 指定初始后端；自定义音色库使用
 `--sound-font=/path/to/custom.sf2`。系统菜单也可在 `OFF / MIDI / RIX` 之间切换。
