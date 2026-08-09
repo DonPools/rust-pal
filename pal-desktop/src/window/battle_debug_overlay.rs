@@ -1,73 +1,56 @@
-//! Read-only battle assistance rendered beside the scaled game framebuffer.
+//! Read-only enemy information drawn into the native 320x200 battle frame.
 
-use std::collections::HashMap;
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
-
-use encoding_rs::BIG5;
-use fontdue::{Font, FontSettings};
-use pal_assets::text::TextLibrary;
+use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::battle::{BattleState, BattleStatus};
-use pixels::wgpu;
 
-use super::game_viewport::SurfaceRect;
+use crate::renderer::Renderer;
 
-const SURFACE_MARGIN: f32 = 12.0;
-const MAX_PANEL_WIDTH: f32 = 300.0;
-const MAX_RASTER_SCALE: f32 = 1.5;
+use super::draw::{draw_debug_text, fill_rect, stroke_rect};
 
-const PANEL: [u8; 4] = [8, 15, 24, 205];
-const PANEL_BORDER: [u8; 4] = [86, 111, 137, 220];
-const CARD: [u8; 4] = [18, 29, 43, 184];
-const CARD_BORDER: [u8; 4] = [50, 70, 91, 200];
-const TEXT: [u8; 4] = [232, 239, 246, 255];
-const MUTED: [u8; 4] = [148, 165, 183, 255];
-const ACCENT: [u8; 4] = [74, 214, 232, 255];
-const GOOD: [u8; 4] = [92, 219, 137, 255];
-const WARNING: [u8; 4] = [247, 190, 78, 255];
-const DANGER: [u8; 4] = [244, 105, 116, 255];
-const BAR_TRACK: [u8; 4] = [43, 56, 70, 255];
+const DETAIL_WIDTH: i32 = 148;
+const MAX_OVERVIEW_WIDTH: i32 = 308;
+const PANEL_MARGIN: i32 = 6;
+const HEADER_HEIGHT: i32 = 19;
+const OVERVIEW_ROW_HEIGHT: i32 = 27;
+const DETAIL_HEIGHT: i32 = 108;
 
-const SHADER: &str = r#"
-@group(0) @binding(0)
-var panel: texture_2d<f32>;
+const PANEL: [u8; 4] = [31, 16, 9, 214];
+const ROW: [u8; 4] = [52, 28, 16, 196];
+const ROW_SELECTED: [u8; 4] = [42, 52, 48, 218];
+const BORDER: [u8; 4] = [225, 191, 126, 255];
+const SEPARATOR: [u8; 4] = [142, 105, 68, 255];
+const TEXT: [u8; 4] = [244, 230, 190, 255];
+const MUTED: [u8; 4] = [194, 157, 108, 255];
+const ACCENT: [u8; 4] = [82, 218, 207, 255];
+const GOOD: [u8; 4] = [83, 210, 125, 255];
+const WARNING: [u8; 4] = [239, 180, 67, 255];
+const DANGER: [u8; 4] = [232, 84, 71, 255];
+const BAR_TRACK: [u8; 4] = [71, 45, 28, 255];
 
-@group(0) @binding(1)
-var panel_sampler: sampler;
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
-    let uv = vec2<f32>(f32(index & 1u), f32(index >> 1u));
-    var output: VertexOutput;
-    output.position = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
-    output.uv = uv;
-    return output;
-}
-
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(panel, panel_sampler, input.uv);
-}
-"#;
+const ENEMY_LABEL: &[u8] = &[0xbc, 0xc4, 0xb1, 0xa1]; // 敵情
+const ATTACK_LABEL: &[u8] = &[0xa7, 0xf0]; // 攻
+const DEFENSE_LABEL: &[u8] = &[0xa8, 0xbe]; // 防
+const PHYSICAL_LABEL: &[u8] = &[0xaa, 0xab]; // 物
+const STATUS_LABEL: &[u8] = &[0xaa, 0xac, 0xba, 0x41]; // 狀態
+const POISON_LABEL: &[u8] = &[0xac, 0x72]; // 毒
+const ELEMENT_LABELS: [&[u8]; 5] = [
+    &[0xad, 0xb7], // 風
+    &[0xb9, 0x70], // 雷
+    &[0xa4, 0xf4], // 水
+    &[0xa4, 0xf5], // 火
+    &[0xa4, 0x67], // 土
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StatusView {
-    label: &'static str,
+    label: &'static [u8],
     rounds: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EnemyView {
     index: usize,
-    name: String,
+    name: Vec<u8>,
     hp: u16,
     max_hp: u16,
     alive: bool,
@@ -86,39 +69,17 @@ impl EnemyView {
             .unwrap_or(0)
             .min(self.max_hp)
     }
-
-    fn status_summary(&self) -> String {
-        let mut labels = self
-            .statuses
-            .iter()
-            .map(|status| format!("{}{}", status.label, status.rounds))
-            .collect::<Vec<_>>();
-        if self.poisoned {
-            labels.push("毒".to_owned());
-        }
-        labels.join(" · ")
-    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct BattleDebugSnapshot {
-    scale_factor: f64,
-    surface_width: u32,
-    surface_height: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BattleAssistSnapshot {
     round: u32,
     selected_enemy: Option<usize>,
     enemies: Vec<EnemyView>,
 }
 
-impl BattleDebugSnapshot {
-    pub(super) fn capture(
-        battle: &BattleState,
-        text: &TextLibrary,
-        selected_enemy: Option<usize>,
-        scale_factor: f64,
-        surface_width: u32,
-        surface_height: u32,
-    ) -> Self {
+impl BattleAssistSnapshot {
+    fn capture(battle: &BattleState, text: &TextLibrary, selected_enemy: Option<usize>) -> Self {
         let enemies = battle
             .enemies
             .iter()
@@ -128,8 +89,8 @@ impl BattleDebugSnapshot {
                 index,
                 name: text
                     .word(usize::from(enemy.object_id))
-                    .and_then(decode_big5)
-                    .unwrap_or_else(|| format!("敌人 {}", index + 1)),
+                    .unwrap_or_default()
+                    .to_vec(),
                 hp: enemy.hp,
                 max_hp: enemy.max_hp,
                 alive: enemy.is_alive(),
@@ -152,9 +113,6 @@ impl BattleDebugSnapshot {
             })
             .collect::<Vec<_>>();
         Self {
-            scale_factor,
-            surface_width,
-            surface_height,
             round: battle.round(),
             selected_enemy: selected_enemy
                 .filter(|index| enemies.iter().any(|enemy| enemy.index == *index)),
@@ -168,350 +126,359 @@ impl BattleDebugSnapshot {
     }
 }
 
-fn decode_big5(text: &[u8]) -> Option<String> {
-    let (decoded, _, had_errors) = BIG5.decode(text);
-    (!had_errors && !decoded.is_empty()).then(|| decoded.into_owned())
-}
-
-fn status_label(status: BattleStatus) -> &'static str {
+fn status_label(status: BattleStatus) -> &'static [u8] {
     match status {
-        BattleStatus::Confused => "乱",
-        BattleStatus::Paralyzed => "定",
-        BattleStatus::Sleep => "眠",
-        BattleStatus::Silence => "封",
-        BattleStatus::Puppet => "傀",
-        BattleStatus::Bravery => "勇",
-        BattleStatus::Protect => "护",
-        BattleStatus::Haste => "速",
-        BattleStatus::DualAttack => "连",
+        BattleStatus::Confused => &[0xb6, 0xc3],   // 亂
+        BattleStatus::Paralyzed => &[0xa9, 0x77],  // 定
+        BattleStatus::Sleep => &[0xaf, 0x76],      // 眠
+        BattleStatus::Silence => &[0xab, 0xca],    // 封
+        BattleStatus::Puppet => &[0xb3, 0xc8],     // 傀
+        BattleStatus::Bravery => &[0xab, 0x69],    // 勇
+        BattleStatus::Protect => &[0xc5, 0x40],    // 護
+        BattleStatus::Haste => &[0xb3, 0x74],      // 速
+        BattleStatus::DualAttack => &[0xb3, 0x73], // 連
     }
 }
 
-pub(super) struct BattleDebugOverlay {
-    bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
-    pipeline: wgpu::RenderPipeline,
-    texture: wgpu::Texture,
-    pixels: Vec<u8>,
-    width: u32,
-    height: u32,
-    display_width: u32,
-    display_height: u32,
-    scale_factor: f64,
-    font: UiFont,
-    cached_snapshot: Option<BattleDebugSnapshot>,
-}
+pub(super) fn render_battle_assist(
+    renderer: &mut Renderer,
+    battle: &BattleState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    selected_enemy: Option<usize>,
+) {
+    let snapshot = BattleAssistSnapshot::capture(battle, text, selected_enemy);
+    let panel_width =
+        battle_assist_width(snapshot.enemies.len(), snapshot.selected_enemy().is_some());
+    let panel_height =
+        battle_assist_height(snapshot.enemies.len(), snapshot.selected_enemy().is_some());
+    let panel_x = i32::try_from(renderer.width).unwrap_or(i32::MAX) - panel_width - PANEL_MARGIN;
+    let panel_y = PANEL_MARGIN;
 
-impl BattleDebugOverlay {
-    pub(super) fn new(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-        scale_factor: f64,
-    ) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("battle_debug_overlay_bind_group_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("battle_debug_overlay_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("battle_debug_overlay_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("battle_debug_overlay_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-        });
-        let (texture, bind_group) = create_texture(device, &bind_group_layout, 1, 1);
-        let font = UiFont::discover();
-        eprintln!("battle debug overlay font: {}", font.name());
-        Self {
-            bind_group_layout,
-            bind_group,
-            pipeline,
-            texture,
-            pixels: Vec::new(),
-            width: 1,
-            height: 1,
-            display_width: 1,
-            display_height: 1,
-            scale_factor,
+    blend_rect(renderer, panel_x, panel_y, panel_width, panel_height, PANEL);
+    stroke_rect(
+        renderer,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        BORDER,
+    );
+    renderer.draw_big5_text_shadowed(font, ENEMY_LABEL, panel_x + 7, panel_y + 2, 0x4f);
+    draw_debug_text(
+        renderer,
+        panel_x + 43,
+        panel_y + 6,
+        &format!(
+            "x{}",
+            snapshot.enemies.iter().filter(|enemy| enemy.alive).count()
+        ),
+        MUTED,
+    );
+    draw_debug_text_right(
+        renderer,
+        panel_x + panel_width - 7,
+        panel_y + 6,
+        &format!("R{:02}", snapshot.round),
+        ACCENT,
+    );
+    fill_rect(
+        renderer,
+        panel_x + 1,
+        panel_y + HEADER_HEIGHT - 1,
+        panel_width - 2,
+        1,
+        SEPARATOR,
+    );
+
+    if let Some(enemy) = snapshot.selected_enemy() {
+        draw_enemy_details(renderer, font, enemy, panel_x, panel_y + HEADER_HEIGHT);
+    } else {
+        draw_enemy_overview(
+            renderer,
             font,
-            cached_snapshot: None,
-        }
+            &snapshot.enemies,
+            panel_x,
+            panel_y + HEADER_HEIGHT,
+            panel_width,
+        );
     }
+}
 
-    pub(super) fn update(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        snapshot: BattleDebugSnapshot,
-    ) {
-        if !replace_changed_snapshot(&mut self.cached_snapshot, snapshot) {
-            return;
+fn battle_assist_width(enemy_count: usize, target_details: bool) -> i32 {
+    if target_details {
+        DETAIL_WIDTH
+    } else {
+        (i32::try_from(enemy_count).unwrap_or(1).max(1) * 112)
+            .clamp(DETAIL_WIDTH, MAX_OVERVIEW_WIDTH)
+    }
+}
+
+fn battle_assist_height(_enemy_count: usize, target_details: bool) -> i32 {
+    if target_details {
+        DETAIL_HEIGHT
+    } else {
+        HEADER_HEIGHT + OVERVIEW_ROW_HEIGHT + 2
+    }
+}
+
+fn draw_enemy_overview(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    enemies: &[EnemyView],
+    panel_x: i32,
+    start_y: i32,
+    panel_width: i32,
+) {
+    let count = i32::try_from(enemies.len()).unwrap_or(1).max(1);
+    let content_x = panel_x + 2;
+    let content_width = panel_width - 4;
+    for (column, enemy) in enemies.iter().enumerate() {
+        let column = i32::try_from(column).unwrap_or(0);
+        let left = content_x + content_width * column / count;
+        let right = content_x + content_width * (column + 1) / count;
+        let width = right - left;
+        let y = start_y;
+        blend_rect(
+            renderer,
+            left,
+            y + 1,
+            (width - 1).max(1),
+            OVERVIEW_ROW_HEIGHT - 2,
+            ROW,
+        );
+        fill_rect(
+            renderer,
+            left + 1,
+            y + 2,
+            2,
+            OVERVIEW_ROW_HEIGHT - 4,
+            hp_color(enemy),
+        );
+        let max_name_glyphs = match width {
+            0..=68 => 2,
+            69..=92 => 3,
+            _ => 4,
+        };
+        draw_enemy_name(
+            renderer,
+            font,
+            enemy,
+            left + 5,
+            y + 2,
+            max_name_glyphs,
+            0x4f,
+        );
+        let level = if enemy.alive {
+            format!("LV{}", enemy.level)
+        } else {
+            "KO".to_owned()
+        };
+        if width >= 104 {
+            draw_debug_text_right(
+                renderer,
+                right - 5,
+                y + 6,
+                &level,
+                if enemy.alive { MUTED } else { DANGER },
+            );
         }
-        let snapshot = self
-            .cached_snapshot
-            .as_ref()
-            .expect("changed battle debug snapshot was cached");
-        let frame = rasterize_snapshot(&mut self.font, snapshot, &mut self.pixels);
-        if self.width != frame.width || self.height != frame.height {
-            let (texture, bind_group) =
-                create_texture(device, &self.bind_group_layout, frame.width, frame.height);
-            self.texture = texture;
-            self.bind_group = bind_group;
-            self.width = frame.width;
-            self.height = frame.height;
-        }
-        self.display_width = frame.display_width;
-        self.display_height = frame.display_height;
-        self.scale_factor = snapshot.scale_factor;
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &self.pixels,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(frame.width * 4),
-                rows_per_image: Some(frame.height),
-            },
-            wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
-                depth_or_array_layers: 1,
-            },
+        let hp = if width >= 96 {
+            format!("HP {}/{}", enemy.display_hp(), enemy.max_hp)
+        } else {
+            format!("HP {}", enemy.display_hp())
+        };
+        draw_debug_text(
+            renderer,
+            left + 5,
+            y + 18,
+            &hp,
+            if enemy.alive { TEXT } else { DANGER },
+        );
+        draw_hp_bar(renderer, enemy, left + 4, y + 25, width - 9, 2);
+    }
+}
+
+fn draw_enemy_details(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    enemy: &EnemyView,
+    panel_x: i32,
+    content_y: i32,
+) {
+    blend_rect(
+        renderer,
+        panel_x + 2,
+        content_y + 1,
+        DETAIL_WIDTH - 4,
+        DETAIL_HEIGHT - HEADER_HEIGHT - 3,
+        ROW_SELECTED,
+    );
+    fill_rect(
+        renderer,
+        panel_x + 3,
+        content_y + 2,
+        2,
+        DETAIL_HEIGHT - HEADER_HEIGHT - 5,
+        ACCENT,
+    );
+    draw_enemy_name(renderer, font, enemy, panel_x + 8, content_y + 2, 6, 0x8d);
+    draw_debug_text_right(
+        renderer,
+        panel_x + DETAIL_WIDTH - 8,
+        content_y + 6,
+        &format!("LV{}", enemy.level),
+        ACCENT,
+    );
+    draw_debug_text(
+        renderer,
+        panel_x + 8,
+        content_y + 18,
+        &format!("HP {}/{}", enemy.display_hp(), enemy.max_hp),
+        TEXT,
+    );
+    draw_hp_bar(
+        renderer,
+        enemy,
+        panel_x + 8,
+        content_y + 26,
+        DETAIL_WIDTH - 16,
+        4,
+    );
+
+    renderer.draw_big5_text_shadowed(font, ATTACK_LABEL, panel_x + 8, content_y + 31, 0x4f);
+    draw_debug_text(
+        renderer,
+        panel_x + 25,
+        content_y + 36,
+        &enemy.attack.to_string(),
+        TEXT,
+    );
+    renderer.draw_big5_text_shadowed(font, DEFENSE_LABEL, panel_x + 57, content_y + 31, 0x4f);
+    draw_debug_text(
+        renderer,
+        panel_x + 74,
+        content_y + 36,
+        &enemy.defense.to_string(),
+        TEXT,
+    );
+    renderer.draw_big5_text_shadowed(font, PHYSICAL_LABEL, panel_x + 103, content_y + 31, 0x4f);
+    draw_debug_text(
+        renderer,
+        panel_x + 120,
+        content_y + 36,
+        &enemy.physical_resistance.to_string(),
+        TEXT,
+    );
+
+    for (index, (&label, resistance)) in ELEMENT_LABELS
+        .iter()
+        .zip(enemy.elemental_resistance)
+        .enumerate()
+    {
+        let x = panel_x + 8 + i32::try_from(index).unwrap_or(0) * 27;
+        renderer.draw_big5_text_shadowed(font, label, x, content_y + 48, 0x4f);
+        draw_debug_text(
+            renderer,
+            x + 17,
+            content_y + 53,
+            &resistance.to_string(),
+            MUTED,
         );
     }
 
-    pub(super) fn render(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        render_target: &wgpu::TextureView,
-        panel: SurfaceRect,
-    ) {
-        let margin = physical(SURFACE_MARGIN, self.scale_factor);
-        let width = self
-            .display_width
-            .min(panel.width.saturating_sub(margin.saturating_mul(2)));
-        let height = self
-            .display_height
-            .min(panel.height.saturating_sub(margin.saturating_mul(2)));
-        if width == 0 || height == 0 {
-            return;
+    renderer.draw_big5_text_shadowed(font, STATUS_LABEL, panel_x + 8, content_y + 65, 0x4f);
+    draw_enemy_statuses(renderer, font, enemy, panel_x + 43, content_y + 65);
+}
+
+fn draw_enemy_statuses(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    enemy: &EnemyView,
+    x: i32,
+    y: i32,
+) {
+    let right = x + 96;
+    let mut cursor = x;
+    if enemy.poisoned {
+        renderer.draw_big5_text_shadowed(font, POISON_LABEL, cursor, y, 0x2d);
+        cursor += 20;
+    }
+    for status in &enemy.statuses {
+        if cursor + 22 > right {
+            break;
         }
-        let x = panel.x + panel.width.saturating_sub(width) / 2;
-        let y = panel.y + panel.height.saturating_sub(height) / 2;
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("battle_debug_overlay_render_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: render_target,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: true,
-                },
-            })],
-            depth_stencil_attachment: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0.0, 1.0);
-        pass.set_scissor_rect(x, y, width, height);
-        pass.draw(0..4, 0..1);
-    }
-}
-
-fn replace_changed_snapshot(
-    cached: &mut Option<BattleDebugSnapshot>,
-    snapshot: BattleDebugSnapshot,
-) -> bool {
-    if cached.as_ref() == Some(&snapshot) {
-        return false;
-    }
-    *cached = Some(snapshot);
-    true
-}
-
-struct RasterFrame {
-    width: u32,
-    height: u32,
-    display_width: u32,
-    display_height: u32,
-}
-
-fn rasterize_snapshot(
-    font: &mut UiFont,
-    snapshot: &BattleDebugSnapshot,
-    pixels: &mut Vec<u8>,
-) -> RasterFrame {
-    const HEADER_HEIGHT: f32 = 38.0;
-    const TARGET_HEIGHT: f32 = 92.0;
-    const SECTION_LABEL_HEIGHT: f32 = 18.0;
-    const ENEMY_STEP: f32 = 44.0;
-
-    let display_scale = normalized_scale(snapshot.scale_factor);
-    let raster_scale = display_scale.min(MAX_RASTER_SCALE);
-    let logical_surface_width = snapshot.surface_width as f32 / display_scale;
-    let logical_surface_height = snapshot.surface_height as f32 / display_scale;
-    let panel_width =
-        MAX_PANEL_WIDTH.min((logical_surface_width - SURFACE_MARGIN * 2.0).max(280.0));
-    let target_height = snapshot.selected_enemy().map_or(0.0, |_| TARGET_HEIGHT);
-    let enemy_height = SECTION_LABEL_HEIGHT + snapshot.enemies.len() as f32 * ENEMY_STEP;
-    let panel_height = (HEADER_HEIGHT + target_height + enemy_height + 8.0)
-        .min((logical_surface_height - SURFACE_MARGIN * 2.0).max(140.0));
-    let width = physical(panel_width, f64::from(raster_scale));
-    let height = physical(panel_height, f64::from(raster_scale));
-    let display_width = physical(panel_width, f64::from(display_scale));
-    let display_height = physical(panel_height, f64::from(display_scale));
-    pixels.resize(width as usize * height as usize * 4, 0);
-    pixels.fill(0);
-    let mut painter = Painter {
-        pixels,
-        width,
-        height,
-        scale: raster_scale,
-        font,
-    };
-    painter.rounded_rect(0.0, 0.0, panel_width, panel_height, 10.0, PANEL_BORDER);
-    painter.rounded_rect(1.0, 1.0, panel_width - 2.0, panel_height - 2.0, 9.0, PANEL);
-
-    painter.text(14.0, 8.0, 15.0, "战斗助手", ACCENT, None);
-    painter.text(
-        panel_width - 112.0,
-        11.0,
-        10.0,
-        &format!("第 {} 回合 · F7 隐藏", snapshot.round),
-        MUTED,
-        Some(RectF::new(panel_width - 116.0, 6.0, 104.0, 24.0)),
-    );
-
-    let content_x = 12.0;
-    let content_width = panel_width - 24.0;
-    let enemies_y = snapshot.selected_enemy().map_or(HEADER_HEIGHT, |enemy| {
-        draw_target_card(&mut painter, enemy, content_x, HEADER_HEIGHT, content_width);
-        HEADER_HEIGHT + TARGET_HEIGHT
-    });
-    draw_enemy_overview(
-        &mut painter,
-        &snapshot.enemies,
-        snapshot.selected_enemy,
-        content_x,
-        enemies_y,
-        content_width,
-        panel_height,
-    );
-
-    RasterFrame {
-        width,
-        height,
-        display_width,
-        display_height,
-    }
-}
-
-fn draw_target_card(painter: &mut Painter<'_>, enemy: &EnemyView, x: f32, y: f32, width: f32) {
-    painter.rounded_rect(x, y, width, 86.0, 5.0, ACCENT);
-    painter.rounded_rect(x + 1.0, y + 1.0, width - 2.0, 84.0, 4.0, CARD);
-    painter.text(x + 8.0, y + 5.0, 9.0, "当前目标", MUTED, None);
-    painter.text(
-        x + 66.0,
-        y + 4.0,
-        11.0,
-        &format!("{}  Lv.{}", enemy.name, enemy.level),
-        ACCENT,
-        Some(RectF::new(x + 66.0, y + 1.0, width - 74.0, 18.0)),
-    );
-    painter.text(
-        x + 8.0,
-        y + 23.0,
-        10.0,
-        &format!("HP  {} / {}", enemy.display_hp(), enemy.max_hp),
-        TEXT,
-        None,
-    );
-    painter.bar(
-        x + 104.0,
-        y + 28.0,
-        width - 116.0,
-        5.0,
-        enemy.display_hp(),
-        enemy.max_hp,
-        hp_color(enemy),
-    );
-    painter.text(
-        x + 8.0,
-        y + 42.0,
-        9.5,
-        &format!(
-            "攻击 {}   防御 {}   物抗 {}",
-            enemy.attack, enemy.defense, enemy.physical_resistance
-        ),
-        TEXT,
-        Some(RectF::new(x + 8.0, y + 38.0, width - 16.0, 17.0)),
-    );
-    let [wind, thunder, water, fire, earth] = enemy.elemental_resistance;
-    painter.text(
-        x + 8.0,
-        y + 58.0,
-        9.0,
-        &format!("风 {wind}  雷 {thunder}  水 {water}  火 {fire}  土 {earth}"),
-        MUTED,
-        Some(RectF::new(x + 8.0, y + 55.0, width - 16.0, 16.0)),
-    );
-    let statuses = enemy.status_summary();
-    if !statuses.is_empty() {
-        painter.text(
-            x + 8.0,
-            y + 73.0,
-            8.5,
-            &format!("状态  {statuses}"),
+        renderer.draw_big5_text_shadowed(font, status.label, cursor, y, 0x2d);
+        draw_debug_text(
+            renderer,
+            cursor + 16,
+            y + 5,
+            &status.rounds.to_string(),
             WARNING,
-            Some(RectF::new(x + 8.0, y + 70.0, width - 16.0, 14.0)),
+        );
+        cursor += 24;
+    }
+    if cursor == x {
+        draw_debug_text(renderer, x, y + 5, "--", MUTED);
+    }
+}
+
+fn draw_enemy_name(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    enemy: &EnemyView,
+    x: i32,
+    y: i32,
+    max_glyphs: usize,
+    color: u8,
+) {
+    let bytes = enemy.name.len().min(max_glyphs.saturating_mul(2)) & !1;
+    if bytes == 0 {
+        draw_debug_text(
+            renderer,
+            x,
+            y + 5,
+            &format!("ENEMY {}", enemy.index + 1),
+            TEXT,
+        );
+    } else {
+        renderer.draw_big5_text_shadowed(font, &enemy.name[..bytes], x, y, color);
+    }
+}
+
+fn draw_debug_text_right(
+    renderer: &mut Renderer,
+    right_x: i32,
+    y: i32,
+    text: &str,
+    color: [u8; 4],
+) {
+    let width = i32::try_from(text.chars().count()).unwrap_or(0) * 6 - 1;
+    draw_debug_text(renderer, right_x - width, y, text, color);
+}
+
+fn draw_hp_bar(
+    renderer: &mut Renderer,
+    enemy: &EnemyView,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) {
+    fill_rect(renderer, x, y, width, height, BAR_TRACK);
+    let filled = if enemy.max_hp == 0 {
+        0
+    } else {
+        u32::from(enemy.display_hp()) * u32::try_from(width).unwrap_or(0) / u32::from(enemy.max_hp)
+    };
+    if filled != 0 {
+        fill_rect(
+            renderer,
+            x,
+            y,
+            i32::try_from(filled).unwrap_or(width),
+            height,
+            hp_color(enemy),
         );
     }
 }
@@ -526,459 +493,42 @@ fn hp_color(enemy: &EnemyView) -> [u8; 4] {
     }
 }
 
-fn draw_enemy_overview(
-    painter: &mut Painter<'_>,
-    enemies: &[EnemyView],
-    selected_enemy: Option<usize>,
-    x: f32,
-    y: f32,
-    width: f32,
-    panel_height: f32,
-) {
-    painter.text(x + 2.0, y + 1.0, 10.0, "敌方概览", MUTED, None);
-    let mut row_y = y + 18.0;
-    for enemy in enemies {
-        if row_y + 40.0 > panel_height - 6.0 {
-            break;
-        }
-        let selected = selected_enemy == Some(enemy.index);
-        painter.rounded_rect(
-            x,
-            row_y,
-            width,
-            40.0,
-            4.0,
-            if selected { ACCENT } else { CARD_BORDER },
-        );
-        painter.rounded_rect(x + 1.0, row_y + 1.0, width - 2.0, 38.0, 3.0, CARD);
-        painter.text(
-            x + 8.0,
-            row_y + 4.0,
-            10.0,
-            &format!("{}  Lv.{}", enemy.name, enemy.level),
-            if selected { ACCENT } else { TEXT },
-            Some(RectF::new(x + 8.0, row_y + 1.0, width - 58.0, 17.0)),
-        );
-        if !enemy.alive {
-            painter.text(x + width - 42.0, row_y + 4.0, 9.0, "倒下", DANGER, None);
-        }
-        painter.text(
-            x + 8.0,
-            row_y + 22.0,
-            9.0,
-            &format!("HP {}/{}", enemy.display_hp(), enemy.max_hp),
-            if enemy.alive { MUTED } else { DANGER },
-            None,
-        );
-        painter.bar(
-            x + width - 96.0,
-            row_y + 28.0,
-            82.0,
-            4.0,
-            enemy.display_hp(),
-            enemy.max_hp,
-            hp_color(enemy),
-        );
-        row_y += 44.0;
-    }
-}
-
-#[derive(Clone)]
-struct CachedGlyph {
-    width: usize,
-    height: usize,
-    xmin: i32,
-    ymin: i32,
-    advance: f32,
-    bitmap: Arc<[u8]>,
-}
-
-struct UiFont {
-    font: Option<Font>,
-    name: String,
-    glyphs: HashMap<(char, u16), CachedGlyph>,
-}
-
-impl UiFont {
-    fn discover() -> Self {
-        for (path, name, collection_index) in font_candidates() {
-            if let Some(font) = load_font(&path, collection_index) {
-                return Self {
-                    font: Some(font),
-                    name,
-                    glyphs: HashMap::new(),
-                };
-            }
-        }
-        Self {
-            font: None,
-            name: "内置 ASCII 回退".to_owned(),
-            glyphs: HashMap::new(),
-        }
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn glyph(&mut self, character: char, size: u16) -> CachedGlyph {
-        if let Some(glyph) = self.glyphs.get(&(character, size)) {
-            return glyph.clone();
-        }
-        let glyph = if let Some(font) = &self.font {
-            let (metrics, bitmap) = font.rasterize(character, f32::from(size));
-            CachedGlyph {
-                width: metrics.width,
-                height: metrics.height,
-                xmin: metrics.xmin,
-                ymin: metrics.ymin,
-                advance: metrics.advance_width,
-                bitmap: bitmap.into(),
-            }
-        } else {
-            fallback_glyph(character, size)
-        };
-        self.glyphs.insert((character, size), glyph.clone());
-        glyph
-    }
-}
-
-fn load_font(path: &Path, collection_index: u32) -> Option<Font> {
-    let bytes = fs::read(path).ok()?;
-    Font::from_bytes(
-        bytes,
-        FontSettings {
-            collection_index,
-            ..FontSettings::default()
-        },
-    )
-    .ok()
-}
-
-fn font_candidates() -> Vec<(PathBuf, String, u32)> {
-    let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("RUST_PAL_DEBUG_FONT") {
-        candidates.push((PathBuf::from(path), "自定义调试字体".to_owned(), 0));
-    }
-    #[cfg(target_os = "macos")]
-    candidates.extend([
-        (
-            PathBuf::from("/System/Library/Fonts/Hiragino Sans GB.ttc"),
-            "冬青黑体简体".to_owned(),
-            0,
-        ),
-        (
-            PathBuf::from("/System/Library/Fonts/STHeiti Medium.ttc"),
-            "华文黑体".to_owned(),
-            0,
-        ),
-    ]);
-    #[cfg(target_os = "windows")]
-    if let Some(windows) = env::var_os("WINDIR") {
-        let fonts = PathBuf::from(windows).join("Fonts");
-        candidates.extend([
-            (fonts.join("msyh.ttc"), "微软雅黑".to_owned(), 0),
-            (fonts.join("msyhbd.ttc"), "微软雅黑粗体".to_owned(), 0),
-            (fonts.join("simhei.ttf"), "黑体".to_owned(), 0),
-        ]);
-    }
-    #[cfg(target_os = "linux")]
-    candidates.extend([
-        (
-            PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-            "Noto Sans CJK SC".to_owned(),
-            2,
-        ),
-        (
-            PathBuf::from("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
-            "Noto Sans CJK SC".to_owned(),
-            2,
-        ),
-        (
-            PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
-            "文泉驿微米黑".to_owned(),
-            0,
-        ),
-    ]);
-    if let Some((path, collection_index)) = fontconfig_match() {
-        candidates.push((path, "系统中文字体".to_owned(), collection_index));
-    }
-    candidates
-}
-
-fn fontconfig_match() -> Option<(PathBuf, u32)> {
-    let output = Command::new("fc-match")
-        .args(["-f", "%{file}\t%{index}", "Noto Sans CJK SC:lang=zh-cn"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let output = String::from_utf8_lossy(&output.stdout);
-    let (path, index) = output.trim().rsplit_once('\t')?;
-    Some((PathBuf::from(path), index.parse().ok()?))
-}
-
-fn fallback_glyph(character: char, size: u16) -> CachedGlyph {
-    let bits = crate::debug_overlay::glyph(character);
-    let scale = (u32::from(size) / 7).max(1) as usize;
-    let width = 5 * scale;
-    let height = 7 * scale;
-    let mut bitmap = vec![0; width * height];
-    for (row, row_bits) in bits.into_iter().enumerate() {
-        for column in 0..5 {
-            if row_bits & (0b1_0000 >> column) == 0 {
-                continue;
-            }
-            for dy in 0..scale {
-                for dx in 0..scale {
-                    bitmap[(row * scale + dy) * width + column * scale + dx] = 255;
-                }
-            }
-        }
-    }
-    CachedGlyph {
-        width,
-        height,
-        xmin: 0,
-        ymin: 0,
-        advance: (6 * scale) as f32,
-        bitmap: bitmap.into(),
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RectF {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-}
-
-impl RectF {
-    fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-}
-
-struct Painter<'a> {
-    pixels: &'a mut [u8],
-    width: u32,
-    height: u32,
-    scale: f32,
-    font: &'a mut UiFont,
-}
-
-impl Painter<'_> {
-    fn rounded_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        radius: f32,
-        color: [u8; 4],
-    ) {
-        let x = self.px(x) as i32;
-        let y = self.px(y) as i32;
-        let width = self.px(width) as i32;
-        let height = self.px(height) as i32;
-        let radius = self.px(radius) as i32;
-        for row in 0..height {
-            for column in 0..width {
-                let dx = if column < radius {
-                    radius - column
-                } else if column >= width - radius {
-                    column - (width - radius - 1)
-                } else {
-                    0
-                };
-                let dy = if row < radius {
-                    radius - row
-                } else if row >= height - radius {
-                    row - (height - radius - 1)
-                } else {
-                    0
-                };
-                if dx != 0 && dy != 0 && dx * dx + dy * dy > radius * radius {
-                    continue;
-                }
-                blend_pixel(
-                    self.pixels,
-                    self.width,
-                    self.height,
-                    x + column,
-                    y + row,
-                    color,
-                );
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn bar(
-        &mut self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        current: u16,
-        maximum: u16,
-        color: [u8; 4],
-    ) {
-        self.rounded_rect(x, y, width, height, height / 2.0, BAR_TRACK);
-        let ratio = if maximum == 0 {
-            0.0
-        } else {
-            f32::from(current.min(maximum)) / f32::from(maximum)
-        };
-        if ratio > 0.0 {
-            self.rounded_rect(x, y, width * ratio, height, height / 2.0, color);
-        }
-    }
-
-    fn text(&mut self, x: f32, y: f32, size: f32, text: &str, color: [u8; 4], clip: Option<RectF>) {
-        let physical_size = self.px(size).clamp(7, u32::from(u16::MAX)) as u16;
-        let mut cursor = self.px(x) as f32;
-        let baseline = self.px(y + size * 0.86) as i32;
-        let clip = clip.map(|clip| {
-            (
-                self.px(clip.x) as i32,
-                self.px(clip.y) as i32,
-                self.px(clip.x + clip.width) as i32,
-                self.px(clip.y + clip.height) as i32,
-            )
-        });
-        for character in text.chars() {
-            let glyph = self.font.glyph(character, physical_size);
-            let glyph_x = cursor.round() as i32 + glyph.xmin;
-            let glyph_y = baseline - glyph.height as i32 - glyph.ymin;
-            for row in 0..glyph.height {
-                for column in 0..glyph.width {
-                    let alpha = glyph.bitmap[row * glyph.width + column];
-                    if alpha == 0 {
-                        continue;
-                    }
-                    let pixel_x = glyph_x + column as i32;
-                    let pixel_y = glyph_y + row as i32;
-                    if clip.is_some_and(|(left, top, right, bottom)| {
-                        pixel_x < left || pixel_x >= right || pixel_y < top || pixel_y >= bottom
-                    }) {
-                        continue;
-                    }
-                    let mut glyph_color = color;
-                    glyph_color[3] = ((u16::from(color[3]) * u16::from(alpha)) / 255) as u8;
-                    blend_pixel(
-                        self.pixels,
-                        self.width,
-                        self.height,
-                        pixel_x,
-                        pixel_y,
-                        glyph_color,
-                    );
-                }
-            }
-            cursor += glyph.advance;
-        }
-    }
-
-    fn px(&self, logical: f32) -> u32 {
-        (logical * self.scale).round().max(0.0) as u32
-    }
-}
-
-fn blend_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, source: [u8; 4]) {
-    let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
-        return;
-    };
-    if x >= width || y >= height || source[3] == 0 {
+fn blend_rect(renderer: &mut Renderer, x: i32, y: i32, width: i32, height: i32, color: [u8; 4]) {
+    let surface_width = i32::try_from(renderer.width).unwrap_or(i32::MAX);
+    let surface_height = i32::try_from(renderer.height).unwrap_or(i32::MAX);
+    let left = x.max(0).min(surface_width);
+    let top = y.max(0).min(surface_height);
+    let right = x.saturating_add(width).max(0).min(surface_width);
+    let bottom = y.saturating_add(height).max(0).min(surface_height);
+    if left >= right || top >= bottom || color[3] == 0 {
         return;
     }
-    let index = (y as usize * width as usize + x as usize) * 4;
-    let destination = &mut pixels[index..index + 4];
-    let source_alpha = u32::from(source[3]);
-    let destination_alpha = u32::from(destination[3]);
-    let output_alpha = source_alpha + destination_alpha * (255 - source_alpha) / 255;
-    if output_alpha == 0 {
-        return;
+    let stride = renderer.width;
+    let alpha = u32::from(color[3]);
+    let screen = renderer.screen_mut();
+    for row in top..bottom {
+        for column in left..right {
+            let index = (usize::try_from(row).unwrap_or(0) * stride
+                + usize::try_from(column).unwrap_or(0))
+                * 4;
+            for channel in 0..3 {
+                screen[index + channel] = ((u32::from(color[channel]) * alpha
+                    + u32::from(screen[index + channel]) * (255 - alpha))
+                    / 255) as u8;
+            }
+            screen[index + 3] = 255;
+        }
     }
-    for channel in 0..3 {
-        let source_value = u32::from(source[channel]);
-        let destination_value = u32::from(destination[channel]);
-        let premultiplied = source_value * source_alpha
-            + destination_value * destination_alpha * (255 - source_alpha) / 255;
-        destination[channel] = (premultiplied / output_alpha).min(255) as u8;
-    }
-    destination[3] = output_alpha.min(255) as u8;
-}
-
-fn create_texture(
-    device: &wgpu::Device,
-    bind_group_layout: &wgpu::BindGroupLayout,
-    width: u32,
-    height: u32,
-) -> (wgpu::Texture, wgpu::BindGroup) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("battle_debug_overlay_texture"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("battle_debug_overlay_sampler"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("battle_debug_overlay_bind_group"),
-        layout: bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
-    });
-    (texture, bind_group)
-}
-
-fn normalized_scale(scale_factor: f64) -> f32 {
-    scale_factor.clamp(1.0, 3.0) as f32
-}
-
-fn physical(logical: f32, scale_factor: f64) -> u32 {
-    (f64::from(logical) * scale_factor.clamp(1.0, 3.0))
-        .round()
-        .max(1.0) as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn enemy(index: usize) -> EnemyView {
+    fn enemy() -> EnemyView {
         EnemyView {
-            index,
-            name: format!("敌人 {}", index + 1),
+            index: 0,
+            name: Vec::new(),
             hp: 80,
             max_hp: 120,
             alive: true,
@@ -992,71 +542,27 @@ mod tests {
         }
     }
 
-    fn snapshot(selected_enemy: Option<usize>) -> BattleDebugSnapshot {
-        BattleDebugSnapshot {
-            scale_factor: 2.0,
-            surface_width: 600,
-            surface_height: 800,
-            round: 3,
-            selected_enemy,
-            enemies: vec![enemy(0), enemy(1)],
-        }
-    }
-
-    fn test_font() -> UiFont {
-        UiFont {
-            font: None,
-            name: "测试点阵".to_owned(),
-            glyphs: HashMap::new(),
-        }
+    #[test]
+    fn status_labels_use_original_single_glyph_big5_text() {
+        assert_eq!(status_label(BattleStatus::Sleep), &[0xaf, 0x76]);
+        assert_eq!(status_label(BattleStatus::Haste), &[0xb3, 0x74]);
+        assert_eq!(POISON_LABEL, &[0xac, 0x72]);
     }
 
     #[test]
-    fn decodes_original_big5_enemy_names() {
-        assert_eq!(
-            decode_big5(&[0xa4, 0xa4, 0xa4, 0xe5]).as_deref(),
-            Some("中文")
-        );
-        assert_eq!(decode_big5(&[]), None);
+    fn overview_and_details_stay_above_the_classic_battle_hud() {
+        assert!(PANEL_MARGIN + battle_assist_height(5, false) < 165);
+        assert!(PANEL_MARGIN + battle_assist_height(5, true) < 165);
+        assert!(battle_assist_width(5, false) + PANEL_MARGIN <= 320);
+        assert_eq!(battle_assist_width(1, false), DETAIL_WIDTH);
     }
 
     #[test]
-    fn enemy_summary_only_contains_player_facing_statuses() {
-        let mut enemy = enemy(0);
-        enemy.statuses = vec![StatusView {
-            label: "眠",
-            rounds: 2,
-        }];
-        enemy.poisoned = true;
-
-        assert_eq!(enemy.status_summary(), "眠2 · 毒");
-    }
-
-    #[test]
-    fn target_details_only_take_space_during_enemy_selection() {
-        let mut font = test_font();
-        let mut pixels = Vec::new();
-        let overview = rasterize_snapshot(&mut font, &snapshot(None), &mut pixels);
-        let overview_height = overview.display_height;
-        let selected = rasterize_snapshot(&mut font, &snapshot(Some(0)), &mut pixels);
-
-        assert_eq!((overview.width, overview.display_width), (420, 560));
-        assert_eq!(selected.display_height - overview_height, 184);
-        assert_eq!(
-            pixels.len(),
-            selected.width as usize * selected.height as usize * 4
-        );
-    }
-
-    #[test]
-    fn unchanged_snapshot_skips_panel_rasterization() {
-        let snapshot = snapshot(None);
-        let mut cached = None;
-
-        assert!(replace_changed_snapshot(&mut cached, snapshot.clone()));
-        assert!(!replace_changed_snapshot(&mut cached, snapshot.clone()));
-        let mut selected = snapshot;
-        selected.selected_enemy = Some(1);
-        assert!(replace_changed_snapshot(&mut cached, selected));
+    fn hp_display_uses_signed_word_semantics_and_static_maximum() {
+        let mut enemy = enemy();
+        enemy.hp = u16::MAX;
+        assert_eq!(enemy.display_hp(), 0);
+        enemy.hp = 200;
+        assert_eq!(enemy.display_hp(), 120);
     }
 }

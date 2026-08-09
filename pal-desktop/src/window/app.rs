@@ -9,7 +9,6 @@ use pal_core::role::RoleSprites;
 use pal_core::script::{ScriptRuntime, ScriptVisual};
 use winit::keyboard::KeyCode;
 
-use super::battle_debug_overlay::BattleDebugSnapshot;
 use super::battle_update::{advance_post_battle, update_battle};
 use super::clock::FrameClock;
 use super::debug_render::{debug_object_snapshot, focused_debug_object};
@@ -194,6 +193,7 @@ where
                 battle_event: session.battle.battle_events.front().copied(),
                 battle_event_ticks: session.battle.battle_event_ticks,
                 battle_kept_effects: &session.battle.battle_kept_effects,
+                show_battle_assist: self.debug.show_battle,
                 post_battle: session.battle.post_battle.as_ref(),
                 status_background: &resources.status_background,
                 equip_background: &resources.equip_background,
@@ -1040,33 +1040,6 @@ where
 
     pub(super) fn show_script_debug(&self) -> bool {
         self.debug.show_script
-    }
-
-    pub(super) fn battle_assist_requested(&self) -> bool {
-        self.debug.show_battle && self.game.battle().is_some()
-    }
-
-    pub(super) fn battle_debug_snapshot(
-        &self,
-        surface_width: u32,
-        surface_height: u32,
-        scale_factor: f64,
-    ) -> Option<BattleDebugSnapshot> {
-        if !self.debug.show_battle {
-            return None;
-        }
-        let battle = self.game.battle()?;
-        Some(BattleDebugSnapshot::capture(
-            battle,
-            &self.resources.text,
-            self.session
-                .battle
-                .battle_targeting_enemy
-                .then_some(self.session.battle.battle_selected_enemy),
-            scale_factor,
-            surface_width,
-            surface_height,
-        ))
     }
 
     pub(super) fn minimap_frame(
