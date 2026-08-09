@@ -7,11 +7,13 @@ mod command;
 
 use std::path::{Path, PathBuf};
 
-use pal_desktop::window::{run_game_window, GameResources, Viewport};
+use pal_desktop::window::{
+    run_game_window, run_scene_editor_window, GameResources, SceneEditorResources, Viewport,
+};
 
 use asset_check::check_assets;
 use assets::load_runtime_scene_with_map;
-use bootstrap::{bootstrap, BootstrappedGame};
+use bootstrap::{bootstrap, bootstrap_scene_editor, BootstrappedGame, BootstrappedSceneEditor};
 use command::{Command, CommandMode};
 
 const SCREEN_WIDTH: u32 = 320;
@@ -30,11 +32,23 @@ fn main() {
     println!("Rust-PAL M6");
     println!("data: {}", data_dir.display());
 
-    let boot = bootstrap(data_dir, command.sound_font_path.as_deref());
-    print_bootstrap_summary(&boot);
     match command.mode {
-        CommandMode::Run => run_desktop(boot, command.music_backend),
-        CommandMode::CheckAssets => check_assets(boot),
+        CommandMode::Run => {
+            let boot = bootstrap(data_dir, command.sound_font_path.as_deref());
+            print_bootstrap_summary(&boot);
+            run_desktop(boot, command.music_backend);
+        }
+        CommandMode::CheckAssets => {
+            let boot = bootstrap(data_dir, command.sound_font_path.as_deref());
+            print_bootstrap_summary(&boot);
+            check_assets(boot);
+        }
+        CommandMode::SceneEditor { scene } => {
+            if let Err(error) = run_scene_editor(bootstrap_scene_editor(data_dir), scene) {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
     }
 }
 
@@ -126,6 +140,52 @@ fn run_desktop(boot: BootstrappedGame, music_backend: pal_desktop::audio::MusicB
     );
 }
 
+fn run_scene_editor(
+    boot: BootstrappedSceneEditor,
+    initial_scene_number: u16,
+) -> Result<(), String> {
+    let BootstrappedSceneEditor {
+        data_dir,
+        scene_data,
+        script_table,
+        role_sprites,
+        renderer,
+    } = boot;
+    let scene_count = u16::try_from(scene_data.scene_count()).expect("too many scenes");
+    validate_scene_number(initial_scene_number, scene_count)?;
+    let initial_scene = load_runtime_scene_with_map(
+        &data_dir,
+        &scene_data,
+        initial_scene_number,
+        None,
+        &role_sprites,
+    )
+    .ok_or_else(|| format!("failed to load scene {initial_scene_number}"))?;
+    let scene_data_dir = data_dir.clone();
+
+    run_scene_editor_window(
+        renderer,
+        initial_scene,
+        SceneEditorResources {
+            role_sprites,
+            script_table,
+            scene_count,
+        },
+        move |number, sprites| {
+            load_runtime_scene_with_map(&scene_data_dir, &scene_data, number, None, sprites)
+        },
+    );
+    Ok(())
+}
+
+fn validate_scene_number(scene: u16, scene_count: u16) -> Result<(), String> {
+    if (1..=scene_count).contains(&scene) {
+        Ok(())
+    } else {
+        Err(format!("scene {scene} is outside 1..={scene_count}"))
+    }
+}
+
 fn workspace_data_dir() -> PathBuf {
     workspace_root().join("data")
 }
@@ -139,4 +199,20 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("launcher must be inside the workspace")
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_scene_selection_requires_a_valid_one_based_scene() {
+        assert_eq!(validate_scene_number(1, 293), Ok(()));
+        assert_eq!(validate_scene_number(293, 293), Ok(()));
+        assert_eq!(
+            validate_scene_number(294, 293),
+            Err("scene 294 is outside 1..=293".to_owned())
+        );
+        assert!(validate_scene_number(0, 293).is_err());
+    }
 }

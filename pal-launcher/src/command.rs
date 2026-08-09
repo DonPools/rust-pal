@@ -6,6 +6,7 @@ use pal_desktop::audio::MusicBackend;
 pub(super) enum CommandMode {
     Run,
     CheckAssets,
+    SceneEditor { scene: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,13 +24,31 @@ impl Command {
             sound_font_path: None,
         };
         let mut music_backend_seen = false;
+        let mut scene_editor_seen = false;
+        let mut scene_number = None;
 
         for argument in arguments {
             if argument == "--check-assets" {
-                if command.mode == CommandMode::CheckAssets {
-                    return Err("--check-assets was specified more than once".into());
+                if command.mode != CommandMode::Run {
+                    return Err("only one command mode may be specified".into());
                 }
                 command.mode = CommandMode::CheckAssets;
+            } else if argument == "--scene-editor" {
+                if command.mode != CommandMode::Run || scene_editor_seen {
+                    return Err("only one command mode may be specified".into());
+                }
+                scene_editor_seen = true;
+                command.mode = CommandMode::SceneEditor { scene: 1 };
+            } else if let Some(value) = argument.strip_prefix("--scene=") {
+                if scene_number.is_some() {
+                    return Err("--scene was specified more than once".into());
+                }
+                let scene = value
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|scene| *scene != 0)
+                    .ok_or_else(|| format!("invalid scene number: {value}"))?;
+                scene_number = Some(scene);
             } else if let Some(value) = argument.strip_prefix("--music=") {
                 if music_backend_seen {
                     return Err("--music was specified more than once".into());
@@ -51,6 +70,17 @@ impl Command {
             } else {
                 return Err(format!("unknown argument: {argument}"));
             }
+        }
+        if let Some(scene) = scene_number {
+            if !scene_editor_seen {
+                return Err("--scene requires --scene-editor".into());
+            }
+            command.mode = CommandMode::SceneEditor { scene };
+        }
+        if matches!(command.mode, CommandMode::SceneEditor { .. })
+            && (music_backend_seen || command.sound_font_path.is_some())
+        {
+            return Err("music options are not available in scene-editor mode".into());
         }
         Ok(command)
     }
@@ -74,10 +104,25 @@ mod tests {
             Command::parse(["--check-assets".to_string()]).unwrap().mode,
             CommandMode::CheckAssets
         );
+        assert_eq!(
+            Command::parse(["--scene-editor".to_string(), "--scene=7".to_string()])
+                .unwrap()
+                .mode,
+            CommandMode::SceneEditor { scene: 7 }
+        );
+        assert_eq!(
+            Command::parse(["--scene-editor".to_string()]).unwrap().mode,
+            CommandMode::SceneEditor { scene: 1 }
+        );
         assert!(Command::parse(["--unknown".to_string()]).is_err());
         assert!(
             Command::parse(["--check-assets".to_string(), "--check-assets".to_string()]).is_err()
         );
+        assert!(Command::parse(["--scene=7".to_string()]).is_err());
+        assert!(
+            Command::parse(["--scene-editor".to_string(), "--check-assets".to_string()]).is_err()
+        );
+        assert!(Command::parse(["--scene-editor".to_string(), "--scene=0".to_string()]).is_err());
     }
 
     #[test]
@@ -95,5 +140,6 @@ mod tests {
         assert!(Command::parse(["--music=other".to_string()]).is_err());
         assert!(Command::parse(["--sound-font=".to_string()]).is_err());
         assert!(Command::parse(["--music=midi".to_string(), "--music=rix".to_string()]).is_err());
+        assert!(Command::parse(["--scene-editor".to_string(), "--music=rix".to_string()]).is_err());
     }
 }

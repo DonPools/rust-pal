@@ -67,6 +67,40 @@ pub(super) struct BootstrappedGame {
     pub(super) renderer: Renderer,
 }
 
+/// Minimal resources used by the read-only scene editor.
+pub(super) struct BootstrappedSceneEditor {
+    pub(super) data_dir: PathBuf,
+    pub(super) scene_data: SceneData,
+    pub(super) script_table: ScriptTable,
+    pub(super) role_sprites: RoleSprites,
+    pub(super) renderer: Renderer,
+}
+
+/// Load scene-inspection resources without constructing normal game state.
+pub(super) fn bootstrap_scene_editor(data_dir: PathBuf) -> BootstrappedSceneEditor {
+    let palettes = load_palettes(&data_dir).expect("failed to load palettes");
+    let palette = palettes
+        .get(DEFAULT_PALETTE)
+        .expect("default palette is missing")
+        .day
+        .clone();
+    let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
+    let script_table = load_script_table(&data_dir).expect("failed to load script table");
+    let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
+
+    BootstrappedSceneEditor {
+        data_dir,
+        scene_data,
+        script_table,
+        role_sprites,
+        renderer: Renderer::new(
+            palette,
+            pal_desktop::window::SCENE_EDITOR_WIDTH as usize,
+            pal_desktop::window::SCENE_EDITOR_HEIGHT as usize,
+        ),
+    }
+}
+
 pub(super) fn bootstrap(data_dir: PathBuf, sound_font_path: Option<&Path>) -> BootstrappedGame {
     let palettes = load_palettes(&data_dir).expect("failed to load palettes");
     let palette = palettes

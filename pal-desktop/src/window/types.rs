@@ -48,6 +48,13 @@ pub struct LoadedScene {
     pub teleport_script: u16,
 }
 
+/// Resources required by the read-only scene editor window.
+pub struct SceneEditorResources {
+    pub role_sprites: RoleSprites,
+    pub script_table: ScriptTable,
+    pub scene_count: u16,
+}
+
 pub struct GameResources {
     pub role_sprites: RoleSprites,
     pub script_table: ScriptTable,

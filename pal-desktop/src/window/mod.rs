@@ -40,6 +40,7 @@ mod original_save;
 mod presentation;
 #[cfg(test)]
 mod regression_tests;
+mod scene_editor;
 mod scene_render;
 mod script_driver;
 mod session;
@@ -50,8 +51,9 @@ mod types;
 mod visual;
 
 pub use battle_render::{render_battle, BattleMenuState, BattleRenderResources, BattleRenderState};
+pub use scene_editor::{run_scene_editor_window, SCENE_EDITOR_HEIGHT, SCENE_EDITOR_WIDTH};
 pub use scene_render::render_tile_map;
-pub use types::{GameResources, LoadedScene, Viewport};
+pub use types::{GameResources, LoadedScene, SceneEditorResources, Viewport};
 
 pub(super) const UI_TIME_QUANTUM_MS: u64 = 10;
 pub fn run_game_window<L>(
