@@ -18,6 +18,7 @@ pub use inspection::{
     ScriptReferenceSource,
 };
 pub use opcode::ScriptOpcode;
+pub(crate) use trigger::ScriptInstructionStep;
 pub use trigger::{ScriptDebugSnapshot, ScriptInstructionDebug, ScriptRuntime};
 pub use visual::ScriptVisual;
 

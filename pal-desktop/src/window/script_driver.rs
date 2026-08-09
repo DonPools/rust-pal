@@ -1,7 +1,7 @@
 use pal_assets::text::TextLibrary;
 use pal_core::game::{AutoScriptError, GameState};
 use pal_core::role::RoleSprites;
-use pal_core::scene::TriggerKind;
+use pal_core::scene::{TriggerKind, TriggerRequest};
 use pal_core::script::{ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
 
 use super::battle_update::queue_battle_events;
@@ -130,7 +130,7 @@ fn advance_script_with_budget<L>(
             set_title("Rust-PAL [Dialog]");
         }
         Some(ScriptEvent::Waiting) => {
-            update_trigger_world(game, services, set_title);
+            update_trigger_world(scripts, game, resources, load_scene, services, set_title);
         }
         Some(ScriptEvent::Delay) => {}
         Some(ScriptEvent::Confirm { no_entry }) => {
@@ -453,14 +453,14 @@ fn advance_script_with_budget<L>(
                 }
                 None => set_title("Rust-PAL [script ride target is unavailable]"),
             }
-            update_trigger_world(game, services, set_title);
+            update_trigger_world(scripts, game, resources, load_scene, services, set_title);
         }
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::MoveViewport { x, y, frames },
         )) => {
             game.apply_script_action(action);
             if (x != 0 || y != 0) && frames != -1 {
-                update_trigger_world(game, services, set_title);
+                update_trigger_world(scripts, game, resources, load_scene, services, set_title);
             }
         }
         Some(ScriptEvent::Condition(condition)) => {
@@ -664,6 +664,9 @@ fn advance_script_with_budget<L>(
                     }
                 }
                 return;
+            } else if trigger.kind == TriggerKind::Auto {
+                // The owning event object already advanced past CALL before
+                // this nested trigger runtime started.
             } else if trigger.object_id == 0xffff {
                 let completed_scene = services
                     .scripts
@@ -789,6 +792,14 @@ pub(super) fn auto_script_error_title(error: AutoScriptError) -> String {
             "Rust-PAL [object {object_id} auto script {entry} {}]",
             opcode_label(opcode)
         ),
+        AutoScriptError::HostRequired {
+            object_id,
+            entry,
+            opcode,
+        } => format!(
+            "Rust-PAL [object {object_id} auto script {entry} {} requires desktop host]",
+            opcode_label(opcode)
+        ),
         AutoScriptError::InstructionLimit { object_id, entry } => {
             format!("Rust-PAL [object {object_id} auto script loop at {entry}]")
         }
@@ -841,29 +852,164 @@ pub(super) fn resume_script_menu_after_error(
                 });
             }
         }
-        TriggerKind::Search | TriggerKind::Touch | TriggerKind::Battle => {}
+        TriggerKind::Search | TriggerKind::Touch | TriggerKind::Auto | TriggerKind::Battle => {}
     }
 }
 
-pub(super) fn update_trigger_world(
+pub(super) fn update_trigger_world<L>(
+    scripts: &mut ScriptRuntime,
     game: &mut GameState,
+    resources: ScriptRenderResources<'_>,
+    load_scene: &mut L,
     services: &mut DesktopSession,
     set_title: &mut impl FnMut(&str),
-) {
+) where
+    L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
+{
     let update = game.update_auto_scripts_report(&services.scripts.auto_scripts);
     if let Some(error) = update.error {
         set_title(&auto_script_error_title(error));
+    }
+    if game.take_auto_script_failure() {
+        let _ = scripts.set_success(false);
     }
     for sound_id in game.take_auto_script_sounds() {
         if !services.audio.sound_effects.play(sound_id) {
             set_title(&format!("Rust-PAL [invalid auto sound {sound_id}]"));
         }
     }
+    let _ = apply_auto_script_events(
+        game.take_auto_script_events(),
+        scripts,
+        game,
+        resources.role_sprites,
+        load_scene,
+        services,
+        set_title,
+    );
+    if let Some(trigger) = game.take_trigger() {
+        if !enter_auto_trigger(scripts, trigger) {
+            set_title("Rust-PAL [auto CALL runtime is unavailable]");
+        }
+    }
+}
+
+pub(super) fn enter_auto_trigger(scripts: &mut ScriptRuntime, trigger: TriggerRequest) -> bool {
+    if trigger.kind != TriggerKind::Auto {
+        return false;
+    }
+    if scripts.is_active() {
+        scripts.call(trigger.script_entry, trigger.object_id)
+    } else {
+        scripts.start(trigger)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_auto_script_events<L>(
+    events: Vec<ScriptEvent>,
+    scripts: &mut ScriptRuntime,
+    game: &mut GameState,
+    role_sprites: &RoleSprites,
+    load_scene: &mut L,
+    services: &mut DesktopSession,
+    set_title: &mut impl FnMut(&str),
+) -> bool
+where
+    L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
+{
+    let mut changed = false;
+    for event in events {
+        changed = true;
+        match event {
+            ScriptEvent::Visual(command) => {
+                if !services.visual.queue(command) {
+                    set_title("Rust-PAL [auto visual effect is already active]");
+                }
+            }
+            ScriptEvent::OpenBuyMenu { store_number } => {
+                if game.store_items(store_number).is_none() {
+                    set_title("Rust-PAL [invalid auto store]");
+                    continue;
+                }
+                services.set_shop_menu(ShopMenu {
+                    mode: ShopMode::Buy { store_number },
+                    selected: 0,
+                    confirming: false,
+                    selected_yes: false,
+                });
+                set_title("Rust-PAL [Buy]");
+            }
+            ScriptEvent::OpenSellMenu => {
+                services.set_shop_menu(ShopMenu {
+                    mode: ShopMode::Sell,
+                    selected: 0,
+                    confirming: false,
+                    selected_yes: false,
+                });
+                set_title("Rust-PAL [Sell]");
+            }
+            ScriptEvent::WaitForKey => services.scripts.waiting_for_key = true,
+            ScriptEvent::LoadLastSave => services.persistence.load_last_save_requested = true,
+            ScriptEvent::QuitGame => services.persistence.quit_requested = true,
+            ScriptEvent::Action(pal_core::script::ScriptAction::PlayMusic {
+                music_id,
+                looped,
+                fade_seconds,
+            }) => {
+                if !services.audio.music.play(music_id, looped, fade_seconds) {
+                    set_title(&format!("Rust-PAL [invalid auto music {music_id}]"));
+                }
+            }
+            ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number }) => {
+                if super::session::PendingSceneChange::request(
+                    &mut services.scripts.pending_scene_change,
+                    &mut game.scene_number,
+                    scene_number,
+                ) {
+                    let _ = finish_pending_scene_change(
+                        scripts,
+                        game,
+                        role_sprites,
+                        load_scene,
+                        services,
+                        set_title,
+                    );
+                }
+            }
+            ScriptEvent::Action(
+                action @ pal_core::script::ScriptAction::SetSceneMap {
+                    scene_number,
+                    map_number: _,
+                },
+            ) => {
+                let target_scene = scene_number.unwrap_or(game.scene_number);
+                if !game.apply_script_action(action) {
+                    set_title("Rust-PAL [invalid auto scene map]");
+                    continue;
+                }
+                if target_scene == game.scene_number {
+                    let Some(scene) = load_scene(
+                        target_scene,
+                        game.scene_map_override(target_scene),
+                        role_sprites,
+                    ) else {
+                        set_title("Rust-PAL [failed to reload auto scene map]");
+                        continue;
+                    };
+                    game.replace_map(scene.map);
+                }
+            }
+            unexpected => set_title(&format!("Rust-PAL [unexpected auto event {unexpected:?}]")),
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pal_assets::script::ScriptTable;
 
     fn text_library(messages: &[&[u8]]) -> TextLibrary {
         let word_data = [b' '; 10];
@@ -906,5 +1052,56 @@ mod tests {
                 playing_rng: false,
             }
         ));
+    }
+
+    #[test]
+    fn auto_call_nests_inside_a_waiting_trigger_and_restores_its_wait() {
+        let data = [
+            [0x0000u16, 0, 0, 0],
+            [ScriptOpcode::WaitFrames.raw(), 3, 0, 0],
+            [0x0000, 0, 0, 0],
+            [ScriptOpcode::SetObjectGesture.raw(), 7, 0, 0],
+            [0x0000, 0, 0, 0],
+        ]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+        let mut scripts = ScriptRuntime::new(ScriptTable::parse(&data).unwrap());
+        let parent = TriggerRequest {
+            object_id: 9,
+            script_entry: 1,
+            kind: TriggerKind::Touch,
+        };
+        assert!(scripts.start(parent));
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Waiting));
+
+        assert!(enter_auto_trigger(
+            &mut scripts,
+            TriggerRequest {
+                object_id: 7,
+                script_entry: 3,
+                kind: TriggerKind::Auto,
+            }
+        ));
+        assert_eq!(
+            scripts.advance(),
+            Some(ScriptEvent::Action(
+                pal_core::script::ScriptAction::SetObjectPose {
+                    object_id: 7,
+                    direction: Some(pal_core::role::Direction::South),
+                    frame: Some(7),
+                }
+            ))
+        );
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Waiting));
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Waiting));
+        assert_eq!(
+            scripts.advance(),
+            Some(ScriptEvent::Completed {
+                trigger: parent,
+                next_entry: 1,
+                succeeded: true,
+            })
+        );
     }
 }

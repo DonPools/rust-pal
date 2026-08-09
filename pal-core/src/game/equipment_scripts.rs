@@ -105,6 +105,9 @@ impl<M: CollisionMap> GameState<M> {
                         call_stack.push(ScriptCallFrame {
                             object_id: cursor.object_id,
                             return_entry: cursor.entry.wrapping_add(1),
+                            wait_frames: 0,
+                            wait_updates_auto_scripts: false,
+                            viewport_frames_remaining: 0,
                         });
                         cursor.entry = instruction.operands[0];
                         continue;

@@ -232,17 +232,14 @@ fn probability_branch_uses_a_deterministic_percent_roll() {
 
 #[test]
 fn reports_unsupported_and_invalid_entries() {
-    let mut runtime = ScriptRuntime::new(table(&[
-        [0, 0, 0, 0],
-        [ScriptOpcode::ChasePlayer.raw(), 0, 0, 0],
-    ]));
+    let mut runtime = ScriptRuntime::new(table(&[[0, 0, 0, 0], [0x1234, 0, 0, 0]]));
     runtime.start(trigger(1));
     assert_eq!(
         runtime.advance(),
         Some(ScriptEvent::Unsupported {
             trigger: trigger(1),
             entry: 1,
-            opcode: ScriptOpcode::ChasePlayer.raw(),
+            opcode: 0x1234,
         })
     );
 

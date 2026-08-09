@@ -18,8 +18,7 @@ impl ScriptRuntime {
         match opcode {
             Stop => {
                 if let Some(frame) = self.call_stack.pop() {
-                    execution.object_id = frame.object_id;
-                    execution.entry = frame.return_entry;
+                    execution.resume_call(frame);
                     return InstructionFlow::Continue(execution);
                 }
                 return InstructionFlow::Halt(ScriptEvent::Completed {
@@ -31,8 +30,7 @@ impl ScriptRuntime {
             StopAndAdvance => {
                 let next_entry = execution.entry.wrapping_add(1);
                 if let Some(frame) = self.call_stack.pop() {
-                    execution.object_id = frame.object_id;
-                    execution.entry = frame.return_entry;
+                    execution.resume_call(frame);
                     return InstructionFlow::Continue(execution);
                 }
                 execution.next_entry = next_entry;
@@ -46,8 +44,7 @@ impl ScriptRuntime {
                 if self.idle_branch(execution.object_id, entry.operands[1]) {
                     let next_entry = entry.operands[0];
                     if let Some(frame) = self.call_stack.pop() {
-                        execution.object_id = frame.object_id;
-                        execution.entry = frame.return_entry;
+                        execution.resume_call(frame);
                         return InstructionFlow::Continue(execution);
                     }
                     execution.next_entry = next_entry;
@@ -70,6 +67,9 @@ impl ScriptRuntime {
                 self.call_stack.push(ScriptCallFrame {
                     object_id: execution.object_id,
                     return_entry: execution.entry.wrapping_add(1),
+                    wait_frames: execution.wait_frames,
+                    wait_updates_auto_scripts: execution.wait_updates_auto_scripts,
+                    viewport_frames_remaining: execution.viewport_frames_remaining,
                 });
                 execution.object_id = selected_object(entry.operands[1], execution.object_id);
                 execution.entry = entry.operands[0];

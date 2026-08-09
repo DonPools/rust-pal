@@ -59,7 +59,18 @@ impl ScriptRuntime {
                 TriggerHandler::Condition => self.dispatch_condition(execution, entry, opcode),
             };
             match flow {
-                InstructionFlow::Continue(next) => execution = next,
+                InstructionFlow::Continue(next) => {
+                    execution = next;
+                    if execution.wait_frames > 0 {
+                        execution.wait_frames -= 1;
+                        self.execution = Some(execution);
+                        return Some(if execution.wait_updates_auto_scripts {
+                            ScriptEvent::Waiting
+                        } else {
+                            ScriptEvent::Delay
+                        });
+                    }
+                }
                 InstructionFlow::Yield(next, event) => {
                     self.execution = Some(next);
                     return Some(event);

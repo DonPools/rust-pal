@@ -35,6 +35,12 @@ pub enum ScriptAction {
         object_id: u16,
         direction: Direction,
     },
+    ChaseObject {
+        object_id: u16,
+        speed: u16,
+        range: u16,
+        floating: bool,
+    },
     WalkObjectTo {
         object_id: u16,
         tile_x: u16,

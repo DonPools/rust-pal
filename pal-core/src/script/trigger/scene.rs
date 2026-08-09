@@ -416,7 +416,7 @@ impl ScriptRuntime {
                     }),
                 );
             }
-            SetSceneMap if entry.operands[1] != 0 => {
+            SetSceneMap => {
                 execution.advance();
                 return InstructionFlow::Yield(
                     execution,
@@ -437,8 +437,9 @@ impl ScriptRuntime {
                     }),
                 );
             }
+            SetObjectStates if entry.operands[0] > entry.operands[1] => execution.advance(),
             SetObjectTriggerMode if entry.operands[0] != 0 => {
-                let object_id = selected_object(entry.operands[0], execution.trigger.object_id);
+                let object_id = selected_object(entry.operands[0], execution.object_id);
                 execution.advance();
                 return InstructionFlow::Yield(
                     execution,
@@ -450,11 +451,24 @@ impl ScriptRuntime {
             }
             SetObjectTriggerMode => execution.entry = execution.entry.wrapping_add(1),
             ChasePlayer => {
-                return InstructionFlow::Halt(ScriptEvent::Unsupported {
-                    trigger: execution.trigger,
-                    entry: execution.entry,
-                    opcode: opcode.raw(),
-                });
+                execution.advance();
+                return InstructionFlow::Yield(
+                    execution,
+                    ScriptEvent::Action(ScriptAction::ChaseObject {
+                        object_id: execution.object_id,
+                        speed: if entry.operands[1] == 0 {
+                            4
+                        } else {
+                            entry.operands[1]
+                        },
+                        range: if entry.operands[0] == 0 {
+                            8
+                        } else {
+                            entry.operands[0]
+                        },
+                        floating: entry.operands[2] != 0,
+                    }),
+                );
             }
             // Implemented instructions with malformed operands are rejected explicitly.
             SetObjectScript => {
@@ -464,7 +478,7 @@ impl ScriptRuntime {
                     opcode: opcode.raw(),
                 });
             }
-            SetObjectStates | SetSceneMap => {
+            SetObjectStates => {
                 return InstructionFlow::Halt(ScriptEvent::Unsupported {
                     trigger: execution.trigger,
                     entry: execution.entry,

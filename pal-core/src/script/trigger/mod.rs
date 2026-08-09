@@ -11,7 +11,7 @@ mod scene;
 
 use std::collections::BTreeMap;
 
-use pal_assets::script::ScriptTable;
+use pal_assets::script::{ScriptEntry, ScriptTable};
 
 use crate::battle::{BattleRequest, BattleResult};
 use crate::random;
@@ -40,6 +40,14 @@ impl Execution {
     fn advance(&mut self) {
         self.entry = self.entry.wrapping_add(1);
     }
+
+    fn resume_call(&mut self, frame: ScriptCallFrame) {
+        self.object_id = frame.object_id;
+        self.entry = frame.return_entry;
+        self.wait_frames = frame.wait_frames;
+        self.wait_updates_auto_scripts = frame.wait_updates_auto_scripts;
+        self.viewport_frames_remaining = frame.viewport_frames_remaining;
+    }
 }
 
 /// Internal result of executing one decoded trigger-script instruction.
@@ -47,6 +55,15 @@ enum InstructionFlow {
     Continue(Execution),
     Yield(Execution, super::ScriptEvent),
     Halt(super::ScriptEvent),
+}
+
+/// Result of decoding one general instruction without running through the
+/// following record. Automatic scripts use this to retain their one-opcode
+/// per-frame scheduling while sharing the trigger handlers.
+pub(crate) struct ScriptInstructionStep {
+    pub(crate) next_entry: u16,
+    pub(crate) event: Option<super::ScriptEvent>,
+    pub(crate) succeeded: bool,
 }
 
 /// One script instruction captured for development diagnostics.
@@ -129,9 +146,8 @@ impl ScriptRuntime {
 
     /// Enter a nested script while preserving the active caller.
     ///
-    /// This is used by scene teleport scripts, which are invoked by an
-    /// instruction in another trigger script and return to that caller when
-    /// their `STOP` instruction is reached.
+    /// Scene teleport scripts and autoscript `CALL`s raised during a waiting
+    /// trigger use this path, then return when their `STOP` is reached.
     pub fn call(&mut self, entry: u16, object_id: u16) -> bool {
         let Some(mut execution) = self.execution else {
             return false;
@@ -142,6 +158,9 @@ impl ScriptRuntime {
         self.call_stack.push(ScriptCallFrame {
             object_id: execution.object_id,
             return_entry: execution.entry,
+            wait_frames: execution.wait_frames,
+            wait_updates_auto_scripts: execution.wait_updates_auto_scripts,
+            viewport_frames_remaining: execution.viewport_frames_remaining,
         });
         execution.object_id = object_id;
         execution.entry = entry;
@@ -245,6 +264,61 @@ impl ScriptRuntime {
         } else {
             self.trigger_idle_frames.remove(&object_id);
             false
+        }
+    }
+
+    pub(crate) fn dispatch_single_instruction(
+        &mut self,
+        trigger: TriggerRequest,
+        entry: ScriptEntry,
+        opcode: ScriptOpcode,
+    ) -> ScriptInstructionStep {
+        self.call_stack.clear();
+        self.pending_battle = None;
+        let execution = Execution {
+            trigger,
+            object_id: trigger.object_id,
+            entry: trigger.script_entry,
+            next_entry: trigger.script_entry,
+            dialog_position: DialogPosition::Upper,
+            dialog_color: 0x4f,
+            dialog_face: None,
+            dialog_playing_rng: false,
+            wait_frames: 0,
+            wait_updates_auto_scripts: false,
+            viewport_frames_remaining: 0,
+            succeeded: true,
+        };
+        let flow = match opcode.trigger_handler() {
+            super::opcode::TriggerHandler::Control => {
+                self.dispatch_control(execution, entry, opcode)
+            }
+            super::opcode::TriggerHandler::Presentation => {
+                self.dispatch_presentation(execution, entry, opcode)
+            }
+            super::opcode::TriggerHandler::Scene => self.dispatch_scene(execution, entry, opcode),
+            super::opcode::TriggerHandler::Role => self.dispatch_role(execution, entry, opcode),
+            super::opcode::TriggerHandler::Battle => self.dispatch_battle(execution, entry, opcode),
+            super::opcode::TriggerHandler::Condition => {
+                self.dispatch_condition(execution, entry, opcode)
+            }
+        };
+        match flow {
+            InstructionFlow::Continue(next) => ScriptInstructionStep {
+                next_entry: next.entry,
+                event: None,
+                succeeded: next.succeeded,
+            },
+            InstructionFlow::Yield(next, event) => ScriptInstructionStep {
+                next_entry: next.entry,
+                event: Some(event),
+                succeeded: next.succeeded,
+            },
+            InstructionFlow::Halt(event) => ScriptInstructionStep {
+                next_entry: trigger.script_entry,
+                event: Some(event),
+                succeeded: false,
+            },
         }
     }
 }

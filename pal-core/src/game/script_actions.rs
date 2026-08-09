@@ -47,6 +47,12 @@ impl<M: CollisionMap> GameState<M> {
                 object.world_y += dy;
                 object.advance_animation();
             }
+            ScriptAction::ChaseObject {
+                object_id,
+                speed,
+                range,
+                floating,
+            } => return self.chase_object(object_id, speed, range, floating),
             ScriptAction::SetObjectPose {
                 object_id,
                 direction,

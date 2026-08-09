@@ -32,6 +32,7 @@ use crate::scene::{
     blocks_position, find_search_trigger, find_touch_trigger, SceneObject, TriggerKind,
     TriggerRequest,
 };
+use crate::script::{ScriptEvent, ScriptRuntime};
 
 /// Compatibility tick used by script delays and blocking visual effects.
 pub const UPDATE_INTERVAL_MS: u64 = 50;
@@ -122,6 +123,9 @@ pub struct GameState<M = Map> {
     scene_teleport_scripts: BTreeMap<u16, u16>,
     scene_maps: BTreeMap<u16, u16>,
     pending_auto_sounds: Vec<u16>,
+    pending_auto_events: Vec<ScriptEvent>,
+    pending_auto_script_failure: bool,
+    auto_instruction_runtime: Option<ScriptRuntime>,
     script_frame: u32,
     chase_range: u16,
     chase_speed_change_cycles: u16,
@@ -228,6 +232,9 @@ impl<M: CollisionMap> GameState<M> {
             scene_teleport_scripts: BTreeMap::new(),
             scene_maps: BTreeMap::new(),
             pending_auto_sounds: Vec::new(),
+            pending_auto_events: Vec::new(),
+            pending_auto_script_failure: false,
+            auto_instruction_runtime: None,
             script_frame: 0,
             chase_range: 1,
             chase_speed_change_cycles: 0,
@@ -1830,6 +1837,9 @@ impl<M: CollisionMap> GameState<M> {
         self.party_trail = snapshot.party_trail;
         self.player_roles = snapshot.player_roles;
         self.pending_auto_sounds.clear();
+        self.pending_auto_events.clear();
+        self.pending_auto_script_failure = false;
+        self.auto_instruction_runtime = None;
         self.follow_player();
     }
 
@@ -2049,6 +2059,9 @@ impl<M: CollisionMap> GameState<M> {
         self.scene_teleport_scripts = scene_teleport_scripts;
         self.scene_maps = scene_maps;
         self.pending_auto_sounds.clear();
+        self.pending_auto_events.clear();
+        self.pending_auto_script_failure = false;
+        self.auto_instruction_runtime = None;
         self.script_frame = 0;
         self.chase_range = save.chase_range;
         self.chase_speed_change_cycles = save.chase_speed_change_cycles;

@@ -1,6 +1,6 @@
 //! GameState integration and regression tests.
 
-use crate::script::{ScriptAction, ScriptOpcode};
+use crate::script::{ScriptAction, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
 
 use std::collections::HashSet;
 
@@ -65,6 +65,25 @@ fn state(blocked: &[(i32, i32)]) -> GameState<TestMap> {
         320,
         200,
     )
+}
+
+fn run_action_only_script(
+    scripts: ScriptTable,
+    request: TriggerRequest,
+    state: &mut GameState<TestMap>,
+) {
+    let mut runtime = ScriptRuntime::new(scripts);
+    assert!(runtime.start(request));
+    for _ in 0..64 {
+        match runtime.advance() {
+            Some(ScriptEvent::Action(action)) => {
+                assert!(state.apply_script_action(action));
+            }
+            Some(ScriptEvent::Completed { .. }) => return,
+            event => panic!("action-only test script yielded {event:?}"),
+        }
+    }
+    panic!("action-only test script did not complete");
 }
 
 fn battle_data_for_growth() -> BattleData {
@@ -2560,7 +2579,201 @@ fn auto_script_chance_uses_the_shared_classic_random_state() {
 }
 
 #[test]
-fn auto_script_calls_immediate_world_subscript() {
+fn auto_script_dispatches_every_reference_general_instruction() {
+    for &opcode in ScriptOpcode::ALL {
+        if !(0x000b..=0x00a6).contains(&opcode.raw())
+            || matches!(
+                opcode,
+                ScriptOpcode::DialogCenter
+                    | ScriptOpcode::DialogUpper
+                    | ScriptOpcode::DialogLower
+                    | ScriptOpcode::DialogCenterWindow
+                    | ScriptOpcode::RestoreScreen
+            )
+        {
+            continue;
+        }
+        let mut operands = [1, 1, 1];
+        if matches!(
+            opcode,
+            ScriptOpcode::SetEquipmentEffect | ScriptOpcode::EquipItem
+        ) {
+            operands[0] = 0x0b;
+        }
+        let script_data = [
+            [0x0000, 0, 0, 0],
+            [opcode.raw(), operands[0], operands[1], operands[2]],
+            [0x0000, 0, 0, 0],
+        ]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+        let scripts = ScriptTable::parse(&script_data).unwrap();
+        let mut object = blocking_object(80, 80);
+        object.auto_script = 1;
+        let mut state = state(&[]).with_scene_objects(vec![object]);
+
+        let result = state.update_auto_scripts(&scripts);
+        assert!(result.is_ok(), "{opcode} failed with {result:?}");
+    }
+}
+
+#[test]
+fn auto_script_rejects_only_trigger_only_reference_instructions() {
+    for opcode in [
+        ScriptOpcode::Redraw,
+        ScriptOpcode::StartBattle,
+        ScriptOpcode::AdvanceEntry,
+        ScriptOpcode::Confirm,
+        ScriptOpcode::DialogCenter,
+        ScriptOpcode::DialogUpper,
+        ScriptOpcode::DialogLower,
+        ScriptOpcode::DialogCenterWindow,
+        ScriptOpcode::RestoreScreen,
+    ] {
+        let script_data = [
+            [0x0000, 0, 0, 0],
+            [opcode.raw(), 1, 1, 1],
+            [0x0000, 0, 0, 0],
+        ]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+        let scripts = ScriptTable::parse(&script_data).unwrap();
+        let mut object = blocking_object(80, 80);
+        object.auto_script = 1;
+        let mut state = state(&[]).with_scene_objects(vec![object]);
+
+        assert_eq!(
+            state.update_auto_scripts(&scripts),
+            Err(AutoScriptError::Unsupported {
+                object_id: 1,
+                entry: 1,
+                opcode: opcode.raw(),
+            })
+        );
+    }
+}
+
+#[test]
+fn auto_script_viewport_move_finishes_after_the_requested_frames() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [ScriptOpcode::MoveViewport.raw(), 2, (-1i16) as u16, 3],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+    let start = (state.camera.x, state.camera.y);
+
+    for frame in 1..=3 {
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+        assert_eq!(
+            (state.camera.x, state.camera.y),
+            (start.0 + frame * 2, start.1 - frame)
+        );
+        assert_eq!(
+            state.scene_objects[0].auto_script,
+            if frame == 3 { 2 } else { 1 }
+        );
+    }
+    assert_eq!(state.scene_objects[0].auto_script_idle_frame, 0);
+}
+
+#[test]
+fn auto_script_delay_retains_the_reference_blocking_duration() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [ScriptOpcode::Delay.raw(), 3, 0, 0],
+        [ScriptOpcode::AnimateObject.raw(), 0, 0, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 1);
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 1);
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 2);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 3);
+    assert_eq!(state.scene_objects[0].current_frame, 1);
+}
+
+#[test]
+fn auto_script_queues_platform_events_after_advancing_its_entry() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [ScriptOpcode::PlayMusic.raw(), 6, 0, 0],
+        [ScriptOpcode::ShakeScreen.raw(), 4, 2, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 2);
+    assert_eq!(state.current_music, Some(6));
+    assert_eq!(
+        state.take_auto_script_events(),
+        vec![ScriptEvent::Action(ScriptAction::PlayMusic {
+            music_id: 6,
+            looped: true,
+            fade_seconds: 0,
+        })]
+    );
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 3);
+    assert_eq!(
+        state.take_auto_script_events(),
+        vec![ScriptEvent::Visual(ScriptVisual::Shake {
+            frames: 4,
+            level: 2,
+        })]
+    );
+}
+
+#[test]
+fn auto_script_exposes_script_failure_to_an_active_trigger_host() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [ScriptOpcode::MarkScriptFailed.raw(), 0, 0, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert!(state.take_auto_script_failure());
+    assert!(!state.take_auto_script_failure());
+}
+
+#[test]
+fn auto_script_call_uses_the_full_trigger_runtime() {
     let script_data = [
         [0x0000, 0, 0, 0],
         [0x0004, 4, 2, 0],
@@ -2582,13 +2795,50 @@ fn auto_script_calls_immediate_world_subscript() {
     target.state = 2;
     let mut state = state(&[]).with_scene_objects(vec![caller, target]);
 
-    assert!(state.update_auto_scripts(&scripts).unwrap());
+    let update = state.update_auto_scripts_report(&scripts);
+    assert!(update.changed);
+    assert_eq!(update.error, None);
     assert_eq!(state.scene_objects[0].auto_script, 2);
+    let request = state.take_trigger().unwrap();
+    assert_eq!(request.kind, TriggerKind::Auto);
+    assert_eq!(request.object_id, 2);
+    assert_eq!(request.script_entry, 4);
+    run_action_only_script(scripts, request, &mut state);
     assert_eq!(state.scene_objects[0].direction, Direction::East);
     assert_eq!(state.scene_objects[0].current_frame, 1);
     assert_eq!(state.scene_objects[1].state, 1);
     assert_eq!(state.scene_objects[1].direction, Direction::South);
     assert_eq!(state.scene_objects[1].current_frame, 2);
+}
+
+#[test]
+fn headless_auto_call_reports_that_battle_requires_a_host() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [ScriptOpcode::Call.raw(), 3, 0, 0],
+        [0x0000, 0, 0, 0],
+        [ScriptOpcode::StartBattle.raw(), 1, 5, 6],
+        [0x0000, 0, 0, 0],
+        [0x0000, 0, 0, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+
+    assert_eq!(
+        state.update_auto_scripts(&scripts),
+        Err(AutoScriptError::HostRequired {
+            object_id: 1,
+            entry: 3,
+            opcode: ScriptOpcode::StartBattle.raw(),
+        })
+    );
+    assert_eq!(state.scene_objects[0].auto_script, 2);
 }
 
 #[test]
@@ -2621,6 +2871,7 @@ fn auto_script_call_applies_real_object_setup_and_offset_instructions() {
 
     assert!(state.update_auto_scripts(&scripts).unwrap());
     assert_eq!(state.scene_objects[0].auto_script, 2);
+    assert!(state.take_trigger().is_none());
     assert_eq!(
         (
             state.scene_objects[0].world_x,

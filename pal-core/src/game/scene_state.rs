@@ -93,6 +93,14 @@ impl<M: CollisionMap> GameState<M> {
         std::mem::take(&mut self.pending_auto_sounds)
     }
 
+    pub fn take_auto_script_events(&mut self) -> Vec<ScriptEvent> {
+        std::mem::take(&mut self.pending_auto_events)
+    }
+
+    pub fn take_auto_script_failure(&mut self) -> bool {
+        std::mem::take(&mut self.pending_auto_script_failure)
+    }
+
     pub fn party_contains_name(&self, name_word_id: u16) -> bool {
         self.party
             .members()

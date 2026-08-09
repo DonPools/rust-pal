@@ -15,6 +15,8 @@ pub const TRIGGER_TOUCH_FARTHEST: u16 = 8;
 pub enum TriggerKind {
     Search,
     Touch,
+    /// Trigger script invoked synchronously by an event object's autoscript.
+    Auto,
     Item,
     Equip,
     Magic,

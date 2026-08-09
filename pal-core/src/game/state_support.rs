@@ -102,6 +102,13 @@ pub enum AutoScriptError {
         entry: u16,
         opcode: u16,
     },
+    /// The instruction is implemented, but the synchronous headless helper
+    /// cannot choose the platform-owned result needed to continue it.
+    HostRequired {
+        object_id: u16,
+        entry: u16,
+        opcode: u16,
+    },
     InstructionLimit {
         object_id: u16,
         entry: u16,

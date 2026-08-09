@@ -200,7 +200,6 @@ impl ScriptRuntime {
                     opcode: opcode.raw(),
                 });
             }
-            // ChasePlayer is handled by automatic scripts, not trigger scripts.
             _ => unreachable!("opcode {opcode} is not a role instruction"),
         }
     }

@@ -23,7 +23,10 @@ use super::original_save::{
     latest_original_save_slot, original_save_slots, restore_original_save, RestoreOriginalSaveError,
 };
 use super::presentation::{render_game, UiRenderContext};
-use super::script_driver::{advance_script, auto_script_error_title, ScriptRenderResources};
+use super::script_driver::{
+    advance_script, apply_auto_script_events, auto_script_error_title, enter_auto_trigger,
+    ScriptRenderResources,
+};
 use super::session::{DesktopSession, MusicResources};
 use super::snapshot::{restore_snapshot, save_snapshot, RestoreSnapshotError};
 use super::state::{
@@ -404,6 +407,7 @@ where
         let update = self
             .game
             .update_auto_scripts_report(&self.session.scripts.auto_scripts);
+        let mut changed = update.changed;
         if let Some(error) = update.error {
             set_title(&auto_script_error_title(error));
         }
@@ -412,7 +416,24 @@ where
                 set_title(&format!("Rust-PAL [invalid auto sound {sound_id}]"));
             }
         }
-        update.changed
+        changed |= apply_auto_script_events(
+            self.game.take_auto_script_events(),
+            &mut self.scripts,
+            &mut self.game,
+            &self.resources.role_sprites,
+            &mut self.load_scene,
+            &mut self.session,
+            set_title,
+        );
+        let _ = self.game.take_auto_script_failure();
+        if let Some(trigger) = self.game.take_trigger() {
+            if enter_auto_trigger(&mut self.scripts, trigger) {
+                self.advance_scene_script(set_title);
+            } else {
+                set_title("Rust-PAL [auto CALL runtime is busy]");
+            }
+        }
+        changed
     }
 
     fn restore_original_slot(
@@ -703,11 +724,10 @@ where
             return (true, true);
         }
         let mut changed = self.game.update(input);
-        if changed {
-            if let Some(trigger) = self.game.take_trigger() {
-                if self.scripts.start(trigger) {
-                    self.advance_scene_script(set_title);
-                }
+        if let Some(trigger) = self.game.take_trigger() {
+            if self.scripts.start(trigger) {
+                self.advance_scene_script(set_title);
+                changed = true;
             }
         }
         if !self.scripts.is_active() {

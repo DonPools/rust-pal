@@ -36,16 +36,19 @@ fn opcode_catalog_covers_every_original_instruction_once() {
 }
 
 #[test]
-fn trigger_rejects_opcode_not_supported_in_that_context() {
-    // ChasePlayer is implemented by the auto-script scheduler, but not by
-    // the trigger-script interpreter.
+fn trigger_dispatches_chase_player_to_the_world_host() {
     let mut runtime = ScriptRuntime::new(table(&[
         [0, 0, 0, 0],
         [ScriptOpcode::ChasePlayer.raw(), 0, 0, 0],
     ]));
     runtime.start(trigger(1));
-    assert!(matches!(
+    assert_eq!(
         runtime.advance(),
-        Some(ScriptEvent::Unsupported { opcode: 0x004c, .. })
-    ));
+        Some(ScriptEvent::Action(ScriptAction::ChaseObject {
+            object_id: 7,
+            speed: 4,
+            range: 8,
+            floating: false,
+        }))
+    );
 }

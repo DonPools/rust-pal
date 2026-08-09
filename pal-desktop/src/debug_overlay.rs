@@ -432,6 +432,7 @@ fn script_trigger(trigger: Option<TriggerRequest>) -> String {
     let kind = match trigger.kind {
         TriggerKind::Search => "SEARCH",
         TriggerKind::Touch => "TOUCH",
+        TriggerKind::Auto => "AUTO",
         TriggerKind::Item => "ITEM",
         TriggerKind::Equip => "EQUIP",
         TriggerKind::Magic => "MAGIC",
