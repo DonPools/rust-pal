@@ -747,6 +747,10 @@ pub enum BattleEvent {
     },
     EnemyEscape,
     RoundCompleted,
+    /// One-shot outcome presentation emitted before rewards and battle-end scripts.
+    ///
+    /// Battle-end script completion may rewrite the final result, but only updates
+    /// [`BattlePhase::Finished`] and the settlement state; it does not emit this event again.
     Finished(BattleResult),
 }
 

@@ -949,10 +949,9 @@ fn scripted_victory_rewards_only_enemies_already_defeated() {
     assert!(battle.mark_victory_rewards_applied());
     assert!(battle.begin_battle_end_scripts());
     complete_pending_scripts(&mut battle);
-    assert_eq!(
-        battle.advance_resolution(),
-        vec![BattleEvent::Finished(BattleResult::Won)]
-    );
+    assert!(battle.advance_resolution().is_empty());
+    assert_eq!(battle.phase(), BattlePhase::Finished(BattleResult::Won));
+    assert!(battle.ready_to_leave());
     assert_eq!(
         battle.settled_rewards(),
         Some(BattleRewards {
@@ -2400,10 +2399,9 @@ fn lifecycle_and_round_poison_scripts_run_in_original_order() {
         assert_eq!(request.entry, 12);
         assert!(battle.complete_script(next_entry));
     }
-    assert_eq!(
-        battle.advance_resolution(),
-        vec![BattleEvent::Finished(BattleResult::Won)]
-    );
+    assert!(battle.advance_resolution().is_empty());
+    assert_eq!(battle.phase(), BattlePhase::Finished(BattleResult::Won));
+    assert!(battle.ready_to_leave());
 }
 
 #[test]
@@ -2454,10 +2452,9 @@ fn lifecycle_scripts_read_each_enemy_slot_after_the_previous_script() {
         }
     );
     assert!(battle.complete_script(82));
-    assert_eq!(
-        battle.advance_resolution(),
-        vec![BattleEvent::Finished(BattleResult::Won)]
-    );
+    assert!(battle.advance_resolution().is_empty());
+    assert_eq!(battle.phase(), BattlePhase::Finished(BattleResult::Won));
+    assert!(battle.ready_to_leave());
 }
 
 #[test]
@@ -2559,10 +2556,12 @@ fn battle_end_scripts_continue_after_result_changes_and_last_write_wins() {
     );
     assert!(battle.set_script_result(0));
     assert!(battle.complete_script(22));
+    assert!(battle.advance_resolution().is_empty());
     assert_eq!(
-        battle.advance_resolution(),
-        vec![BattleEvent::Finished(BattleResult::Terminated)]
+        battle.phase(),
+        BattlePhase::Finished(BattleResult::Terminated)
     );
+    assert!(battle.ready_to_leave());
 }
 
 #[test]

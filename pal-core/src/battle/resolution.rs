@@ -526,7 +526,10 @@ impl BattleState {
                     self.phase = BattlePhase::Finished(result);
                     self.flow = BattleFlow::Finished;
                     self.victory_settlement = VictorySettlementStage::ReadyToLeave;
-                    events.push(BattleEvent::Finished(result));
+                    // The initial outcome already emitted the one-shot presentation event.
+                    // Finishing battle-end scripts only makes the final, possibly rewritten
+                    // result ready for settlement; replaying `Finished` here would restart
+                    // victory feedback and insert another blank battle interval.
                     return events;
                 }
             }

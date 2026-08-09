@@ -5,7 +5,7 @@ use pal_assets::rix::{RixSequencer, RixTrack};
 use pal_assets::rng::{apply_frame_delta_checked, RngArchive, RNG_FRAME_PIXELS};
 use pal_assets::save::OriginalSave;
 use pal_assets::voc::VocClip;
-use pal_core::battle::{BattlePhase, BattleResult, BattleStatus, BattleTarget};
+use pal_core::battle::{BattleEvent, BattlePhase, BattleResult, BattleStatus, BattleTarget};
 use pal_core::script::{
     ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual,
 };
@@ -1821,8 +1821,13 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         game.begin_battle_end_scripts(),
         "headless first-battle end scripts could not start"
     );
+    let mut repeated_finished_events = 0usize;
     for _ in 0..1024 {
-        let _ = game.advance_battle_resolution();
+        repeated_finished_events += game
+            .advance_battle_resolution()
+            .into_iter()
+            .filter(|event| matches!(event, BattleEvent::Finished(_)))
+            .count();
         if let Some(request) = game.take_battle_script() {
             run_headless_battle_script(&mut game, &mut battle_scripts, request, &text);
         }
@@ -1833,6 +1838,10 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
     assert!(
         game.battle().is_some_and(|battle| battle.ready_to_leave()),
         "headless first-battle end scripts did not finish"
+    );
+    assert_eq!(
+        repeated_finished_events, 0,
+        "battle-end scripts replayed the one-shot finished presentation"
     );
     let (battle_result, battle_rewards) = game
         .settle_battle()
