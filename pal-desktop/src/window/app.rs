@@ -303,7 +303,7 @@ where
     }
 
     fn stop_exploration_walking_animation(&mut self) -> bool {
-        (self.select_tick_target(false) == TickTarget::Playing(PlayingTarget::Exploration))
+        (self.select_tick_target() == TickTarget::Playing(PlayingTarget::Exploration))
             && self.game.stop_party_walking_animation()
     }
 
@@ -338,14 +338,10 @@ where
         .target()
     }
 
-    fn select_tick_target(&self, visual_or_deferred_action: bool) -> TickTarget {
+    fn select_tick_target(&self) -> TickTarget {
         match &self.app_mode {
             AppMode::OpeningAnimation(_) => TickTarget::OpeningAnimation,
-            AppMode::OpeningMenu(_) if visual_or_deferred_action => {
-                TickTarget::VisualOrDeferredAction
-            }
             AppMode::OpeningMenu(_) => TickTarget::OpeningMenu,
-            AppMode::Playing if visual_or_deferred_action => TickTarget::VisualOrDeferredAction,
             AppMode::Playing => TickTarget::Playing(self.select_playing_target()),
         }
     }
@@ -841,7 +837,6 @@ where
         update_tick: Duration,
         input: pal_core::game::GameInput,
         any_pressed: bool,
-        visual_scene_update_due: bool,
         set_title: &mut impl FnMut(&str),
     ) -> TargetOutcome {
         match target {
@@ -857,9 +852,6 @@ where
                         AccumulatorAction::ConsumeTick
                     },
                 }
-            }
-            TickTarget::VisualOrDeferredAction => {
-                TargetOutcome::run(visual_scene_update_due && self.update_auto_scripts(set_title))
             }
             TickTarget::OpeningMenu => {
                 TargetOutcome::run(self.advance_opening_menu(input, set_title))
@@ -940,36 +932,35 @@ where
     ) -> TickOutcome {
         let (input, any_pressed) = self.input.sample();
         let mut outcome = TickOutcome::default();
+        let target = self.select_tick_target();
+        let mut tick_consumed = false;
 
-        let (target, visual_scene_update_due) = if self.app_mode.is_opening_animation() {
-            (self.select_tick_target(false), false)
-        } else {
-            // Target selection intentionally uses the visual state from before
-            // update(), so a visual finishing now cannot also advance gameplay.
+        if target != TickTarget::OpeningAnimation {
             let visual_was_blocking = self.session.visual.is_blocking();
             let visual_scene_update_due = self.session.visual.scene_update_due();
             outcome.changed |= self.advance_visual(set_title);
+
+            // This update belongs to the scene behind the visual and must run
+            // before a pending save restore can replace the game state.
+            if visual_scene_update_due {
+                outcome.changed |= self.update_auto_scripts(set_title);
+            }
+
             outcome.exit =
                 self.session.persistence.quit_requested && !self.session.visual.is_blocking();
 
             let selected_load_handled = self.restore_selected_slot_if_ready(set_title);
             let last_save_load_handled = self.restore_last_save_if_requested(set_title);
-            outcome.changed |= selected_load_handled || last_save_load_handled;
+            let restore_handled = selected_load_handled || last_save_load_handled;
+            outcome.changed |= restore_handled;
+            tick_consumed = visual_was_blocking || restore_handled;
+        }
 
-            let deferred_action_handled = selected_load_handled || last_save_load_handled;
-            (
-                self.select_tick_target(visual_was_blocking || deferred_action_handled),
-                visual_scene_update_due,
-            )
+        let target_outcome = if tick_consumed {
+            TargetOutcome::run(false)
+        } else {
+            self.advance_tick_target(target, update_tick, input, any_pressed, set_title)
         };
-        let target_outcome = self.advance_tick_target(
-            target,
-            update_tick,
-            input,
-            any_pressed,
-            visual_scene_update_due,
-            set_title,
-        );
         outcome.changed |= target_outcome.changed;
 
         if target_outcome.visual_finalization == VisualFinalization::Run {

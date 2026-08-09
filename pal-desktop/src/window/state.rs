@@ -61,10 +61,6 @@ pub(super) enum AppModeView<'a> {
 }
 
 impl AppMode {
-    pub(super) fn is_opening_animation(&self) -> bool {
-        matches!(self, Self::OpeningAnimation(_))
-    }
-
     pub(super) fn is_opening_menu(&self) -> bool {
         matches!(self, Self::OpeningMenu(_))
     }
@@ -85,7 +81,6 @@ impl AppMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TickTarget {
     OpeningAnimation,
-    VisualOrDeferredAction,
     OpeningMenu,
     Playing(PlayingTarget),
 }
