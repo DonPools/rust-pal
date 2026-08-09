@@ -11,7 +11,9 @@ use super::super::debug_render::render_object_overlay;
 use super::super::scene_render::render_tile_map;
 use super::super::{LoadedScene, SceneEditorResources, Viewport};
 use super::hit_test::{hit_test_object_marker, hit_test_visible_sprite};
-use super::navigation::{navigable_target, scene_object_references, ScriptNavigation};
+use super::navigation::{
+    format_object_id, navigable_target, scene_object_references, ScriptNavigation,
+};
 use super::{
     canvas_view_size, clamped_viewport, scale_canvas, CANVAS_HEIGHT, CANVAS_WIDTH, MAX_ZOOM,
 };
@@ -219,7 +221,10 @@ where
 
     pub(super) fn locate_object_reference(&mut self, object_id: u16) {
         let Some(scene) = self.script_references.scene_for_object(object_id) else {
-            self.status = Some(format!("OBJECT #{object_id} HAS NO SCENE"));
+            self.status = Some(format!(
+                "OBJECT {} HAS NO SCENE",
+                format_object_id(object_id)
+            ));
             self.dirty = true;
             return;
         };

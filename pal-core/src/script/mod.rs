@@ -13,13 +13,16 @@ pub use action::ScriptAction;
 pub use condition::ScriptCondition;
 pub use event::{DialogPosition, ScriptEvent};
 pub use inspection::{
-    inspect_script_record, inspect_script_records, ScriptControlFlow,
-    ScriptInstructionReferenceKind, ScriptRecordInspection, ScriptReferenceCatalog,
-    ScriptReferenceSource,
+    inspect_script_record, inspect_script_records, inspect_script_targets, ScriptControlFlow,
+    ScriptInstructionReferenceCategory, ScriptInstructionReferenceKind, ScriptInstructionTarget,
+    ScriptRecordInspection, ScriptReferenceCatalog, ScriptReferenceSource,
 };
 pub use opcode::ScriptOpcode;
 pub(crate) use trigger::ScriptInstructionStep;
-pub use trigger::{ScriptDebugSnapshot, ScriptInstructionDebug, ScriptRuntime};
+pub use trigger::{
+    ScriptDebugSnapshot, ScriptInstructionDebug, ScriptRuntime, ScriptTraceEvent,
+    ScriptTraceOutcome, ScriptTraceRecord,
+};
 pub use visual::ScriptVisual;
 
 #[cfg(test)]

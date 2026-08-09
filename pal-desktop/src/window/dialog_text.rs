@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use pal_assets::text::TextLibrary;
 use pal_core::script::DialogPosition;
 
@@ -63,22 +65,32 @@ pub(super) fn dialog_page_count(text: &TextLibrary, dialog: &ActiveDialog) -> us
 }
 
 pub(super) fn dialog_title<'a>(text: &'a TextLibrary, dialog: &ActiveDialog) -> Option<&'a [u8]> {
-    if dialog.position == DialogPosition::Center {
+    if dialog.position == DialogPosition::Center || dialog.inline_lines.is_some() {
         return None;
     }
     text.message(usize::from(*dialog.message_ids.first()?))
         .filter(|message| is_dialog_title(message))
 }
 
-pub(super) fn dialog_body_lines<'a>(text: &'a TextLibrary, dialog: &ActiveDialog) -> Vec<&'a [u8]> {
+pub(super) fn dialog_body_lines<'a>(
+    text: &'a TextLibrary,
+    dialog: &ActiveDialog,
+) -> Vec<Cow<'a, [u8]>> {
+    if let Some(lines) = dialog.inline_lines.as_ref() {
+        return lines.iter().cloned().map(Cow::Owned).collect();
+    }
     dialog
         .message_ids
         .iter()
         .enumerate()
         .filter_map(|(index, message_id)| {
-            text.message(usize::from(*message_id)).filter(|message| {
-                index != 0 || dialog.position == DialogPosition::Center || !is_dialog_title(message)
-            })
+            text.message(usize::from(*message_id))
+                .filter(|message| {
+                    index != 0
+                        || dialog.position == DialogPosition::Center
+                        || !is_dialog_title(message)
+                })
+                .map(Cow::Borrowed)
         })
         .collect()
 }
@@ -142,7 +154,7 @@ pub(super) fn dialog_page_glyph_target(text: &TextLibrary, dialog: &ActiveDialog
     dialog_body_lines(text, dialog)
         .iter()
         .take((dialog.page + 1) * 4)
-        .map(|line| dialog_glyph_count(line))
+        .map(|line| dialog_glyph_count(line.as_ref()))
         .sum()
 }
 

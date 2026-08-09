@@ -2,6 +2,8 @@
 
 use pal_core::game::{BATTLE_FRAME_MS, EXPLORATION_FRAME_MS, UPDATE_INTERVAL_MS};
 
+use crate::debug_overlay::ScriptDebugPage;
+
 use super::menu_state::{OpeningMenu, OpeningMenuAction};
 use super::opening_animation::OpeningAnimation;
 
@@ -13,6 +15,8 @@ pub(super) struct DebugState {
     pub(super) show_objects: bool,
     pub(super) show_script: bool,
     pub(super) show_battle: bool,
+    pub(super) script_page: ScriptDebugPage,
+    pub(super) trace_cursor: Option<u64>,
 }
 
 impl DebugState {

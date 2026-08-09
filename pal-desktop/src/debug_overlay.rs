@@ -1,7 +1,10 @@
 //! Physical-resolution debug information rendered after the virtual framebuffer.
 
 use pal_core::scene::{TriggerKind, TriggerRequest};
-use pal_core::script::{ScriptDebugSnapshot, ScriptInstructionDebug, ScriptOpcode};
+use pal_core::script::{
+    ScriptDebugSnapshot, ScriptInstructionDebug, ScriptOpcode, ScriptTraceOutcome,
+    ScriptTraceRecord,
+};
 use pixels::wgpu;
 
 const PANEL_LOGICAL_WIDTH: u32 = 320;
@@ -16,6 +19,10 @@ const BACKGROUND: [u8; 4] = [12, 16, 20, 218];
 const BORDER: [u8; 4] = [104, 120, 128, 255];
 const TEXT: [u8; 4] = [232, 240, 236, 255];
 const ACCENT: [u8; 4] = [80, 224, 144, 255];
+const MUTED: [u8; 4] = [152, 164, 160, 255];
+const WARN: [u8; 4] = [244, 194, 92, 255];
+const PAUSED: [u8; 4] = [255, 121, 109, 255];
+const TRACE_VISIBLE_ROWS: usize = 6;
 
 const SHADER: &str = r#"
 @group(0) @binding(0)
@@ -45,7 +52,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ScriptDebugPage {
+    #[default]
+    Inspector,
+    Trace,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum TraceDisplayMode {
+    #[default]
+    Live,
+    Review,
+    Armed,
+    Paused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DebugTraceSnapshot {
+    pub mode: TraceDisplayMode,
+    pub records: Vec<ScriptTraceRecord>,
+    pub selected_sequence: Option<u64>,
+    pub new_record_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DebugSnapshot {
     pub scene_number: u16,
     pub object_count: usize,
@@ -60,6 +91,8 @@ pub(crate) struct DebugSnapshot {
     pub scale_factor: f64,
     pub focused_object: Option<DebugObjectSnapshot>,
     pub script: ScriptDebugSnapshot,
+    pub script_page: ScriptDebugPage,
+    pub trace: DebugTraceSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,7 +209,7 @@ impl DebugOverlay {
             self.resize(device, snapshot.scale_factor);
         }
 
-        rasterize_panel(&mut self.pixels, self.width, self.height, snapshot);
+        rasterize_panel(&mut self.pixels, self.width, self.height, &snapshot);
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
@@ -309,7 +342,7 @@ fn physical(logical: f32, scale_factor: f64) -> u32 {
     (f64::from(logical) * scale_factor).round().max(1.0) as u32
 }
 
-fn rasterize_panel(pixels: &mut [u8], width: u32, height: u32, snapshot: DebugSnapshot) {
+fn rasterize_panel(pixels: &mut [u8], width: u32, height: u32, snapshot: &DebugSnapshot) {
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.copy_from_slice(&BACKGROUND);
     }
@@ -321,7 +354,6 @@ fn rasterize_panel(pixels: &mut [u8], width: u32, height: u32, snapshot: DebugSn
     let start_y = physical(TEXT_LOGICAL_Y as f32, snapshot.scale_factor);
     let line_height = physical(LINE_LOGICAL_HEIGHT as f32, snapshot.scale_factor);
     for (line_index, line) in lines.iter().enumerate() {
-        let color = if line_index == 0 { ACCENT } else { TEXT };
         draw_text(
             pixels,
             width,
@@ -329,24 +361,49 @@ fn rasterize_panel(pixels: &mut [u8], width: u32, height: u32, snapshot: DebugSn
             x,
             start_y + line_index as u32 * line_height,
             scale,
-            line,
-            color,
+            &line.text,
+            line.color,
         );
     }
 }
 
-fn snapshot_lines(snapshot: DebugSnapshot) -> Vec<String> {
-    let mut lines = vec![
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DebugLine {
+    text: String,
+    color: [u8; 4],
+}
+
+impl DebugLine {
+    fn new(text: impl Into<String>, color: [u8; 4]) -> Self {
+        Self {
+            text: text.into(),
+            color,
+        }
+    }
+}
+
+fn snapshot_lines(snapshot: &DebugSnapshot) -> Vec<DebugLine> {
+    match snapshot.script_page {
+        ScriptDebugPage::Inspector => inspector_lines(snapshot),
+        ScriptDebugPage::Trace => trace_lines(snapshot),
+    }
+}
+
+fn inspector_lines(snapshot: &DebugSnapshot) -> Vec<DebugLine> {
+    let mut text = vec![
         format!(
-            "SCENE {} OBJ {}",
+            "SCENE {:04X} OBJ {:04X}",
             snapshot.scene_number, snapshot.object_count
         ),
         format!(
             "PLAYER {},{} CAM {},{}",
-            snapshot.player_x, snapshot.player_y, snapshot.camera_x, snapshot.camera_y
+            signed_hex_i32(snapshot.player_x),
+            signed_hex_i32(snapshot.player_y),
+            signed_hex_i32(snapshot.camera_x),
+            signed_hex_i32(snapshot.camera_y)
         ),
         format!(
-            "VIEW {}X{}",
+            "VIEW {:04X}X{:04X}",
             snapshot.virtual_width, snapshot.virtual_height
         ),
         script_status(snapshot.script),
@@ -355,33 +412,39 @@ fn snapshot_lines(snapshot: DebugSnapshot) -> Vec<String> {
         instruction_line("LAST", snapshot.script.last_instruction),
         instruction_line("NEXT", snapshot.script.next_instruction),
         format!(
-            "WAIT {} CALL {}",
+            "WAIT {:04X} CALL {:04X}",
             snapshot.script.wait_frames, snapshot.script.call_depth
         ),
     ];
     if let Some(object) = snapshot.focused_object {
-        lines.extend([
+        text.extend([
             format!(
-                "FOCUS #{} POS {},{}",
-                object.id, object.world_x, object.world_y
+                "FOCUS #{:04X} POS {},{}",
+                object.id,
+                signed_hex_i32(object.world_x),
+                signed_hex_i32(object.world_y)
             ),
             format!(
-                "STATE {} LAYER {} MODE {}",
-                object.state, object.layer, object.trigger_mode
+                "STATE {} LAYER {} MODE {:04X}",
+                signed_hex_i16(object.state),
+                signed_hex_i16(object.layer),
+                object.trigger_mode
             ),
             format!(
-                "SPRITE {} FRAME {}/{} TOT {} DIR {}",
+                "SPRITE {} FRAME {:04X}/{:04X} TOT {:04X} DIR {}",
                 object
                     .sprite_index
-                    .map_or("-".to_owned(), |index| index.to_string()),
+                    .map_or("-".to_owned(), |index| format!("{index:04X}")),
                 object.current_frame,
                 object.frames_per_direction,
                 object.sprite_frame_count,
                 direction_name(object.direction)
             ),
             format!(
-                "TRIG {} AUTO {} VANISH {}",
-                object.trigger_script, object.auto_script, object.vanish_time
+                "TRIG {:04X} AUTO {:04X} VANISH {}",
+                object.trigger_script,
+                object.auto_script,
+                signed_hex_i16(object.vanish_time)
             ),
             format!(
                 "VIS {} BLOCK {} SEARCH {} TOUCH {}",
@@ -392,9 +455,220 @@ fn snapshot_lines(snapshot: DebugSnapshot) -> Vec<String> {
             ),
         ]);
     } else {
-        lines.push("FOCUS NONE".to_owned());
+        text.push("FOCUS NONE".to_owned());
     }
+    text.into_iter()
+        .enumerate()
+        .map(|(index, text)| DebugLine::new(text, if index == 0 { ACCENT } else { TEXT }))
+        .collect()
+}
+
+fn trace_lines(snapshot: &DebugSnapshot) -> Vec<DebugLine> {
+    let selected_index = selected_trace_index(&snapshot.trace);
+    let total = snapshot.trace.records.len();
+    let position = selected_index.map_or(0, |index| index + 1);
+    let mode = match snapshot.trace.mode {
+        TraceDisplayMode::Live => "LIVE",
+        TraceDisplayMode::Review => "REVIEW",
+        TraceDisplayMode::Armed => "ARMED",
+        TraceDisplayMode::Paused => "BREAK",
+    };
+    let mut lines = vec![DebugLine::new(
+        format!("SCRIPT TRACE {mode} {position:04X}/{total:04X}"),
+        ACCENT,
+    )];
+
+    let trigger = selected_index
+        .and_then(|index| snapshot.trace.records.get(index))
+        .map(|record| record.trigger)
+        .or(snapshot.script.trigger);
+    lines.push(DebugLine::new(script_trigger(trigger), TEXT));
+
+    let (status, status_color) = match snapshot.trace.mode {
+        TraceDisplayMode::Paused => {
+            let next = snapshot
+                .script
+                .next_instruction
+                .map_or("-".to_owned(), |instruction| {
+                    format!("@{:04X}", instruction.entry)
+                });
+            (format!("SCRIPT ACTIVE PAUSED BEFORE {next}"), PAUSED)
+        }
+        TraceDisplayMode::Armed => (
+            if snapshot.script.active {
+                "BREAK ARMED NEXT STEP"
+            } else {
+                "BREAK ARMED NEXT TRIGGER"
+            }
+            .to_owned(),
+            WARN,
+        ),
+        TraceDisplayMode::Review => (
+            format!(
+                "{} GAME RUN +{:04X}",
+                script_status(snapshot.script),
+                snapshot.trace.new_record_count
+            ),
+            WARN,
+        ),
+        TraceDisplayMode::Live => (
+            format!("{} FOLLOW LATEST", script_status(snapshot.script)),
+            TEXT,
+        ),
+    };
+    lines.push(DebugLine::new(status, status_color));
+    lines.push(DebugLine::new("--------------------------------", MUTED));
+
+    if snapshot.trace.records.is_empty() {
+        lines.push(DebugLine::new("NO TRACE FOR CURRENT RUN", MUTED));
+    } else {
+        let selected_index = selected_index.unwrap_or(total - 1);
+        let max_start = total.saturating_sub(TRACE_VISIBLE_ROWS);
+        let start = selected_index
+            .saturating_sub(TRACE_VISIBLE_ROWS - 2)
+            .min(max_start);
+        for (index, record) in snapshot
+            .trace
+            .records
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(TRACE_VISIBLE_ROWS)
+        {
+            lines.push(DebugLine::new(
+                trace_record_line(record, index == selected_index),
+                if index == selected_index {
+                    ACCENT
+                } else {
+                    TEXT
+                },
+            ));
+        }
+    }
+
+    lines.push(DebugLine::new("--------------------------------", MUTED));
+    if let Some(record) = selected_index.and_then(|index| snapshot.trace.records.get(index)) {
+        lines.extend(trace_detail_lines(record));
+    } else if let Some(next) = snapshot.script.next_instruction {
+        lines.push(DebugLine::new(
+            format!(
+                "NEXT @{:04X} {:04X} {}",
+                next.entry,
+                next.opcode,
+                compact_mnemonic(next, 20)
+            ),
+            TEXT,
+        ));
+        lines.push(DebugLine::new(
+            format!(
+                "ARGS {:04X}/{:04X}/{:04X}",
+                next.operands[0], next.operands[1], next.operands[2]
+            ),
+            TEXT,
+        ));
+    }
+
+    let help = if snapshot.trace.mode == TraceDisplayMode::Paused {
+        "F10 STEP SHIFT-F10 RUN PGUP OLD TAB"
+    } else {
+        "PGUP OLD PGDN NEW END LIVE F10 BREAK TAB"
+    };
+    lines.push(DebugLine::new(help, MUTED));
     lines
+}
+
+fn selected_trace_index(trace: &DebugTraceSnapshot) -> Option<usize> {
+    trace
+        .selected_sequence
+        .and_then(|selected| {
+            trace
+                .records
+                .iter()
+                .position(|record| record.sequence == selected)
+        })
+        .or_else(|| trace.records.len().checked_sub(1))
+}
+
+fn trace_record_line(record: &ScriptTraceRecord, selected: bool) -> String {
+    format!(
+        "{}{:04X} D{:02X} @{:04X} {:04X} {}",
+        if selected { ">" } else { " " },
+        record.sequence,
+        record.call_depth_before,
+        record.instruction.entry,
+        record.instruction.opcode,
+        compact_mnemonic(record.instruction, 15)
+    )
+}
+
+fn trace_detail_lines(record: &ScriptTraceRecord) -> [DebugLine; 3] {
+    let instruction = record.instruction;
+    let target = record
+        .next_entry
+        .map_or("-".to_owned(), |entry| format!("@{entry:04X}"));
+    let outcome = match record.outcome {
+        ScriptTraceOutcome::Continue => format!(
+            "NEXT {target} CALL {:02X}>{:02X}",
+            record.call_depth_before, record.call_depth_after
+        ),
+        ScriptTraceOutcome::Yield(event) => format!("NEXT {target} YIELD {}", event.name()),
+        ScriptTraceOutcome::Completed {
+            next_entry,
+            succeeded,
+        } => format!(
+            "END STORE @{next_entry:04X} OK {}",
+            if succeeded { "Y" } else { "N" }
+        ),
+        ScriptTraceOutcome::Error => "RESULT ERROR".to_owned(),
+    };
+    [
+        DebugLine::new(
+            format!(
+                "@{:04X} {:04X} {}",
+                instruction.entry,
+                instruction.opcode,
+                compact_mnemonic(instruction, 22)
+            ),
+            TEXT,
+        ),
+        DebugLine::new(
+            format!(
+                "ARGS {:04X}/{:04X}/{:04X}",
+                instruction.operands[0], instruction.operands[1], instruction.operands[2]
+            ),
+            TEXT,
+        ),
+        DebugLine::new(outcome, TEXT),
+    ]
+}
+
+fn compact_mnemonic(instruction: ScriptInstructionDebug, max_chars: usize) -> String {
+    instruction
+        .decoded_opcode()
+        .map_or("UNKNOWN".to_owned(), |opcode| {
+            opcode
+                .name()
+                .chars()
+                .take(max_chars)
+                .collect::<String>()
+                .to_ascii_uppercase()
+        })
+}
+
+fn signed_hex_i32(value: i32) -> String {
+    if value < 0 {
+        format!("-{:04X}", value.unsigned_abs())
+    } else {
+        format!("{value:04X}")
+    }
+}
+
+fn signed_hex_i16(value: i16) -> String {
+    if value < 0 {
+        format!("-{:04X}", value.unsigned_abs())
+    } else {
+        format!("{value:04X}")
+    }
 }
 
 fn direction_name(direction: u16) -> &'static str {
@@ -439,7 +713,7 @@ fn script_trigger(trigger: Option<TriggerRequest>) -> String {
         TriggerKind::Battle => "BATTLE",
     };
     format!(
-        "ROOT {kind} {} @{}",
+        "ROOT {kind} {} @{:04X}",
         owner_name(trigger.object_id),
         trigger.script_entry
     )
@@ -458,7 +732,7 @@ fn owner_name(object_id: u16) -> String {
     if object_id == 0xffff {
         "SYSTEM".to_owned()
     } else {
-        format!("#{}", object_id)
+        format!("#{object_id:04X}")
     }
 }
 
@@ -470,7 +744,7 @@ fn instruction_line(label: &str, instruction: Option<ScriptInstructionDebug>) ->
                 .decoded_opcode()
                 .map_or("Unknown", ScriptOpcode::name);
             format!(
-                "{label} @{} {:04X} {mnemonic} {:04X}/{:04X}/{:04X}",
+                "{label} @{:04X} {:04X} {mnemonic} {:04X}/{:04X}/{:04X}",
                 instruction.entry,
                 instruction.opcode,
                 instruction.operands[0],
@@ -583,6 +857,11 @@ pub(crate) fn glyph(character: char) -> [u8; 7] {
         '9' => [14, 17, 17, 15, 1, 1, 14],
         '#' => [10, 31, 10, 10, 31, 10, 0],
         '-' => [0, 0, 0, 31, 0, 0, 0],
+        '>' => [16, 8, 4, 2, 4, 8, 16],
+        '<' => [1, 2, 4, 8, 4, 2, 1],
+        '/' => [1, 2, 2, 4, 8, 8, 16],
+        '+' => [0, 4, 4, 31, 4, 4, 0],
+        '=' => [0, 31, 0, 31, 0, 0, 0],
         ',' => [0, 0, 0, 0, 0, 4, 8],
         '.' => [0, 0, 0, 0, 0, 12, 12],
         '@' => [14, 17, 23, 21, 23, 16, 14],
@@ -637,6 +916,13 @@ mod tests {
                 call_depth: 0,
                 wait_frames: 0,
             },
+            script_page: ScriptDebugPage::Inspector,
+            trace: DebugTraceSnapshot {
+                mode: TraceDisplayMode::Live,
+                records: Vec::new(),
+                selected_sequence: None,
+                new_record_count: 0,
+            },
         }
     }
 
@@ -651,7 +937,7 @@ mod tests {
     fn panel_rasterization_uses_background_border_and_text() {
         let (width, height) = panel_extent(1.0);
         let mut pixels = vec![0; width as usize * height as usize * 4];
-        rasterize_panel(&mut pixels, width, height, snapshot(1.0));
+        rasterize_panel(&mut pixels, width, height, &snapshot(1.0));
 
         assert_eq!(&pixels[..4], &BORDER);
         assert!(pixels.chunks_exact(4).any(|pixel| pixel == BACKGROUND));
@@ -661,16 +947,88 @@ mod tests {
 
     #[test]
     fn snapshot_lines_fit_inside_the_logical_panel() {
-        let lines = snapshot_lines(snapshot(1.0));
+        let snapshot = snapshot(1.0);
+        let lines = snapshot_lines(&snapshot);
         let text_width = |line: &str| line.chars().count() as u32 * 6 * TEXT_LOGICAL_SCALE;
         let text_height = 7 * TEXT_LOGICAL_SCALE;
 
         assert!(lines
             .iter()
-            .all(|line| TEXT_LOGICAL_X + text_width(line) < PANEL_LOGICAL_WIDTH));
+            .all(|line| TEXT_LOGICAL_X + text_width(&line.text) < PANEL_LOGICAL_WIDTH));
         assert!(
             TEXT_LOGICAL_Y + (lines.len() as u32 - 1) * LINE_LOGICAL_HEIGHT + text_height
                 < PANEL_LOGICAL_HEIGHT
         );
+    }
+
+    #[test]
+    fn inspector_formats_numeric_fields_as_uppercase_hex() {
+        let mut snapshot = snapshot(1.0);
+        snapshot.script.trigger = Some(TriggerRequest {
+            object_id: 0x0060,
+            script_entry: 0x16ac,
+            kind: TriggerKind::Touch,
+        });
+        snapshot.script.last_instruction = Some(ScriptInstructionDebug {
+            object_id: 0x0060,
+            entry: 0x16ac,
+            opcode: ScriptOpcode::SetObjectState.raw(),
+            operands: [0x0060, 0, 1],
+        });
+
+        let text = snapshot_lines(&snapshot)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+        assert_eq!(text[0], "SCENE 0003 OBJ 000C");
+        assert_eq!(text[1], "PLAYER 0140,00C8 CAM 00A0,0064");
+        assert!(text.contains(&"ROOT TOUCH #0060 @16AC".to_owned()));
+        assert!(text
+            .iter()
+            .any(|line| line.starts_with("LAST @16AC 0049 SetObjectState")));
+    }
+
+    #[test]
+    fn trace_formats_entries_sequences_and_operands_as_hex() {
+        let mut snapshot = snapshot(1.0);
+        let trigger = TriggerRequest {
+            object_id: 0x0060,
+            script_entry: 0x16ac,
+            kind: TriggerKind::Touch,
+        };
+        snapshot.script_page = ScriptDebugPage::Trace;
+        snapshot.script.trigger = Some(trigger);
+        snapshot.trace = DebugTraceSnapshot {
+            mode: TraceDisplayMode::Review,
+            records: vec![ScriptTraceRecord {
+                sequence: 0x0012,
+                run: 1,
+                trigger,
+                instruction: ScriptInstructionDebug {
+                    object_id: 0x0060,
+                    entry: 0x16ac,
+                    opcode: ScriptOpcode::SetObjectState.raw(),
+                    operands: [0x0060, 0, 1],
+                },
+                next_entry: Some(0x16ad),
+                call_depth_before: 0,
+                call_depth_after: 0,
+                outcome: ScriptTraceOutcome::Yield(pal_core::script::ScriptTraceEvent::Action),
+            }],
+            selected_sequence: Some(0x0012),
+            new_record_count: 0x000a,
+        };
+
+        let text = snapshot_lines(&snapshot)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+        assert_eq!(text[0], "SCRIPT TRACE REVIEW 0001/0001");
+        assert!(text.contains(&"SCRIPT COMPLETE GAME RUN +000A".to_owned()));
+        assert!(text
+            .iter()
+            .any(|line| line == ">0012 D00 @16AC 0049 SETOBJECTSTATE"));
+        assert!(text.contains(&"ARGS 0060/0000/0001".to_owned()));
+        assert!(text.contains(&"NEXT @16AD YIELD ACTION".to_owned()));
     }
 }

@@ -155,20 +155,72 @@ pub(super) fn format_reference(source: ScriptReferenceSource) -> String {
         ScriptReferenceSource::SceneEnter { scene } => format!("SCENE {scene} ENTER"),
         ScriptReferenceSource::SceneTeleport { scene } => format!("SCENE {scene} TELEPORT"),
         ScriptReferenceSource::ObjectTrigger { scene, object_id } => {
-            format!("SCENE {scene} OBJECT #{object_id} TRIGGER")
+            format!(
+                "SCENE {scene} OBJECT {} TRIGGER",
+                format_object_id(object_id)
+            )
         }
         ScriptReferenceSource::ObjectAuto { scene, object_id } => {
-            format!("SCENE {scene} OBJECT #{object_id} AUTO")
+            format!("SCENE {scene} OBJECT {} AUTO", format_object_id(object_id))
         }
-        ScriptReferenceSource::Instruction { entry, kind } => format!(
-            "{} FROM @{:04X}",
-            match kind {
-                ScriptInstructionReferenceKind::Jump => "JUMP",
-                ScriptInstructionReferenceKind::Call => "CALL",
-            },
-            entry
-        ),
+        ScriptReferenceSource::Instruction { entry, kind } => {
+            format!("{} FROM @{entry:04X}", format_instruction_kind(kind))
+        }
     }
+}
+
+pub(super) fn format_instruction_kind(kind: ScriptInstructionReferenceKind) -> String {
+    use ScriptInstructionReferenceKind::*;
+
+    match kind {
+        Next => "NEXT".to_owned(),
+        Jump => "JUMP".to_owned(),
+        Branch => "BRANCH".to_owned(),
+        Call => "CALL".to_owned(),
+        CallReturn => "CALL RETURN".to_owned(),
+        RandomChoice { choice } => format!("RANDOM CHOICE {choice}"),
+        BattleWon => "ON BATTLE WON".to_owned(),
+        BattleLost => "ON BATTLE LOST".to_owned(),
+        BattleFled => "ON BATTLE FLED".to_owned(),
+        Failure => "ON FAILURE".to_owned(),
+        PersistNext => "PERSIST NEXT ENTRY".to_owned(),
+        ReplaceCurrent => "REPLACE CURRENT ENTRY".to_owned(),
+        SetObjectAuto { object_id } => {
+            format!("SET {} AUTO", format_object_selector(object_id))
+        }
+        SetObjectTrigger { object_id } => {
+            format!("SET {} TRIGGER", format_object_selector(object_id))
+        }
+        SetSceneEnter { scene } => format!("SET SCENE {scene} ENTER"),
+        SetSceneTeleport { scene } => format!("SET SCENE {scene} TELEPORT"),
+        SetGlobalObjectScript { object_id, field } => {
+            format!(
+                "SET GLOBAL OBJECT {} SCRIPT FIELD {field}",
+                format_object_id(object_id)
+            )
+        }
+    }
+}
+
+pub(super) const fn show_instruction_target(kind: ScriptInstructionReferenceKind) -> bool {
+    !matches!(
+        kind,
+        ScriptInstructionReferenceKind::Next
+            | ScriptInstructionReferenceKind::CallReturn
+            | ScriptInstructionReferenceKind::BattleWon
+    )
+}
+
+fn format_object_selector(object_id: u16) -> String {
+    if object_id == u16::MAX {
+        "CURRENT OBJECT".to_owned()
+    } else {
+        format!("OBJECT {}", format_object_id(object_id))
+    }
+}
+
+pub(super) fn format_object_id(object_id: u16) -> String {
+    format!("#{object_id:04X}")
 }
 
 #[cfg(test)]
@@ -217,5 +269,30 @@ mod tests {
             ..selected
         };
         assert_eq!(scene_object_references(range, None), vec![8, 10]);
+    }
+
+    #[test]
+    fn formats_control_flow_and_entry_write_references_distinctly() {
+        assert_eq!(
+            format_reference(ScriptReferenceSource::Instruction {
+                entry: 0x1200,
+                kind: ScriptInstructionReferenceKind::Next,
+            }),
+            "NEXT FROM @1200"
+        );
+        assert_eq!(
+            format_reference(ScriptReferenceSource::Instruction {
+                entry: 0x1db3,
+                kind: ScriptInstructionReferenceKind::SetSceneEnter { scene: 4 },
+            }),
+            "SET SCENE 4 ENTER FROM @1DB3"
+        );
+        assert_eq!(
+            format_instruction_kind(ScriptInstructionReferenceKind::SetObjectAuto {
+                object_id: u16::MAX,
+            }),
+            "SET CURRENT OBJECT AUTO"
+        );
+        assert_eq!(format_object_id(421), "#01A5");
     }
 }

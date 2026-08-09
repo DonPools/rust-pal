@@ -127,7 +127,13 @@ pub(super) fn render_object_overlay(
         draw_line(renderer, x - radius, y, x + radius, y, color);
         draw_line(renderer, x, y - radius, x, y + radius, color);
         if focused {
-            draw_debug_text(renderer, x + 4, y - 9, &format!("#{}", object.id), color);
+            draw_debug_text(
+                renderer,
+                x + 4,
+                y - 9,
+                &format!("#{:04X}", object.id),
+                color,
+            );
         }
     }
 }

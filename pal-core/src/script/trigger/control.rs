@@ -2,7 +2,7 @@
 
 use pal_assets::script::ScriptEntry;
 
-use super::decode::{delay_80ms_ticks, selected_object};
+use super::decode::delay_80ms_ticks;
 use super::{Execution, InstructionFlow, ScriptRuntime};
 use crate::script::executor::ScriptCallFrame;
 use crate::script::{ScriptEvent, ScriptOpcode};
@@ -73,7 +73,12 @@ impl ScriptRuntime {
                     wait_updates_party_gestures: execution.wait_updates_party_gestures,
                     viewport_frames_remaining: execution.viewport_frames_remaining,
                 });
-                execution.object_id = selected_object(entry.operands[1], execution.object_id);
+                let requested_object = if entry.operands[1] == 0 {
+                    execution.object_id
+                } else {
+                    entry.operands[1]
+                };
+                execution.object_id = self.resolve_trigger_object(requested_object);
                 execution.entry = entry.operands[0];
             }
             AdvanceEntry => {

@@ -186,11 +186,18 @@ impl<M: CollisionMap> GameState<M> {
 
     pub(super) fn follow_player(&mut self) {
         if self.viewport_locked {
+            self.camera.x = self.player.world_x - self.party_screen_position.0;
+            self.camera.y = self.player.world_y - self.party_screen_position.1;
             return;
         }
-        self.camera.follow(
+        self.camera.follow_at(
             (self.player.world_x, self.player.world_y),
+            DEFAULT_PARTY_SCREEN_POSITION,
             self.map.world_size(),
+        );
+        self.party_screen_position = (
+            self.player.world_x - self.camera.x,
+            self.player.world_y - self.camera.y,
         );
     }
 }

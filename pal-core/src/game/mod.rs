@@ -41,6 +41,11 @@ pub const EXPLORATION_FRAME_MS: u64 = 100;
 /// Original battle update interval (25 FPS).
 pub const BATTLE_FRAME_MS: u64 = 40;
 
+// Classic keeps the party leader at this screen-space anchor during normal
+// exploration. Scripted viewport movement changes the anchor until opcode
+// 0x007F restores it.
+const DEFAULT_PARTY_SCREEN_POSITION: (i32, i32) = (160, 112);
+
 /// Per-player changes produced by Classic's victory settlement sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BattlePlayerSettlement {
@@ -130,6 +135,7 @@ pub struct GameState<M = Map> {
     chase_range: u16,
     chase_speed_change_cycles: u16,
     viewport_locked: bool,
+    party_screen_position: (i32, i32),
     party_followers: Vec<Role>,
     extra_follower_ids: Vec<u16>,
     party_slots: [PartySlotState; MAX_PARTY_MEMBERS],
@@ -239,6 +245,7 @@ impl<M: CollisionMap> GameState<M> {
             chase_range: 1,
             chase_speed_change_cycles: 0,
             viewport_locked: false,
+            party_screen_position: DEFAULT_PARTY_SCREEN_POSITION,
             party_followers: Vec::new(),
             extra_follower_ids: Vec::new(),
             party_slots: std::array::from_fn(|index| {
@@ -1185,6 +1192,7 @@ impl<M: CollisionMap> GameState<M> {
             .collect();
         self.pending_trigger = None;
         self.viewport_locked = false;
+        self.party_screen_position = DEFAULT_PARTY_SCREEN_POSITION;
         self.follow_player();
     }
 
@@ -1840,6 +1848,10 @@ impl<M: CollisionMap> GameState<M> {
         self.viewport_locked = snapshot.viewport_locked;
         self.camera.x = snapshot.camera_x;
         self.camera.y = snapshot.camera_y;
+        self.party_screen_position = (
+            self.player.world_x - self.camera.x,
+            self.player.world_y - self.camera.y,
+        );
         self.party_followers = snapshot.party_followers;
         self.extra_follower_ids = snapshot.extra_follower_ids;
         self.party_slots = snapshot.party_slots;
@@ -2085,6 +2097,10 @@ impl<M: CollisionMap> GameState<M> {
         self.save_layer = save_layer;
         self.camera.x = i32::from(save.viewport_x);
         self.camera.y = i32::from(save.viewport_y);
+        self.party_screen_position = (
+            self.player.world_x - self.camera.x,
+            self.player.world_y - self.camera.y,
+        );
         self.rebuild_party_followers();
         true
     }

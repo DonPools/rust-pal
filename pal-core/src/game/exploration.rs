@@ -54,9 +54,23 @@ impl Camera {
     }
 
     pub fn follow(&mut self, target: (i32, i32), world_size: (i32, i32)) {
+        self.follow_at(
+            target,
+            (self.width as i32 / 2, self.height as i32 / 2),
+            world_size,
+        );
+    }
+
+    /// Follow a world-space target at a requested screen-space position.
+    pub fn follow_at(
+        &mut self,
+        target: (i32, i32),
+        screen_position: (i32, i32),
+        world_size: (i32, i32),
+    ) {
         let max_x = (world_size.0 - self.width as i32).max(0);
         let max_y = (world_size.1 - self.height as i32).max(0);
-        self.x = (target.0 - self.width as i32 / 2).clamp(0, max_x);
-        self.y = (target.1 - self.height as i32 / 2).clamp(0, max_y);
+        self.x = (target.0 - screen_position.0).clamp(0, max_x);
+        self.y = (target.1 - screen_position.1).clamp(0, max_y);
     }
 }

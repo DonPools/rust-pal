@@ -15,6 +15,7 @@ use crate::renderer::Renderer;
 #[derive(Debug, Clone)]
 pub(super) struct ActiveDialog {
     pub(super) message_ids: Vec<u16>,
+    pub(super) inline_lines: Option<Vec<Vec<u8>>>,
     pub(super) position: DialogPosition,
     pub(super) font_color: u8,
     pub(super) face_index: Option<u16>,
@@ -51,6 +52,7 @@ impl ActiveDialog {
         let center_window = position == DialogPosition::CenterWindow;
         Self {
             message_ids: vec![message_id],
+            inline_lines: None,
             position,
             font_color,
             face_index,
@@ -62,6 +64,30 @@ impl ActiveDialog {
             revealed_glyphs: 0,
             reveal_credit_ms: 0,
             initial_delay_ms,
+            terminal_wait_ms: None,
+            wait_icon: 0,
+            wait_palette_ticks: 0,
+        }
+    }
+
+    /// Create Classic's centered, single-line transient dialog for text that is
+    /// assembled at runtime rather than stored in `M.MSG`.
+    pub(super) fn center_window_text(text: Vec<u8>) -> Self {
+        Self {
+            message_ids: Vec::new(),
+            inline_lines: Some(vec![text]),
+            position: DialogPosition::CenterWindow,
+            font_color: 0x4f,
+            face_index: None,
+            playing_rng: false,
+            page: 0,
+            awaiting_input: false,
+            wait_after_reveal: true,
+            // Classic's center-window dialog waits at most 1.4 seconds.
+            auto_wait_ticks: Some(28),
+            revealed_glyphs: 0,
+            reveal_credit_ms: 0,
+            initial_delay_ms: 0,
             terminal_wait_ms: None,
             wait_icon: 0,
             wait_palette_ticks: 0,
@@ -104,7 +130,7 @@ pub(super) fn advance_dialog_playback(
         icon = 0;
         let mut index = 0;
         while index < line.len() {
-            let token = dialog_token(line, index);
+            let token = dialog_token(line.as_ref(), index);
             match token.kind {
                 DialogTokenKind::Glyph => {
                     if glyph_index >= dialog.revealed_glyphs && glyph_index < target {
@@ -217,7 +243,7 @@ pub(super) fn render_dialog(
         .iter()
         .skip(dialog.page * 4)
         .take(4)
-        .copied()
+        .map(|line| line.as_ref())
         .collect::<Vec<_>>();
     if dialog.position == DialogPosition::CenterWindow {
         render_center_dialog_window(renderer, font, ui_sprites, dialog, &visible);

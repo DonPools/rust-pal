@@ -1,5 +1,6 @@
 //! GameState integration and regression tests.
 
+use crate::map::{MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 use crate::script::{ScriptAction, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
 
 use std::collections::HashSet;
@@ -1006,7 +1007,7 @@ fn collect_transmute_steal_hide_and_auto_battle_update_game_state() {
         Some(Stores::parse(&(10u16..=18).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap());
     state.battle_mut().unwrap().enemies[0].collect_value = 9;
     state.battle_mut().unwrap().enemies[0].steal_item = 12;
-    state.battle_mut().unwrap().enemies[0].steal_item_count = 1;
+    state.battle_mut().unwrap().enemies[0].steal_item_count = 2;
 
     assert!(state.apply_script_action(ScriptAction::CollectEnemy {
         enemy_index: 0,
@@ -1018,11 +1019,12 @@ fn collect_transmute_steal_hide_and_auto_battle_update_game_state() {
     assert_eq!(state.inventory().filter(|(item, _)| *item >= 10).count(), 1);
 
     let stolen_before = state.inventory_count(12);
+    assert_eq!(state.steal_enemy(0, 0), Some(BattleSteal::Item(12)));
     assert!(state.apply_script_action(ScriptAction::StealEnemy {
         enemy_index: 0,
         rate: 0,
     }));
-    assert_eq!(state.inventory_count(12), stolen_before + 1);
+    assert_eq!(state.inventory_count(12), stolen_before + 2);
     assert!(state.apply_script_action(ScriptAction::HideBattleActor { rounds: 2 }));
     assert_eq!(state.battle().unwrap().hiding_time(), 2);
 
@@ -1046,7 +1048,7 @@ fn walking_updates_position_animation_and_camera() {
     }));
     assert_eq!((state.player.world_x, state.player.world_y), (336, 248));
     assert_eq!(state.player.anim_frame, 1);
-    assert_eq!((state.camera.x, state.camera.y), (176, 148));
+    assert_eq!((state.camera.x, state.camera.y), (176, 136));
 }
 
 #[test]
@@ -1178,7 +1180,7 @@ fn script_actions_mutate_world_state_and_follow_player() {
         layer: 0,
     }));
     assert_eq!((state.player.world_x, state.player.world_y), (352, 256));
-    assert_eq!((state.camera.x, state.camera.y), (192, 156));
+    assert_eq!((state.camera.x, state.camera.y), (192, 144));
     assert!(!state.apply_script_action(ScriptAction::SetObjectState {
         object_id: 99,
         state: 0,
@@ -1975,7 +1977,7 @@ fn snapshot_restores_global_and_scene_state() {
     assert_eq!(state.player.world_x, 500);
     assert_eq!(state.scene_objects[0].state, -1);
     assert_eq!(state.item_count(8), 2);
-    assert_eq!((state.camera.x, state.camera.y), (340, 140));
+    assert_eq!((state.camera.x, state.camera.y), (340, 128));
 }
 
 #[test]
@@ -2251,7 +2253,7 @@ fn party_walk_moves_over_multiple_ticks_and_updates_camera() {
     assert_eq!(state.walk_player_to(12, 16, 0, 2), Some(false));
     assert_eq!((state.player.world_x, state.player.world_y), (324, 242));
     assert_eq!(state.player.direction, Direction::East);
-    assert_eq!((state.camera.x, state.camera.y), (164, 142));
+    assert_eq!((state.camera.x, state.camera.y), (164, 130));
 
     while state.walk_player_to(12, 16, 0, 2) == Some(false) {}
     assert_eq!((state.player.world_x, state.player.world_y), (384, 256));
@@ -2324,7 +2326,7 @@ fn party_ride_moves_actors_without_advancing_animation() {
 }
 
 #[test]
-fn scripted_viewport_stays_locked_until_restored() {
+fn scripted_viewport_preserves_the_shifted_party_anchor_until_restored() {
     let mut state = state(&[]);
     assert!(state.apply_script_action(ScriptAction::MoveViewport {
         x: 2,
@@ -2332,20 +2334,124 @@ fn scripted_viewport_stays_locked_until_restored() {
         frames: 1,
     }));
     let scripted_camera = (state.camera.x, state.camera.y);
-    assert_eq!(scripted_camera, (162, 143));
+    assert_eq!(scripted_camera, (162, 131));
     assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
         dx: 32,
         dy: 16,
         layer: 0,
     }));
-    assert_eq!((state.camera.x, state.camera.y), scripted_camera);
+    assert_eq!((state.camera.x, state.camera.y), (194, 147));
+    assert_eq!(
+        (
+            state.player.world_x - state.camera.x,
+            state.player.world_y - state.camera.y,
+        ),
+        (158, 109)
+    );
 
     assert!(state.apply_script_action(ScriptAction::MoveViewport {
         x: 0,
         y: 0,
         frames: 1,
     }));
-    assert_eq!((state.camera.x, state.camera.y), (192, 156));
+    assert_eq!((state.camera.x, state.camera.y), (192, 144));
+}
+
+#[test]
+fn scene_32_post_battle_walk_preserves_the_scripted_party_anchor() {
+    let mut state = state(&[]);
+
+    // Scene 32 trigger 12111 moves the viewport with these four instructions
+    // before pairing party offsets with shorter viewport adjustments.
+    for (x, y, frames) in [(-2, -1, 72), (8, 4, 16), (-8, -4, 12), (16, 8, 4)] {
+        for _ in 0..frames {
+            assert!(state.apply_script_action(ScriptAction::MoveViewport { x, y, frames }));
+        }
+    }
+    for (dx, dy, viewport) in [
+        (-8, -4, true),
+        (-8, -4, true),
+        (-8, -8, true),
+        (-8, -8, true),
+        (-8, -8, false),
+        (-8, -8, false),
+        (-8, -4, false),
+        (-8, -4, false),
+        (-8, -4, false),
+        (-8, -4, false),
+    ] {
+        assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx, dy, layer: 0 }));
+        if viewport {
+            assert!(state.apply_script_action(ScriptAction::MoveViewport {
+                x: 8,
+                y: 4,
+                frames: 1,
+            }));
+        }
+    }
+
+    // The post-battle opcode at entry 12493 walks to tile (33, 42, 0).
+    while state.walk_player_to(33, 42, 0, 2) == Some(false) {}
+
+    assert_eq!((state.player.world_x, state.player.world_y), (1056, 672));
+    assert_eq!((state.camera.x, state.camera.y), (880, 552));
+    assert_eq!(
+        (
+            state.player.world_x - state.camera.x,
+            state.player.world_y - state.camera.y,
+        ),
+        (176, 120)
+    );
+}
+
+#[test]
+fn scene_174_ride_then_walk_keeps_camera_steps_continuous() {
+    let mut carrier = blocking_object(928, 752);
+    carrier.id = 7;
+    let mut state = GameState::new(
+        TestMap {
+            blocked: HashSet::new(),
+            size: (MAP_PIXEL_WIDTH, MAP_PIXEL_HEIGHT),
+        },
+        Role {
+            sprite_index: 0,
+            world_x: 928,
+            world_y: 752,
+            direction: Direction::South,
+            anim_frame: 0,
+            frames_per_direction: 4,
+        },
+        320,
+        200,
+    )
+    .with_scene_objects(vec![carrier]);
+
+    let assert_camera_step = |state: &GameState<TestMap>, previous: &mut (i32, i32)| {
+        let current = (state.camera.x, state.camera.y);
+        assert!(current.0.abs_diff(previous.0) <= 8);
+        assert!(current.1.abs_diff(previous.1) <= 4);
+        assert_eq!(
+            (
+                state.player.world_x - state.camera.x,
+                state.player.world_y - state.camera.y,
+            ),
+            DEFAULT_PARTY_SCREEN_POSITION
+        );
+        *previous = current;
+    };
+    let mut previous = (state.camera.x, state.camera.y);
+
+    while state.ride_object_to(7, 26, 93, 1, 4) == Some(false) {
+        assert_camera_step(&state, &mut previous);
+    }
+    assert_camera_step(&state, &mut previous);
+    while state.walk_player_to(26, 93, 0, 4) == Some(false) {
+        assert_camera_step(&state, &mut previous);
+    }
+    assert_camera_step(&state, &mut previous);
+
+    assert_eq!((state.player.world_x, state.player.world_y), (832, 1488));
+    assert_eq!((state.camera.x, state.camera.y), (672, 1376));
 }
 
 #[test]

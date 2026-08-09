@@ -1,4 +1,5 @@
 use pal_assets::text::TextLibrary;
+use pal_core::battle::BattleSteal;
 use pal_core::game::{AutoScriptError, GameState};
 use pal_core::role::RoleSprites;
 use pal_core::scene::{TriggerKind, TriggerRequest};
@@ -614,6 +615,18 @@ fn advance_script_with_budget<L>(
             let events = game.advance_battle_resolution();
             queue_battle_events(game, services, events);
         }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::StealEnemy {
+            enemy_index,
+            rate,
+        })) => {
+            let Some(stolen) = game.steal_enemy(enemy_index, rate) else {
+                set_title("Rust-PAL [script target is unavailable]");
+                return;
+            };
+            if let Some(text) = steal_result_text(resources.text, stolen) {
+                *dialog = Some(ActiveDialog::center_window_text(text));
+            }
+        }
         Some(ScriptEvent::Action(
             action @ (pal_core::script::ScriptAction::SimulatePlayerMagic { .. }
             | pal_core::script::ScriptAction::ThrowWeapon { .. }),
@@ -805,6 +818,36 @@ fn advance_script_with_budget<L>(
             set_title(&format!("Rust-PAL [script loop at {entry}]"));
         }
         None => {}
+    }
+}
+
+/// Build the same centered theft result used by Classic's `PAL_BattleStealFromEnemy`.
+fn steal_result_text(text: &TextLibrary, stolen: BattleSteal) -> Option<Vec<u8>> {
+    let obtained = text.word(34)?;
+    match stolen {
+        BattleSteal::Nothing => None,
+        BattleSteal::Cash(amount) if amount != 0 => {
+            let cash_unit = text.word(10)?;
+            let mut message = Vec::new();
+            message.push(b'@');
+            message.extend_from_slice(obtained);
+            message.extend_from_slice(b" @");
+            message.extend_from_slice(amount.to_string().as_bytes());
+            message.extend_from_slice(b" @");
+            message.extend_from_slice(cash_unit);
+            message.push(b'@');
+            Some(message)
+        }
+        BattleSteal::Item(item_id) => {
+            let item = text.word(usize::from(item_id))?;
+            let mut message = Vec::with_capacity(obtained.len() + item.len() + 2);
+            message.extend_from_slice(obtained);
+            message.push(b'@');
+            message.extend_from_slice(item);
+            message.push(b'@');
+            Some(message)
+        }
+        BattleSteal::Cash(_) => None,
     }
 }
 
@@ -1101,6 +1144,14 @@ mod tests {
         TextLibrary::parse(&word_data, &message_data, &message_index).unwrap()
     }
 
+    fn theft_text_library() -> TextLibrary {
+        let mut words = vec![b' '; 35 * 10];
+        for (index, value) in [(10, b"coin".as_slice()), (12, b"item"), (34, b"got")] {
+            words[index * 10..index * 10 + value.len()].copy_from_slice(value);
+        }
+        TextLibrary::parse(&words, b"x", &[0, 0, 0, 0, 1, 0, 0, 0]).unwrap()
+    }
+
     #[test]
     fn non_message_events_wait_for_body_confirmation_but_not_title_only_dialogs() {
         let text = text_library(&[b"Name:", b"body"]);
@@ -1131,6 +1182,27 @@ mod tests {
                 playing_rng: false,
             }
         ));
+    }
+
+    #[test]
+    fn successful_theft_uses_the_classic_center_window_text_and_timeout() {
+        let text = theft_text_library();
+        assert_eq!(
+            steal_result_text(&text, BattleSteal::Item(12)),
+            Some(b"got@item@".to_vec())
+        );
+        assert_eq!(
+            steal_result_text(&text, BattleSteal::Cash(7)),
+            Some(b"@got @7 @coin@".to_vec())
+        );
+        assert_eq!(steal_result_text(&text, BattleSteal::Nothing), None);
+
+        let dialog = ActiveDialog::center_window_text(b"got@item@".to_vec());
+        assert_eq!(dialog.auto_wait_ticks, Some(28));
+        assert_eq!(
+            dialog_body_lines(&text, &dialog)[0].as_ref(),
+            b"got@item@".as_slice()
+        );
     }
 
     #[test]

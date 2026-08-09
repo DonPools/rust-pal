@@ -116,6 +116,7 @@ pub fn run_game_window<L>(
                         });
                     }
                 }
+                WindowEvent::ModifiersChanged(modifiers) => app.set_modifiers(modifiers.state()),
                 WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                     if let Err(error) = pixels.resize_surface(size.width, size.height) {
                         eprintln!("surface resize failed: {error}");

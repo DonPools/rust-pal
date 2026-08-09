@@ -11,7 +11,8 @@ use encoding_rs::BIG5;
 use pal_assets::palette::Palette;
 use pal_assets::text::BitmapFont;
 use pal_core::script::{
-    inspect_script_record, ScriptControlFlow, ScriptOpcode, ScriptRecordInspection,
+    inspect_script_record, inspect_script_targets, ScriptControlFlow,
+    ScriptInstructionReferenceCategory, ScriptOpcode, ScriptRecordInspection,
     ScriptReferenceSource,
 };
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,9 @@ use super::super::dialog_text::{dialog_token, DialogTokenKind};
 use super::super::draw::{draw_debug_text, fill_rect, stroke_rect};
 use super::super::text_render::{draw_dialog_text, DialogTextMode, DialogTextStyle};
 use super::app::{script_object_ids, SceneEditorApp, SelectedScript};
-use super::navigation::format_reference;
+use super::navigation::{
+    format_instruction_kind, format_object_id, format_reference, show_instruction_target,
+};
 use super::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::renderer::Renderer;
 
@@ -448,7 +451,7 @@ where
         ui.separator();
         ui.add(
             egui::TextEdit::singleline(self.object_filter)
-                .hint_text("Filter object ID or entry…")
+                .hint_text("Filter object ID (hex/decimal) or entry…")
                 .desired_width(f32::INFINITY),
         );
         let filter = self.object_filter.trim().to_ascii_lowercase();
@@ -466,18 +469,30 @@ where
                     continue;
                 };
                 let label = format!(
-                    "#{:<4} T@{:04X}  A@{:04X}  S{}",
-                    object.id, object.trigger_script, object.auto_script, object.state
+                    "{} T@{:04X}  A@{:04X}  S{}",
+                    format_object_id(object.id),
+                    object.trigger_script,
+                    object.auto_script,
+                    object.state
                 );
-                if !filter.is_empty() && !label.to_ascii_lowercase().contains(&filter) {
+                let decimal_label = format!("#{}", object.id);
+                if !filter.is_empty()
+                    && !label.to_ascii_lowercase().contains(&filter)
+                    && !decimal_label.contains(&filter)
+                {
                     continue;
                 }
                 let color = object_color(object);
-                if ui
-                    .selectable_label(
-                        self.model.selected_object == Some(id),
-                        RichText::new(label).monospace().color(color),
-                    )
+                let response = ui.selectable_label(
+                    self.model.selected_object == Some(id),
+                    RichText::new(label).monospace().color(color),
+                );
+                if response
+                    .on_hover_text(format!(
+                        "Object {} = {} decimal",
+                        format_object_id(object.id),
+                        object.id
+                    ))
                     .clicked()
                 {
                     select = Some(id);
@@ -648,7 +663,7 @@ where
         ui.heading("Selection");
         if let Some(object) = self.model.selected_object().cloned() {
             ui.label(
-                RichText::new(format!("OBJECT #{}", object.id))
+                RichText::new(format!("OBJECT {}", format_object_id(object.id)))
                     .strong()
                     .color(ACCENT),
             );
@@ -793,7 +808,7 @@ where
                 let response = ui.add_enabled(
                     valid,
                     egui::Button::new(
-                        RichText::new(format!("Object #{object_id}"))
+                        RichText::new(format!("Object {}", format_object_id(object_id)))
                             .monospace()
                             .color(ACCENT),
                     )
@@ -801,9 +816,9 @@ where
                 );
                 if response
                     .on_hover_text(if valid {
-                        "Locate this event object"
+                        format!("Locate object {object_id} decimal")
                     } else {
-                        "This event object is not indexed in any scene"
+                        "This event object is not indexed in any scene".to_owned()
                     })
                     .clicked()
                 {
@@ -894,25 +909,65 @@ where
             .script_references
             .references_to(record.entry)
             .to_vec();
-        let mut follow = None;
         if references.is_empty() {
             ui.label(RichText::new("No indexed incoming references").color(MUTED));
         } else {
-            for source in references {
-                if ui
-                    .button(
-                        RichText::new(format_reference(source))
-                            .monospace()
-                            .color(reference_color(source)),
+            let owners = references
+                .iter()
+                .copied()
+                .filter(|source| !matches!(source, ScriptReferenceSource::Instruction { .. }))
+                .collect::<Vec<_>>();
+            let control_flow = references
+                .iter()
+                .copied()
+                .filter(|source| {
+                    matches!(
+                        source,
+                        ScriptReferenceSource::Instruction { kind, .. }
+                            if kind.category()
+                                == ScriptInstructionReferenceCategory::ControlFlow
                     )
-                    .clicked()
-                {
-                    follow = Some(source);
+                })
+                .collect::<Vec<_>>();
+            let entry_writes = references
+                .iter()
+                .copied()
+                .filter(|source| {
+                    matches!(
+                        source,
+                        ScriptReferenceSource::Instruction { kind, .. }
+                            if kind.category()
+                                == ScriptInstructionReferenceCategory::EntryWrite
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut follow = None;
+            for (label, sources) in [
+                ("Entry owners", owners.as_slice()),
+                ("Control flow", control_flow.as_slice()),
+                ("Entry writes", entry_writes.as_slice()),
+            ] {
+                if sources.is_empty() {
+                    continue;
                 }
+                ui.label(RichText::new(label).strong().color(MUTED));
+                for &source in sources {
+                    if ui
+                        .button(
+                            RichText::new(format_reference(source))
+                                .monospace()
+                                .color(reference_color(source)),
+                        )
+                        .clicked()
+                    {
+                        follow = Some(source);
+                    }
+                }
+                ui.add_space(4.0);
             }
-        }
-        if let Some(source) = follow {
-            self.model.follow_reference(source);
+            if let Some(source) = follow {
+                self.model.follow_reference(source);
+            }
         }
 
         ui.separator();
@@ -924,7 +979,11 @@ where
             );
         } else {
             for object_id in object_ids {
-                if ui.button(format!("Locate object #{object_id}")).clicked() {
+                if ui
+                    .button(format!("Locate object {}", format_object_id(object_id)))
+                    .on_hover_text(format!("Object {object_id} decimal"))
+                    .clicked()
+                {
                     self.model.locate_object_reference(object_id);
                 }
             }
@@ -1083,52 +1142,12 @@ fn flow_explanation(record: ScriptRecordInspection) -> String {
     }
 }
 
-fn instruction_script_targets(record: ScriptRecordInspection) -> Vec<(&'static str, u16)> {
-    use ScriptOpcode::*;
-
-    let mut targets = Vec::new();
-    let mut push = |label, entry| {
-        if entry != 0 && !targets.iter().any(|(_, target)| *target == entry) {
-            targets.push((label, entry));
-        }
-    };
-
-    match record.flow {
-        ScriptControlFlow::Jump {
-            target,
-            conditional: true,
-        } => push("Branch", target),
-        ScriptControlFlow::Jump { target, .. } => push("Jump", target),
-        ScriptControlFlow::Call { target, .. } => push("Call", target),
-        ScriptControlFlow::Next
-        | ScriptControlFlow::Stop
-        | ScriptControlFlow::Random { .. }
-        | ScriptControlFlow::Unknown => {}
-    }
-
-    let Some(opcode) = record.opcode else {
-        return targets;
-    };
-    let [op0, op1, op2] = record.instruction.operands;
-    match opcode {
-        StopAndReplace => push("Replacement", op0),
-        SetObjectAutoScript => push("Auto", op1),
-        SetObjectTriggerScript => push("Trigger", op1),
-        SetObjectScript => push("Object script", op1),
-        SetSceneScripts => {
-            push("Scene enter", op1);
-            push("Scene teleport", op2);
-        }
-        StartBattle => {
-            push("On lost", op1);
-            push("On fled", op2);
-        }
-        PlaceUsedItemObject | SetEnemyStatus | SummonEnemy => push("On failure", op2),
-        FleeBattle | CollectEnemy => push("On failure", op0),
-        DivideEnemy => push("On failure", op1),
-        _ => {}
-    }
-    targets
+fn instruction_script_targets(record: ScriptRecordInspection) -> Vec<(String, u16)> {
+    inspect_script_targets(record)
+        .into_iter()
+        .filter(|target| show_instruction_target(target.kind))
+        .map(|target| (format_instruction_kind(target.kind), target.entry))
+        .collect()
 }
 
 fn opcode_explanation(
@@ -1195,10 +1214,10 @@ fn object_selector_label(selector: u16, current_object: Option<u16>) -> String {
     if selector == 0 || selector == u16::MAX {
         current_object.map_or_else(
             || "selected by the script owner".to_owned(),
-            |object_id| format!("#{object_id} (current)"),
+            |object_id| format!("{} (current)", format_object_id(object_id)),
         )
     } else {
-        format!("#{selector}")
+        format_object_id(selector)
     }
 }
 
@@ -1279,7 +1298,10 @@ fn reference_color(source: ScriptReferenceSource) -> Color32 {
         | ScriptReferenceSource::SceneTeleport { .. }
         | ScriptReferenceSource::ObjectTrigger { .. } => TRIGGER,
         ScriptReferenceSource::ObjectAuto { .. } => AUTO,
-        ScriptReferenceSource::Instruction { .. } => TEXT,
+        ScriptReferenceSource::Instruction { kind, .. } => match kind.category() {
+            ScriptInstructionReferenceCategory::ControlFlow => TEXT,
+            ScriptInstructionReferenceCategory::EntryWrite => AUTO,
+        },
     }
 }
 
@@ -1445,7 +1467,10 @@ mod tests {
             humanize_opcode_name("ShowFbpWithSprite"),
             "Show fbp with sprite"
         );
-        assert_eq!(object_selector_label(u16::MAX, Some(911)), "#911 (current)");
+        assert_eq!(
+            object_selector_label(u16::MAX, Some(911)),
+            "#038F (current)"
+        );
     }
 
     #[test]
@@ -1461,7 +1486,7 @@ mod tests {
         };
         assert_eq!(
             instruction_script_targets(object_trigger),
-            vec![("Trigger", 0x1370)]
+            vec![("SET OBJECT #0014 TRIGGER".to_owned(), 0x1370)]
         );
 
         let call = ScriptRecordInspection {
@@ -1476,7 +1501,10 @@ mod tests {
                 return_entry: 11,
             },
         };
-        assert_eq!(instruction_script_targets(call), vec![("Call", 20)]);
+        assert_eq!(
+            instruction_script_targets(call),
+            vec![("CALL".to_owned(), 20)]
+        );
     }
 
     #[test]

@@ -30,8 +30,63 @@ pub struct ScriptRecordInspection {
 /// Kind of instruction-level reference to another script entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScriptInstructionReferenceKind {
+    Next,
     Jump,
+    Branch,
     Call,
+    CallReturn,
+    RandomChoice { choice: u16 },
+    BattleWon,
+    BattleLost,
+    BattleFled,
+    Failure,
+    PersistNext,
+    ReplaceCurrent,
+    SetObjectAuto { object_id: u16 },
+    SetObjectTrigger { object_id: u16 },
+    SetSceneEnter { scene: u16 },
+    SetSceneTeleport { scene: u16 },
+    SetGlobalObjectScript { object_id: u16, field: u16 },
+}
+
+/// Broad relationship class used to group instruction references in tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScriptInstructionReferenceCategory {
+    ControlFlow,
+    EntryWrite,
+}
+
+impl ScriptInstructionReferenceKind {
+    pub const fn category(self) -> ScriptInstructionReferenceCategory {
+        use ScriptInstructionReferenceCategory::{ControlFlow, EntryWrite};
+
+        match self {
+            Self::Next
+            | Self::Jump
+            | Self::Branch
+            | Self::Call
+            | Self::CallReturn
+            | Self::RandomChoice { .. }
+            | Self::BattleWon
+            | Self::BattleLost
+            | Self::BattleFled
+            | Self::Failure => ControlFlow,
+            Self::PersistNext
+            | Self::ReplaceCurrent
+            | Self::SetObjectAuto { .. }
+            | Self::SetObjectTrigger { .. }
+            | Self::SetSceneEnter { .. }
+            | Self::SetSceneTeleport { .. }
+            | Self::SetGlobalObjectScript { .. } => EntryWrite,
+        }
+    }
+}
+
+/// One statically recognizable script-entry target referenced by an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScriptInstructionTarget {
+    pub entry: u16,
+    pub kind: ScriptInstructionReferenceKind,
 }
 
 /// Static source that stores or refers to a script entry.
@@ -57,7 +112,7 @@ pub enum ScriptReferenceSource {
     },
 }
 
-/// Read-only incoming-reference index for scene-owned scripts and control flow.
+/// Read-only incoming-reference index for entry owners, control flow and entry writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptReferenceCatalog {
     by_entry: BTreeMap<u16, Vec<ScriptReferenceSource>>,
@@ -65,7 +120,7 @@ pub struct ScriptReferenceCatalog {
 }
 
 impl ScriptReferenceCatalog {
-    /// Index every scene script slot, event-object script slot, jump and call.
+    /// Index scene and event-object slots plus every recognized instruction target.
     pub fn build(scenes: &SceneData, scripts: &ScriptTable) -> Self {
         let mut catalog = Self::default();
         for scene_number in 1..=scenes.scene_count() {
@@ -121,25 +176,14 @@ impl ScriptReferenceCatalog {
             let Some(record) = inspect_script_record(scripts, entry) else {
                 continue;
             };
-            match record.flow {
-                ScriptControlFlow::Jump { target, .. } => catalog.insert(
-                    target,
+            for target in inspect_script_targets(record) {
+                catalog.insert(
+                    target.entry,
                     ScriptReferenceSource::Instruction {
                         entry,
-                        kind: ScriptInstructionReferenceKind::Jump,
+                        kind: target.kind,
                     },
-                ),
-                ScriptControlFlow::Call { target, .. } => catalog.insert(
-                    target,
-                    ScriptReferenceSource::Instruction {
-                        entry,
-                        kind: ScriptInstructionReferenceKind::Call,
-                    },
-                ),
-                ScriptControlFlow::Next
-                | ScriptControlFlow::Stop
-                | ScriptControlFlow::Random { .. }
-                | ScriptControlFlow::Unknown => {}
+                );
             }
         }
         for references in catalog.by_entry.values_mut() {
@@ -178,6 +222,116 @@ pub fn inspect_script_record(table: &ScriptTable, entry: u16) -> Option<ScriptRe
     })
 }
 
+/// Return every statically recognizable script-entry target used by one record.
+///
+/// Control-flow edges and writes to mutable PAL entry slots are deliberately
+/// distinguished. For example, `SetSceneScripts` continues to the next record
+/// immediately but only installs its scene entry for a later invocation.
+pub fn inspect_script_targets(record: ScriptRecordInspection) -> Vec<ScriptInstructionTarget> {
+    use ScriptInstructionReferenceKind as Reference;
+    use ScriptOpcode::*;
+
+    let Some(opcode) = record.opcode else {
+        return Vec::new();
+    };
+    let [op0, op1, op2] = record.instruction.operands;
+    let next = record.entry.wrapping_add(1);
+    let mut targets = Vec::new();
+    let mut push = |entry, kind| {
+        let target = ScriptInstructionTarget { entry, kind };
+        if entry != 0 && !targets.contains(&target) {
+            targets.push(target);
+        }
+    };
+
+    match opcode {
+        Stop | LoadLastSave | QuitGame => {}
+        StopAndAdvance => push(next, Reference::PersistNext),
+        StopAndReplace => {
+            push(op0, Reference::ReplaceCurrent);
+            if op1 != 0 {
+                push(next, Reference::Next);
+            }
+        }
+        AdvanceEntry => {
+            push(next, Reference::Next);
+            push(next, Reference::PersistNext);
+        }
+        StartBattle => {
+            push(next, Reference::BattleWon);
+            push(op1, Reference::BattleLost);
+            push(op2, Reference::BattleFled);
+        }
+        PlaceUsedItemObject | SetEnemyStatus | SummonEnemy => {
+            push(next, Reference::Next);
+            push(op2, Reference::Failure);
+        }
+        FleeBattle | CollectEnemy => {
+            push(next, Reference::Next);
+            push(op0, Reference::Failure);
+        }
+        DivideEnemy => {
+            push(next, Reference::Next);
+            push(op1, Reference::Failure);
+        }
+        _ => match record.flow {
+            ScriptControlFlow::Next => push(next, Reference::Next),
+            ScriptControlFlow::Stop | ScriptControlFlow::Unknown => {}
+            ScriptControlFlow::Jump {
+                target,
+                conditional: false,
+            } => push(target, Reference::Jump),
+            ScriptControlFlow::Jump {
+                target,
+                conditional: true,
+            } => {
+                push(target, Reference::Branch);
+                push(next, Reference::Next);
+            }
+            ScriptControlFlow::Call {
+                target,
+                return_entry,
+            } => {
+                push(target, Reference::Call);
+                push(return_entry, Reference::CallReturn);
+            }
+            ScriptControlFlow::Random { choices } => {
+                for choice in 0..choices {
+                    push(
+                        record.entry.wrapping_add(choice).wrapping_add(1),
+                        Reference::RandomChoice { choice: choice + 1 },
+                    );
+                }
+            }
+        },
+    }
+
+    match opcode {
+        SetObjectAutoScript if op0 != 0 => {
+            push(op1, Reference::SetObjectAuto { object_id: op0 });
+        }
+        SetObjectTriggerScript if op0 != 0 => {
+            push(op1, Reference::SetObjectTrigger { object_id: op0 });
+        }
+        SetSceneScripts if op0 != 0 => {
+            push(op1, Reference::SetSceneEnter { scene: op0 });
+            push(op2, Reference::SetSceneTeleport { scene: op0 });
+        }
+        SetObjectScript if op2 <= 2 => {
+            push(
+                op1,
+                Reference::SetGlobalObjectScript {
+                    object_id: op0,
+                    field: op2,
+                },
+            );
+        }
+        _ => {}
+    }
+
+    targets
+}
+
 /// Inspect a bounded window without executing instructions or following branches.
 ///
 /// PAL entry points can share tails and jump into arbitrary records, so this API
@@ -203,7 +357,7 @@ fn control_flow(opcode: ScriptOpcode, instruction: ScriptEntry, entry: u16) -> S
     use ScriptOpcode::*;
 
     match opcode {
-        Stop | StopAndAdvance | StopAndReplace | QuitGame => ScriptControlFlow::Stop,
+        Stop | StopAndAdvance | StopAndReplace | LoadLastSave | QuitGame => ScriptControlFlow::Stop,
         Jump => ScriptControlFlow::Jump {
             target: instruction.operands[0],
             conditional: instruction.operands[1] != 0,
@@ -322,6 +476,115 @@ mod tests {
         assert_eq!(records[0].flow, ScriptControlFlow::Unknown);
         assert_eq!(inspect_script_records(&scripts, 0, 1, 4).len(), 1);
         assert!(inspect_script_records(&scripts, u16::MAX, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn extracts_control_flow_outcomes_and_entry_writes() {
+        let scripts = table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::NoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::SetSceneScripts.raw(), 4, 0x1f02, 0],
+            [ScriptOpcode::StartBattle.raw(), 8, 9, 10],
+            [ScriptOpcode::Call.raw(), 12, 0, 0],
+            [ScriptOpcode::StopAndAdvance.raw(), 0, 0, 0],
+        ]);
+
+        assert_eq!(
+            inspect_script_targets(inspect_script_record(&scripts, 1).unwrap()),
+            [ScriptInstructionTarget {
+                entry: 2,
+                kind: ScriptInstructionReferenceKind::Next,
+            }]
+        );
+        assert_eq!(
+            inspect_script_targets(inspect_script_record(&scripts, 2).unwrap()),
+            [
+                ScriptInstructionTarget {
+                    entry: 3,
+                    kind: ScriptInstructionReferenceKind::Next,
+                },
+                ScriptInstructionTarget {
+                    entry: 0x1f02,
+                    kind: ScriptInstructionReferenceKind::SetSceneEnter { scene: 4 },
+                },
+            ]
+        );
+        assert_eq!(
+            inspect_script_targets(inspect_script_record(&scripts, 3).unwrap()),
+            [
+                ScriptInstructionTarget {
+                    entry: 4,
+                    kind: ScriptInstructionReferenceKind::BattleWon,
+                },
+                ScriptInstructionTarget {
+                    entry: 9,
+                    kind: ScriptInstructionReferenceKind::BattleLost,
+                },
+                ScriptInstructionTarget {
+                    entry: 10,
+                    kind: ScriptInstructionReferenceKind::BattleFled,
+                },
+            ]
+        );
+        assert_eq!(
+            inspect_script_targets(inspect_script_record(&scripts, 4).unwrap()),
+            [
+                ScriptInstructionTarget {
+                    entry: 12,
+                    kind: ScriptInstructionReferenceKind::Call,
+                },
+                ScriptInstructionTarget {
+                    entry: 5,
+                    kind: ScriptInstructionReferenceKind::CallReturn,
+                },
+            ]
+        );
+        assert_eq!(
+            inspect_script_targets(inspect_script_record(&scripts, 5).unwrap()),
+            [ScriptInstructionTarget {
+                entry: 6,
+                kind: ScriptInstructionReferenceKind::PersistNext,
+            }]
+        );
+    }
+
+    #[test]
+    fn catalogs_fallthrough_and_entry_writes_but_not_rows_after_stop() {
+        let scene_records = [
+            1u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+        ]
+        .concat();
+        let scene_data = SceneData::parse(&make_mkf(&[&[], &scene_records])).unwrap();
+        let scripts = table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::NoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::SetSceneScripts.raw(), 4, 0x1f02, 0],
+        ]);
+
+        let catalog = ScriptReferenceCatalog::build(&scene_data, &scripts);
+        assert_eq!(
+            catalog.references_to(2),
+            [ScriptReferenceSource::Instruction {
+                entry: 1,
+                kind: ScriptInstructionReferenceKind::Next,
+            }]
+        );
+        assert!(catalog.references_to(3).is_empty());
+        assert_eq!(
+            catalog.references_to(0x1f02),
+            [ScriptReferenceSource::Instruction {
+                entry: 3,
+                kind: ScriptInstructionReferenceKind::SetSceneEnter { scene: 4 },
+            }]
+        );
     }
 
     #[test]

@@ -2,12 +2,12 @@
 
 use std::time::{Duration, Instant};
 
-use crate::debug_overlay::DebugSnapshot;
+use crate::debug_overlay::{DebugSnapshot, DebugTraceSnapshot, ScriptDebugPage, TraceDisplayMode};
 use crate::renderer::Renderer;
 use pal_core::game::GameState;
 use pal_core::role::RoleSprites;
 use pal_core::script::{ScriptRuntime, ScriptVisual};
-use winit::keyboard::KeyCode;
+use winit::keyboard::{KeyCode, ModifiersState};
 
 use super::battle_debug_overlay::BattleAssistSnapshot;
 use super::battle_render::BattleMenuState;
@@ -101,6 +101,7 @@ pub(super) struct DesktopApp<L> {
     session: DesktopSession,
     app_mode: AppMode,
     input: HeldInput,
+    modifiers: ModifiersState,
     clock: FrameClock,
     minimap_enabled: bool,
     minimap_cache: MiniMapCache,
@@ -151,6 +152,7 @@ where
             session,
             app_mode: AppMode::OpeningAnimation(Box::new(opening_animation)),
             input: HeldInput::default(),
+            modifiers: ModifiersState::default(),
             clock: FrameClock::new(now),
             minimap_enabled: true,
             minimap_cache: MiniMapCache::default(),
@@ -237,6 +239,55 @@ where
                     set_title(self.debug.title());
                     true
                 }
+                KeyCode::Tab if self.debug.show_script => {
+                    self.debug.script_page = match self.debug.script_page {
+                        ScriptDebugPage::Inspector => ScriptDebugPage::Trace,
+                        ScriptDebugPage::Trace => ScriptDebugPage::Inspector,
+                    };
+                    true
+                }
+                KeyCode::PageUp
+                    if self.debug.show_script
+                        && self.debug.script_page == ScriptDebugPage::Trace =>
+                {
+                    self.review_older_trace();
+                    true
+                }
+                KeyCode::PageDown
+                    if self.debug.show_script
+                        && self.debug.script_page == ScriptDebugPage::Trace =>
+                {
+                    self.review_newer_trace();
+                    true
+                }
+                KeyCode::End
+                    if self.debug.show_script
+                        && self.debug.script_page == ScriptDebugPage::Trace =>
+                {
+                    self.debug.trace_cursor = None;
+                    true
+                }
+                KeyCode::F10
+                    if self.debug.show_script
+                        && self.debug.script_page == ScriptDebugPage::Trace =>
+                {
+                    if self.modifiers.shift_key() {
+                        self.scripts.resume_debug();
+                    } else if self.scripts.debug_paused() {
+                        if self.scripts.request_debug_step()
+                            && self.dialog.is_none()
+                            && !self.session.visual.is_blocking()
+                            && !self.session.scripts.waiting_for_key
+                        {
+                            self.advance_scene_script(set_title);
+                        }
+                    } else if self.scripts.debug_break_armed() {
+                        self.scripts.cancel_debug_break();
+                    } else {
+                        self.scripts.arm_debug_break();
+                    }
+                    true
+                }
                 KeyCode::F7 => {
                     self.debug.show_battle = !self.debug.show_battle;
                     set_title(self.debug.title());
@@ -298,11 +349,61 @@ where
             };
         if handled {
             self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(Instant::now())));
+        } else if self.scripts.debug_paused() {
+            // Do not buffer gameplay input while the debugger has frozen the
+            // simulation; only the explicit debug controls above are accepted.
         } else {
             let stopped_direction_input = self.input.set_key(code, pressed, repeat);
             if stopped_direction_input && self.stop_exploration_walking_animation() {
                 self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(Instant::now())));
             }
+        }
+    }
+
+    pub(super) fn set_modifiers(&mut self, modifiers: ModifiersState) {
+        self.modifiers = modifiers;
+    }
+
+    fn current_trace_sequences(&self) -> Vec<u64> {
+        let run = self.scripts.trace_run();
+        self.scripts
+            .trace_records()
+            .filter(|record| record.run == run)
+            .map(|record| record.sequence)
+            .collect()
+    }
+
+    fn review_older_trace(&mut self) {
+        let sequences = self.current_trace_sequences();
+        let Some(latest_index) = sequences.len().checked_sub(1) else {
+            return;
+        };
+        let selected_index = self
+            .debug
+            .trace_cursor
+            .and_then(|cursor| sequences.iter().position(|sequence| *sequence == cursor))
+            .unwrap_or(latest_index);
+        let older_index = selected_index.saturating_sub(1);
+        self.debug.trace_cursor = Some(sequences[older_index]);
+    }
+
+    fn review_newer_trace(&mut self) {
+        let sequences = self.current_trace_sequences();
+        let Some(latest_index) = sequences.len().checked_sub(1) else {
+            self.debug.trace_cursor = None;
+            return;
+        };
+        let Some(cursor) = self.debug.trace_cursor else {
+            return;
+        };
+        let selected_index = sequences
+            .iter()
+            .position(|sequence| *sequence == cursor)
+            .unwrap_or(0);
+        if selected_index >= latest_index.saturating_sub(1) {
+            self.debug.trace_cursor = None;
+        } else {
+            self.debug.trace_cursor = Some(sequences[selected_index + 1]);
         }
     }
 
@@ -1018,6 +1119,13 @@ where
     ) -> AdvanceControl {
         self.session.audio.music.poll();
         let frame_elapsed = self.clock.begin_frame(now);
+        if self.scripts.debug_paused() {
+            self.clock.reset_accumulator();
+            return AdvanceControl {
+                exit_requested: false,
+                wait_until: now + self.current_update_tick(),
+            };
+        }
         let mut needs_redraw = self.advance_realtime(frame_elapsed);
         let mut exit_requested = false;
 
@@ -1042,6 +1150,7 @@ where
 
     pub(super) fn reset_input(&mut self) {
         self.input = HeldInput::default();
+        self.modifiers = ModifiersState::default();
         if self.stop_exploration_walking_animation() {
             self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(Instant::now())));
         }
@@ -1129,6 +1238,41 @@ where
         scale_factor: f64,
     ) -> DebugSnapshot {
         let script = self.scripts.debug_snapshot();
+        let run = self.scripts.trace_run();
+        let records = self
+            .scripts
+            .trace_records()
+            .filter(|record| record.run == run)
+            .copied()
+            .collect::<Vec<_>>();
+        let selected_sequence = self.debug.trace_cursor.and_then(|cursor| {
+            records
+                .iter()
+                .any(|record| record.sequence == cursor)
+                .then_some(cursor)
+        });
+        let selected_sequence = selected_sequence.or_else(|| {
+            self.debug
+                .trace_cursor
+                .is_some()
+                .then(|| records.first().map(|record| record.sequence))
+                .flatten()
+        });
+        let new_record_count = selected_sequence.map_or(0, |selected| {
+            records
+                .iter()
+                .filter(|record| record.sequence > selected)
+                .count()
+        });
+        let trace_mode = if self.scripts.debug_paused() {
+            TraceDisplayMode::Paused
+        } else if self.scripts.debug_break_armed() {
+            TraceDisplayMode::Armed
+        } else if self.debug.trace_cursor.is_some() {
+            TraceDisplayMode::Review
+        } else {
+            TraceDisplayMode::Live
+        };
         DebugSnapshot {
             scene_number: self.game.scene_number,
             object_count: self.game.scene_objects.len(),
@@ -1143,6 +1287,13 @@ where
             scale_factor,
             focused_object: focused_debug_object(&self.game, script).map(debug_object_snapshot),
             script,
+            script_page: self.debug.script_page,
+            trace: DebugTraceSnapshot {
+                mode: trace_mode,
+                records,
+                selected_sequence,
+                new_record_count,
+            },
         }
     }
 }

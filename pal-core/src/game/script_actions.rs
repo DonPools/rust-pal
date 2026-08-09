@@ -439,29 +439,7 @@ impl<M: CollisionMap> GameState<M> {
                     .is_some_and(|battle| battle.hide_players(rounds));
             }
             ScriptAction::StealEnemy { enemy_index, rate } => {
-                let Some(enemy_index) = self.battle_enemy_index(enemy_index) else {
-                    return false;
-                };
-                let Some(stolen) = self
-                    .active_battle
-                    .as_mut()
-                    .and_then(|battle| battle.steal_enemy(enemy_index, rate))
-                else {
-                    return false;
-                };
-                match stolen {
-                    BattleSteal::Nothing => {}
-                    BattleSteal::Cash(amount) => {
-                        self.cash = self.cash.saturating_add(u32::from(amount));
-                    }
-                    BattleSteal::Item(item_id) => {
-                        let amount = self.inventory_count(item_id).saturating_add(1).min(99);
-                        if !self.set_inventory_amount(item_id, amount) {
-                            return false;
-                        }
-                    }
-                }
-                return true;
+                return self.steal_enemy(enemy_index, rate).is_some();
             }
             ScriptAction::SetBattleBlow { amount } => {
                 return self
@@ -835,15 +813,24 @@ impl<M: CollisionMap> GameState<M> {
             ScriptAction::MoveViewport { x, y, frames } => {
                 if x == 0 && y == 0 {
                     self.viewport_locked = false;
+                    self.party_screen_position = DEFAULT_PARTY_SCREEN_POSITION;
                     self.follow_player();
                 } else if frames == -1 {
                     self.viewport_locked = true;
                     self.camera.x = i32::from(x) * 32 - 160;
                     self.camera.y = i32::from(y) * 16 - 112;
+                    self.party_screen_position = (
+                        self.player.world_x - self.camera.x,
+                        self.player.world_y - self.camera.y,
+                    );
                 } else {
                     self.viewport_locked = true;
                     self.camera.x += i32::from(x);
                     self.camera.y += i32::from(y);
+                    self.party_screen_position = (
+                        self.player.world_x - self.camera.x,
+                        self.player.world_y - self.camera.y,
+                    );
                 }
             }
             ScriptAction::CollapseParty => self.collapse_party(),
@@ -893,6 +880,31 @@ impl<M: CollisionMap> GameState<M> {
             }
         }
         true
+    }
+
+    /// Resolve a scripted battle theft and apply its reward to the game state.
+    ///
+    /// The returned value lets the presentation host show Classic's centered
+    /// "obtained" notice before the battle script resumes.
+    pub fn steal_enemy(&mut self, enemy_slot: u16, rate: u16) -> Option<BattleSteal> {
+        let enemy_index = self.battle_enemy_index(enemy_slot)?;
+        let stolen = self
+            .active_battle
+            .as_mut()?
+            .steal_enemy(enemy_index, rate)?;
+        match stolen {
+            BattleSteal::Nothing => {}
+            BattleSteal::Cash(amount) => {
+                self.cash = self.cash.saturating_add(u32::from(amount));
+            }
+            BattleSteal::Item(item_id) => {
+                let amount = self.inventory_count(item_id).saturating_add(1).min(99);
+                if !self.set_inventory_amount(item_id, amount) {
+                    return None;
+                }
+            }
+        }
+        Some(stolen)
     }
 
     fn adjust_player_health(&mut self, role_id: u16, hp: i16, mp: i16, apply_to_all: bool) -> bool {
