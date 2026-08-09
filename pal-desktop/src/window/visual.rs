@@ -7,8 +7,13 @@ use pal_core::role::RoleSprites;
 use pal_core::script::ScriptVisual;
 use std::collections::HashMap;
 
-use super::battle_timing::BATTLE_FADE_MS;
 use crate::renderer::Renderer;
+
+const BATTLE_SCREEN_SWITCH_GROUPS: usize = 6;
+const BATTLE_SCREEN_SWITCH_STEP_MS: u64 = 60;
+const BATTLE_SCREEN_SWITCH_TOTAL_MS: u64 =
+    BATTLE_SCREEN_SWITCH_STEP_MS * BATTLE_SCREEN_SWITCH_GROUPS as u64;
+const BATTLE_SCREEN_SWITCH_ORDER: [usize; BATTLE_SCREEN_SWITCH_GROUPS] = [0, 3, 1, 5, 2, 4];
 
 pub(super) struct VisualState {
     pending: Option<ScriptVisual>,
@@ -58,6 +63,11 @@ enum VisualEffect {
         progress: u32,
         total: u32,
         draw_ending_sprite: bool,
+    },
+    ScreenSwitch {
+        previous: Vec<u8>,
+        progress: u32,
+        total: u32,
     },
     Scroll {
         previous: Vec<u8>,
@@ -135,6 +145,12 @@ impl VisualState {
         }
         self.battle_transition_pending = true;
         true
+    }
+
+    /// Whether Classic's fixed battle-entry screen switch still owns the frame.
+    pub(super) fn battle_transition_active(&self) -> bool {
+        self.battle_transition_pending
+            || matches!(self.effect, Some(VisualEffect::ScreenSwitch { .. }))
     }
 
     pub(super) fn needs_update(&self) -> bool {
@@ -255,11 +271,10 @@ impl VisualState {
     ) -> Result<bool, String> {
         if self.battle_transition_pending {
             self.battle_transition_pending = false;
-            self.effect = Some(VisualEffect::CrossFade {
+            self.effect = Some(VisualEffect::ScreenSwitch {
                 previous: current_screen.to_vec(),
                 progress: 0,
-                total: duration_ticks(BATTLE_FADE_MS),
-                draw_ending_sprite: false,
+                total: duration_ticks(BATTLE_SCREEN_SWITCH_TOTAL_MS),
             });
             return Ok(true);
         }
@@ -570,6 +585,14 @@ impl VisualState {
                     return Ok(None);
                 }
             }
+            VisualEffect::ScreenSwitch {
+                progress, total, ..
+            } => {
+                *progress = progress.saturating_add(1).min(*total);
+                if *progress == *total {
+                    return Ok(None);
+                }
+            }
             VisualEffect::Rng(playback) => {
                 if playback
                     .fade_in_progress
@@ -699,6 +722,14 @@ impl VisualState {
                     ending_sprite_tick = Some(*progress);
                 }
             }
+            Some(VisualEffect::ScreenSwitch {
+                previous,
+                progress,
+                total,
+            }) => {
+                let revealed_groups = screen_switch_revealed_groups(*progress, *total);
+                apply_screen_switch(renderer.screen_mut(), previous, revealed_groups);
+            }
             Some(VisualEffect::Scroll {
                 previous,
                 progress,
@@ -747,6 +778,46 @@ impl VisualState {
             }
         }
     }
+}
+
+/// Apply Classic's `VIDEO_SwitchScreen` order to an RGBA framebuffer.
+///
+/// The original copies every sixth indexed pixel in the order 0, 3, 1, 5, 2, 4.
+/// RGBA output must group channels by pixel before applying the same ordering.
+fn apply_screen_switch(current: &mut [u8], previous: &[u8], revealed_groups: usize) -> bool {
+    if current.len() != previous.len()
+        || !current.len().is_multiple_of(4)
+        || revealed_groups > BATTLE_SCREEN_SWITCH_GROUPS
+    {
+        return false;
+    }
+    let mut revealed = [false; BATTLE_SCREEN_SWITCH_GROUPS];
+    for &group in BATTLE_SCREEN_SWITCH_ORDER.iter().take(revealed_groups) {
+        revealed[group] = true;
+    }
+    for (index, (pixel, old_pixel)) in current
+        .chunks_exact_mut(4)
+        .zip(previous.chunks_exact(4))
+        .enumerate()
+    {
+        if !revealed[index % BATTLE_SCREEN_SWITCH_GROUPS] {
+            pixel.copy_from_slice(old_pixel);
+        }
+    }
+    true
+}
+
+fn screen_switch_revealed_groups(progress: u32, total: u32) -> usize {
+    if progress == 0 {
+        return 0;
+    }
+    usize::try_from(
+        progress
+            .saturating_mul(BATTLE_SCREEN_SWITCH_GROUPS as u32)
+            .div_ceil(total.max(1))
+            .min(BATTLE_SCREEN_SWITCH_GROUPS as u32),
+    )
+    .unwrap_or(BATTLE_SCREEN_SWITCH_GROUPS)
 }
 
 fn load_ending_frames(
@@ -988,6 +1059,65 @@ mod tests {
         assert_eq!(interpolate(64, 0, 4, 8), 32);
         assert_eq!(interpolate(64, 0, 8, 8), 0);
         assert_eq!(progress_64(3, 4), 48);
+    }
+
+    #[test]
+    fn battle_screen_switch_reveals_rgba_pixels_in_classic_order() {
+        let previous = (101u8..=106)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+        let target = (1u8..=6)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+
+        let switched = |groups| {
+            let mut current = target.clone();
+            assert!(apply_screen_switch(&mut current, &previous, groups));
+            current
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(switched(0), [101, 102, 103, 104, 105, 106]);
+        assert_eq!(switched(1), [1, 102, 103, 104, 105, 106]);
+        assert_eq!(switched(2), [1, 102, 103, 4, 105, 106]);
+        assert_eq!(switched(3), [1, 2, 103, 4, 105, 106]);
+        assert_eq!(switched(6), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(screen_switch_revealed_groups(0, 8), 0);
+        assert_eq!(screen_switch_revealed_groups(1, 8), 1);
+        assert_eq!(screen_switch_revealed_groups(4, 8), 3);
+        assert_eq!(screen_switch_revealed_groups(7, 8), 6);
+    }
+
+    #[test]
+    fn battle_transition_keeps_the_classic_switch_active_for_its_full_duration() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![0; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+
+        assert!(visual.queue_battle_transition());
+        assert!(visual
+            .start_pending(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap());
+        assert!(visual.battle_transition_active());
+        assert!(matches!(
+            &visual.effect,
+            Some(VisualEffect::ScreenSwitch {
+                progress: 0,
+                total: 8,
+                ..
+            })
+        ));
+        for _ in 0..7 {
+            assert!(visual
+                .update(&current, &palettes, &fbp, &rng, &role_sprites)
+                .unwrap());
+            assert!(visual.battle_transition_active());
+        }
+        assert!(visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap());
+        assert!(!visual.battle_transition_active());
     }
 
     #[test]

@@ -3,7 +3,9 @@ use pal_core::battle::BattleSteal;
 use pal_core::game::{AutoScriptError, GameState};
 use pal_core::role::RoleSprites;
 use pal_core::scene::{TriggerKind, TriggerRequest};
-use pal_core::script::{ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
+use pal_core::script::{
+    ScriptAction, ScriptCondition, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual,
+};
 
 use super::battle_update::queue_battle_events;
 use super::dialog::ActiveDialog;
@@ -15,6 +17,13 @@ use super::session::DesktopSession;
 use super::LoadedScene;
 
 const MAX_IMMEDIATE_SCENE_SETUP_EVENTS: usize = 8;
+
+fn party_offset_must_finish_with_viewport_move(scripts: &ScriptRuntime) -> bool {
+    scripts
+        .debug_snapshot()
+        .next_instruction
+        .is_some_and(|instruction| instruction.opcode == ScriptOpcode::MoveViewport.raw())
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct ScriptRenderResources<'a> {
@@ -196,6 +205,7 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::StartBattle(request)) => {
             services.clear_active_menu();
             if game.start_battle(request, &services.scripts.auto_scripts) {
+                services.battle.begin_battle();
                 services.battle.battle_selected_enemy = game
                     .battle()
                     .and_then(|battle| battle.first_living_enemy())
@@ -643,6 +653,28 @@ fn advance_script_with_budget<L>(
                 set_title("Rust-PAL [script party is unavailable]");
             } else if !game.refresh_equipment_effects(&services.scripts.auto_scripts) {
                 set_title("Rust-PAL [failed to refresh party equipment effects]");
+            }
+        }
+        Some(ScriptEvent::Action(action @ ScriptAction::OffsetPlayer { .. })) => {
+            // Classic does not present a frame for opcode 0x006E itself. In
+            // scripts such as 0x3426..0x3436 it is paired with 0x007F: the
+            // first instruction shifts the party and camera, then the second
+            // restores the camera before drawing. Splitting the pair across
+            // host ticks makes the viewport visibly alternate back and forth.
+            let paired_viewport_move = party_offset_must_finish_with_viewport_move(scripts);
+            if !game.apply_script_action(action) {
+                set_title("Rust-PAL [script target is unavailable]");
+            } else if paired_viewport_move || immediate_budget > 1 {
+                advance_script_with_budget(
+                    scripts,
+                    game,
+                    dialog,
+                    resources,
+                    load_scene,
+                    services,
+                    set_title,
+                    immediate_budget.saturating_sub(1),
+                );
             }
         }
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
@@ -1203,6 +1235,35 @@ mod tests {
             dialog_body_lines(&text, &dialog)[0].as_ref(),
             b"got@item@".as_slice()
         );
+    }
+
+    #[test]
+    fn party_offset_requests_the_following_viewport_move_in_the_same_host_frame() {
+        let data = [
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::OffsetParty.raw(), (-16i16) as u16, 8, 0],
+            [ScriptOpcode::MoveViewport.raw(), 16, (-8i16) as u16, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+        let mut scripts = ScriptRuntime::new(ScriptTable::parse(&data).unwrap());
+        assert!(scripts.start(TriggerRequest {
+            object_id: u16::MAX,
+            script_entry: 1,
+            kind: TriggerKind::Touch,
+        }));
+
+        assert!(matches!(
+            scripts.advance(),
+            Some(ScriptEvent::Action(ScriptAction::OffsetPlayer {
+                dx: -16,
+                dy: 8,
+                ..
+            }))
+        ));
+        assert!(party_offset_must_finish_with_viewport_move(&scripts));
     }
 
     #[test]

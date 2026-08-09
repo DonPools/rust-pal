@@ -397,7 +397,7 @@ where
         });
         ui.add(
             egui::TextEdit::singleline(self.scene_filter)
-                .hint_text("Filter scene number…")
+                .hint_text("Filter scene number (hex/decimal)…")
                 .desired_width(f32::INFINITY),
         );
         let filter = self.scene_filter.trim().to_owned();
@@ -405,7 +405,7 @@ where
         let mut load = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for scene in 1..=self.model.scene_count {
-                let label = format!("Scene {scene:03}");
+                let label = format_scene_label(scene);
                 if !filter.is_empty()
                     && !label
                         .to_ascii_lowercase()
@@ -579,17 +579,25 @@ where
                 );
             }
             ui.label(
-                RichText::new("Rows continue to the end of SSS.MKF; STOP is not a boundary")
-                    .color(MUTED),
+                RichText::new(
+                    "Context starts at the nearest inferred entry; STOP is not a hard boundary",
+                )
+                .color(MUTED),
             );
         });
 
-        let start = usize::from(location.entry);
+        let start = usize::from(location.root);
         let rows = self.model.scripts.len().saturating_sub(start);
         let selected_entry = self.model.navigation.selected_instruction();
+        let scroll_to_row = self
+            .model
+            .navigation
+            .take_scroll_request()
+            .and_then(|entry| entry.checked_sub(location.root))
+            .map(usize::from);
         let scripts = &self.model.scripts;
         let mut action = None;
-        TableBuilder::new(ui)
+        let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -598,7 +606,11 @@ where
             .column(Column::exact(62.0))
             .column(Column::exact(62.0))
             .column(Column::exact(62.0))
-            .column(Column::remainder().at_least(105.0))
+            .column(Column::remainder().at_least(105.0));
+        if let Some(row) = scroll_to_row {
+            table = table.scroll_to_row(row, Some(egui::Align::Center));
+        }
+        table
             .header(24.0, |mut header| {
                 for label in ["ENTRY", "OPCODE", "OP 0", "OP 1", "OP 2", "FLOW"] {
                     header.col(|ui| {
@@ -1377,6 +1389,10 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
+fn format_scene_label(scene: u16) -> String {
+    format!("Scene {scene:03}  0x{scene:04X}")
+}
+
 fn field(ui: &mut egui::Ui, label: &str, value: impl ToString) {
     ui.label(RichText::new(label).color(MUTED));
     ui.monospace(value.to_string());
@@ -1486,6 +1502,11 @@ mod tests {
         assert_eq!(parse_entry("0x20"), Some(0x20));
         assert_eq!(parse_entry(""), None);
         assert_eq!(parse_entry("xyz"), None);
+    }
+
+    #[test]
+    fn scene_labels_show_decimal_and_hexadecimal_numbers() {
+        assert_eq!(format_scene_label(45), "Scene 045  0x002D");
     }
 
     #[test]

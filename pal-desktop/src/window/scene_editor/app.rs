@@ -163,7 +163,8 @@ where
     }
 
     pub(super) fn navigate_to_entry(&mut self, entry: u16) {
-        self.navigation.navigate(entry);
+        let root = self.script_references.script_context_root(entry);
+        self.navigation.navigate_in_context(root, entry);
         self.dirty = true;
     }
 

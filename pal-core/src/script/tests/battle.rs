@@ -5,7 +5,7 @@ fn battle_suspends_execution_and_resumes_on_the_result_branch() {
     let mut runtime = ScriptRuntime::new(table(&[
         [0, 0, 0, 0],
         [ScriptOpcode::StartBattle.raw(), 18, 4, 5],
-        [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        [ScriptOpcode::SetObjectStates.raw(), 7, 8, 0],
         [0, 0, 0, 0],
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
@@ -21,12 +21,17 @@ fn battle_suspends_execution_and_resumes_on_the_result_branch() {
     assert!(runtime.is_active());
     assert!(runtime.is_waiting_for_battle());
     assert_eq!(runtime.advance(), None);
-    assert!(runtime.resolve_battle(BattleResult::Lost));
+    assert_eq!(runtime.advance(), None);
+    assert!(runtime.resolve_battle(BattleResult::Won));
     assert!(!runtime.is_waiting_for_battle());
-    assert!(matches!(
+    assert_eq!(
         runtime.advance(),
-        Some(ScriptEvent::Completed { .. })
-    ));
+        Some(ScriptEvent::Action(ScriptAction::SetObjectStates {
+            first_object_id: 7,
+            last_object_id: 8,
+            state: 0,
+        }))
+    );
 }
 
 #[test]

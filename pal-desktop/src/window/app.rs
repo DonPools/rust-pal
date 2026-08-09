@@ -161,11 +161,12 @@ where
 
     pub(super) fn render_frame(&mut self, ui_ticks: u64) {
         let battle_active = self.game.battle().is_some();
-        let freeze_battle_for_dialog = self.dialog.is_some() && battle_active;
+        let freeze_battle_animation = battle_active
+            && (self.dialog.is_some() || self.session.visual.battle_transition_active());
         let battle_render_ticks =
             self.session
                 .battle
-                .render_ticks(ui_ticks, battle_active, freeze_battle_for_dialog);
+                .render_ticks(ui_ticks, battle_active, freeze_battle_animation);
         let resources = &self.resources;
         let session = &self.session;
         render_game(
@@ -198,6 +199,7 @@ where
                 battle_menu: session.battle.battle_menu,
                 battle_auto_attack: session.battle.battle_auto_attack,
                 battle_event: session.battle.battle_events.front().copied(),
+                battle_event_queue: Some(&session.battle.battle_events),
                 battle_event_ticks: session.battle.battle_event_ticks,
                 battle_kept_effects: &session.battle.battle_kept_effects,
                 post_battle: session.battle.post_battle.as_ref(),

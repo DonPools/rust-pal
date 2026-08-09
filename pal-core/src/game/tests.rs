@@ -1,6 +1,5 @@
 //! GameState integration and regression tests.
 
-use crate::map::{MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 use crate::script::{ScriptAction, ScriptEvent, ScriptOpcode, ScriptRuntime, ScriptVisual};
 
 use std::collections::HashSet;
@@ -2405,53 +2404,30 @@ fn scene_32_post_battle_walk_preserves_the_scripted_party_anchor() {
 }
 
 #[test]
-fn scene_174_ride_then_walk_keeps_camera_steps_continuous() {
-    let mut carrier = blocking_object(928, 752);
-    carrier.id = 7;
-    let mut state = GameState::new(
-        TestMap {
-            blocked: HashSet::new(),
-            size: (MAP_PIXEL_WIDTH, MAP_PIXEL_HEIGHT),
-        },
-        Role {
-            sprite_index: 0,
-            world_x: 928,
-            world_y: 752,
-            direction: Direction::South,
-            anim_frame: 0,
-            frames_per_direction: 4,
-        },
-        320,
-        200,
-    )
-    .with_scene_objects(vec![carrier]);
+fn paired_party_offset_and_viewport_move_restore_the_camera_before_rendering() {
+    let mut state = state(&[]);
+    let camera_before = (state.camera.x, state.camera.y);
 
-    let assert_camera_step = |state: &GameState<TestMap>, previous: &mut (i32, i32)| {
-        let current = (state.camera.x, state.camera.y);
-        assert!(current.0.abs_diff(previous.0) <= 8);
-        assert!(current.1.abs_diff(previous.1) <= 4);
-        assert_eq!(
-            (
-                state.player.world_x - state.camera.x,
-                state.player.world_y - state.camera.y,
-            ),
-            DEFAULT_PARTY_SCREEN_POSITION
-        );
-        *previous = current;
-    };
-    let mut previous = (state.camera.x, state.camera.y);
+    assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
+        dx: -16,
+        dy: 8,
+        layer: 0,
+    }));
+    assert_ne!((state.camera.x, state.camera.y), camera_before);
 
-    while state.ride_object_to(7, 26, 93, 1, 4) == Some(false) {
-        assert_camera_step(&state, &mut previous);
-    }
-    assert_camera_step(&state, &mut previous);
-    while state.walk_player_to(26, 93, 0, 4) == Some(false) {
-        assert_camera_step(&state, &mut previous);
-    }
-    assert_camera_step(&state, &mut previous);
-
-    assert_eq!((state.player.world_x, state.player.world_y), (832, 1488));
-    assert_eq!((state.camera.x, state.camera.y), (672, 1376));
+    assert!(state.apply_script_action(ScriptAction::MoveViewport {
+        x: 16,
+        y: -8,
+        frames: 1,
+    }));
+    assert_eq!((state.camera.x, state.camera.y), camera_before);
+    assert_eq!(
+        (
+            state.player.world_x - state.camera.x,
+            state.player.world_y - state.camera.y,
+        ),
+        (144, 120)
+    );
 }
 
 #[test]

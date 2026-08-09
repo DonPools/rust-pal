@@ -244,6 +244,36 @@ impl ScriptReferenceCatalog {
         self.by_object.get(&object_id).map_or(&[], Vec::as_slice)
     }
 
+    /// Find the nearest statically recognizable script context containing `entry`.
+    ///
+    /// The search walks backward through physically adjacent fallthrough edges
+    /// and stops at a scene/object owner, call target, mutable entry write, or
+    /// the first record without an adjacent predecessor. It is intentionally a
+    /// navigation aid rather than a claim that PAL scripts have physical bounds.
+    pub fn script_context_root(&self, entry: u16) -> u16 {
+        let mut current = entry;
+        loop {
+            let references = self.references_to(current);
+            if references.iter().copied().any(is_script_entry_source) {
+                return current;
+            }
+            let Some(previous) = current.checked_sub(1) else {
+                return current;
+            };
+            let has_adjacent_predecessor = references.iter().copied().any(|source| {
+                matches!(
+                    source,
+                    ScriptReferenceSource::Instruction { entry, kind }
+                        if entry == previous && is_adjacent_control_flow(kind)
+                )
+            });
+            if !has_adjacent_predecessor {
+                return current;
+            }
+            current = previous;
+        }
+    }
+
     pub fn scene_for_object(&self, object_id: u16) -> Option<u16> {
         self.object_scenes.get(&object_id).copied()
     }
@@ -253,6 +283,31 @@ impl ScriptReferenceCatalog {
             self.by_entry.entry(entry).or_default().push(source);
         }
     }
+}
+
+const fn is_script_entry_source(source: ScriptReferenceSource) -> bool {
+    match source {
+        ScriptReferenceSource::SceneEnter { .. }
+        | ScriptReferenceSource::SceneTeleport { .. }
+        | ScriptReferenceSource::ObjectTrigger { .. }
+        | ScriptReferenceSource::ObjectAuto { .. } => true,
+        ScriptReferenceSource::Instruction { kind, .. } => {
+            matches!(kind, ScriptInstructionReferenceKind::Call)
+                || matches!(
+                    kind.category(),
+                    ScriptInstructionReferenceCategory::EntryWrite
+                )
+        }
+    }
+}
+
+const fn is_adjacent_control_flow(kind: ScriptInstructionReferenceKind) -> bool {
+    matches!(
+        kind,
+        ScriptInstructionReferenceKind::Next
+            | ScriptInstructionReferenceKind::CallReturn
+            | ScriptInstructionReferenceKind::BattleWon
+    )
 }
 
 /// Inspect one script record without executing it.
@@ -841,6 +896,38 @@ mod tests {
         );
         assert_eq!(catalog.scene_for_object(1), Some(1));
         assert_eq!(catalog.scene_for_object(2), None);
+    }
+
+    #[test]
+    fn finds_nearest_owned_called_or_physical_script_context() {
+        let mut event = [0; 32];
+        event[8..10].copy_from_slice(&2u16.to_le_bytes());
+        let mut scene_records = Vec::new();
+        for values in [[1u16, 0, 0, 0], [0, 0, 0, 1]] {
+            for value in values {
+                scene_records.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let scene_data = SceneData::parse(&make_mkf(&[&event, &scene_records])).unwrap();
+        let scripts = table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::NoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::NoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 7, 1, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::Call.raw(), 7, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::NoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 8, 1, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 9, 1, 0],
+        ]);
+
+        let catalog = ScriptReferenceCatalog::build(&scene_data, &scripts);
+        assert_eq!(catalog.script_context_root(3), 2);
+        assert_eq!(catalog.script_context_root(8), 7);
+        assert_eq!(catalog.script_context_root(10), 10);
+        assert_eq!(catalog.script_context_root(0), 0);
     }
 
     #[test]

@@ -122,46 +122,53 @@ pub(super) struct BattlePresentationState {
     pub(super) player_battle_frame_counts: Vec<Option<usize>>,
     pub(super) enemy_battle_frame_widths: Vec<Option<u16>>,
     pub(super) post_battle: Option<PostBattlePresentation>,
-    last_battle_render_ticks: Option<u64>,
-    dialog_render_ticks: Option<u64>,
+    last_battle_ui_ticks: Option<u64>,
+    battle_render_ticks: u64,
 }
 
 impl BattlePresentationState {
-    /// Keep the battlefield animation on the frame visible when a battle dialog starts.
+    /// Start a fresh animation epoch for a newly created battle.
+    pub(super) fn begin_battle(&mut self) {
+        self.last_battle_ui_ticks = None;
+        self.battle_render_ticks = 0;
+    }
+
+    /// Advance the battle-local clock, freezing it behind entry transitions and dialogs.
     pub(super) fn render_ticks(
         &mut self,
         current_ticks: u64,
         battle_active: bool,
-        freeze_for_dialog: bool,
+        frozen: bool,
     ) -> u64 {
         battle_render_ticks(
-            &mut self.last_battle_render_ticks,
-            &mut self.dialog_render_ticks,
+            &mut self.last_battle_ui_ticks,
+            &mut self.battle_render_ticks,
             current_ticks,
             battle_active,
-            freeze_for_dialog,
+            frozen,
         )
     }
 }
 
 fn battle_render_ticks(
-    last_ticks: &mut Option<u64>,
-    frozen_ticks: &mut Option<u64>,
+    last_ui_ticks: &mut Option<u64>,
+    render_ticks: &mut u64,
     current_ticks: u64,
     battle_active: bool,
-    freeze_for_dialog: bool,
+    frozen: bool,
 ) -> u64 {
     if !battle_active {
-        *last_ticks = None;
-        *frozen_ticks = None;
-        current_ticks
-    } else if freeze_for_dialog {
-        *frozen_ticks.get_or_insert(last_ticks.unwrap_or(current_ticks))
-    } else {
-        *frozen_ticks = None;
-        *last_ticks = Some(current_ticks);
-        current_ticks
+        *last_ui_ticks = None;
+        *render_ticks = 0;
+        return 0;
     }
+    let elapsed = last_ui_ticks
+        .replace(current_ticks)
+        .map_or(0, |last| current_ticks.saturating_sub(last));
+    if !frozen {
+        *render_ticks = render_ticks.saturating_add(elapsed);
+    }
+    *render_ticks
 }
 
 pub(super) struct AudioSession {
@@ -272,8 +279,7 @@ impl DesktopSession {
         self.battle.battle_debug_hit = None;
         self.battle.battle_debug_item_start = None;
         self.battle.post_battle = None;
-        self.battle.last_battle_render_ticks = None;
-        self.battle.dialog_render_ticks = None;
+        self.battle.begin_battle();
     }
 
     pub(super) fn apply_original_restore(
@@ -374,8 +380,8 @@ impl DesktopSession {
                     })
                     .collect(),
                 post_battle: None,
-                last_battle_render_ticks: None,
-                dialog_render_ticks: None,
+                last_battle_ui_ticks: None,
+                battle_render_ticks: 0,
             },
             audio: AudioSession {
                 sound_effects: SoundEffects::new(voc_mkf)
@@ -398,37 +404,45 @@ mod tests {
     use super::{battle_render_ticks, PendingSceneChange};
 
     #[test]
-    fn battle_dialog_keeps_the_first_render_tick_until_it_closes() {
+    fn battle_clock_starts_at_zero_and_freezes_behind_transitions_or_dialogs() {
         let mut last = None;
-        let mut frozen = None;
+        let mut rendered = 0;
 
         assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 10, false, false),
+            battle_render_ticks(&mut last, &mut rendered, 10, false, false),
+            0
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut rendered, 20, true, true),
+            0
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut rendered, 30, true, true),
+            0
+        );
+        assert_eq!(
+            battle_render_ticks(&mut last, &mut rendered, 40, true, false),
             10
         );
         assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 20, true, false),
+            battle_render_ticks(&mut last, &mut rendered, 50, true, false),
             20
         );
         assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 30, true, true),
+            battle_render_ticks(&mut last, &mut rendered, 60, true, true),
             20
         );
         assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 40, true, true),
-            20
+            battle_render_ticks(&mut last, &mut rendered, 70, true, false),
+            30
         );
         assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 50, true, false),
-            50
+            battle_render_ticks(&mut last, &mut rendered, 80, false, false),
+            0
         );
         assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 60, false, false),
-            60
-        );
-        assert_eq!(
-            battle_render_ticks(&mut last, &mut frozen, 70, true, true),
-            70
+            battle_render_ticks(&mut last, &mut rendered, 90, true, false),
+            0
         );
     }
 

@@ -8,12 +8,16 @@ use pal_core::battle::{
     BattleState, BattleStatus, BattleTarget, MagicEventPhase,
 };
 use pal_core::game::BATTLE_FRAME_MS;
+use std::collections::VecDeque;
 
 use super::battle_timing::{
-    battle_magic_for_event, enemy_attack_frames, enemy_escape_offset, enemy_escape_timeline,
-    enemy_magic_pre_frames, event_has_full_magic_visual, kept_effect_frame, magic_event_timeline,
-    offensive_effect_frame_at, original_frames_to_ticks, player_attack_ticks, timed_frame_at,
-    timed_frames_to_ticks, EnemyEscapeTimeline, MagicEventTimeline, BATTLE_FADE_TICKS,
+    battle_event_group, battle_event_group_timing_event, battle_magic_for_event,
+    enemy_attack_frames, enemy_defeated, enemy_escape_offset, enemy_escape_timeline,
+    enemy_feedback_target, enemy_feedback_timing_event, enemy_magic_pre_frames,
+    event_has_full_magic_visual, kept_effect_frame, magic_event_timeline,
+    offensive_effect_frame_at, original_frames_to_ticks, pending_enemy_feedback_mask,
+    player_attack_ticks, player_feedback_target, timed_frame_at, timed_frames_to_ticks,
+    EnemyEscapeTimeline, MagicEventTimeline, BATTLE_FADE_TICKS,
 };
 use super::battle_update::{
     ACTION_EVENT_TICKS, ENEMY_DIVIDE_EVENT_TICKS, ENEMY_TRANSFORM_EVENT_TICKS,
@@ -84,6 +88,7 @@ pub struct BattleRenderState<'a> {
     pub auto_attack: bool,
     pub ticks: u64,
     pub event: Option<BattleEvent>,
+    pub event_queue: Option<&'a VecDeque<BattleEvent>>,
     pub event_ticks: u16,
     pub kept_effects: &'a [BattleEvent],
 }
@@ -156,6 +161,14 @@ fn draw_battle_fighter_sprites(renderer: &mut Renderer, sprites: &mut [BattleFig
     }
 }
 
+fn enemy_should_render(alive: bool, pending_feedback: u8, enemy: usize) -> bool {
+    alive
+        || u32::try_from(enemy)
+            .ok()
+            .and_then(|shift| 1u8.checked_shl(shift))
+            .is_some_and(|bit| pending_feedback & bit != 0)
+}
+
 impl PostBattlePresentation {
     pub(super) fn visible_pages(&self) -> (bool, &[BattleSettlementPage]) {
         classic_post_battle_page_stack(&self.pages, self.page)
@@ -190,6 +203,21 @@ fn battle_animation_ticks(ui_ticks: u64) -> u64 {
     ui_ticks.saturating_mul(UI_TIME_QUANTUM_MS) / BATTLE_FRAME_MS
 }
 
+fn enemy_idle_frame(
+    idle_frames: u16,
+    idle_animation_speed: u16,
+    battle_ticks: u64,
+    held_in_first_frame: bool,
+) -> usize {
+    if held_in_first_frame {
+        return 0;
+    }
+    let frames = u64::from(idle_frames.max(1));
+    let speed = u64::from(idle_animation_speed.max(1));
+    // Classic updates fighters once before building the fixed entry frame.
+    usize::try_from(battle_ticks.saturating_add(1) / speed % frames).unwrap_or(0)
+}
+
 pub fn render_battle(
     renderer: &mut Renderer,
     battle: &BattleState,
@@ -213,10 +241,24 @@ pub(super) fn render_battle_frame(
         menu,
         auto_attack,
         ticks,
-        event,
+        event: raw_event,
+        event_queue,
         event_ticks,
         kept_effects,
     } = state;
+    let event_group = event_queue
+        .map(battle_event_group)
+        .filter(|group| group.first().copied() == raw_event)
+        .unwrap_or_else(|| raw_event.into_iter().collect());
+    let event = battle_event_group_timing_event(&event_group);
+    let pending_enemy_feedback = event_queue.map_or_else(
+        || {
+            raw_event
+                .and_then(enemy_feedback_target)
+                .map_or(0, |enemy| 1 << enemy)
+        },
+        pending_enemy_feedback_mask,
+    );
     let battle_ticks = battle_animation_ticks(ticks);
     if let Some(background) = resources
         .backgrounds
@@ -278,37 +320,16 @@ pub(super) fn render_battle_frame(
     let mut fighter_sprites = Vec::with_capacity(battle.enemies.len() + battle.players.len());
 
     for (index, enemy) in battle.enemies.iter().enumerate() {
-        let is_defeat_event = matches!(
-            event,
-            Some(
-                BattleEvent::PlayerAttack {
-                    enemy: target,
-                    defeated: true,
-                    ..
-                } | BattleEvent::PlayerMagic {
-                    enemy: target,
-                    defeated: true,
-                    ..
-                } | BattleEvent::SimulatedMagic {
-                    enemy: target,
-                    defeated: true,
-                    ..
-                } | BattleEvent::PlayerCooperativeMagic {
-                    enemy: target,
-                    defeated: true,
-                    ..
-                } | BattleEvent::EnemyConfusedAttack {
-                    target,
-                    defeated: true,
-                    ..
-                }
-            ) if target == index
-        );
-        if !enemy.is_alive() && !is_defeat_event {
+        let target_event = event_group
+            .iter()
+            .copied()
+            .find(|&event| enemy_feedback_target(event) == Some(index));
+        let is_defeat_event = target_event.is_some_and(enemy_defeated);
+        if !enemy_should_render(enemy.is_alive(), pending_enemy_feedback, index) {
             continue;
         }
-        let idle_frames = usize::from(enemy.idle_frames.max(1));
-        let speed = u64::from(enemy.idle_animation_speed.max(1));
+        let held_in_first_frame = enemy.statuses.is_active(BattleStatus::Sleep)
+            || enemy.statuses.is_active(BattleStatus::Paralyzed);
         let actor_state = event.and_then(|event| {
             enemy_actor_animation_state(battle, event, index, event_ticks, magic_timing)
         });
@@ -317,7 +338,14 @@ pub(super) fn render_battle_frame(
         let frame = transform_sprite.map_or_else(
             || {
                 actor_state.map_or_else(
-                    || usize::try_from(battle_ticks / speed).unwrap_or(0) % idle_frames,
+                    || {
+                        enemy_idle_frame(
+                            enemy.idle_frames,
+                            enemy.idle_animation_speed,
+                            battle_ticks,
+                            held_in_first_frame,
+                        )
+                    },
                     |state| state.2,
                 )
             },
@@ -340,7 +368,10 @@ pub(super) fn render_battle_frame(
             ) => magic_blow_offset(blow, event_ticks),
             _ => 0,
         };
-        let (feedback_x, feedback_y, exact_flash) = event
+        let feedback_event = target_event
+            .zip(event)
+            .map(|(target, timing)| enemy_feedback_timing_event(timing, target));
+        let (feedback_x, feedback_y, exact_flash) = feedback_event
             .map(|event| enemy_feedback_state(event, index, event_ticks, magic_timing))
             .unwrap_or((0, 0, false));
         let (script_x, script_y, script_visibility, script_color_shift) = event
@@ -359,24 +390,11 @@ pub(super) fn render_battle_frame(
             + enemy_action_y
             + feedback_y
             + script_y;
-        let is_hit = matches!(
-            event,
-            Some(
-                BattleEvent::PlayerAttack { enemy, .. }
-                    | BattleEvent::PlayerMagic { enemy, .. }
-                    | BattleEvent::SimulatedMagic { enemy, .. }
-                    | BattleEvent::PlayerCooperativeMagic { enemy, .. }
-                    | BattleEvent::EnemyConfusedAttack { target: enemy, .. }
-            ) if enemy == index
-        );
-        let exact_attack_feedback = matches!(
-            event,
-            Some(BattleEvent::PlayerAttack {
-                enemy: target,
-                visual: true,
-                ..
-            }) if target == index
-        );
+        let is_hit = target_event.is_some();
+        let exact_attack_feedback = target_event.is_some_and(|target| {
+            matches!(target, BattleEvent::PlayerAttack { .. })
+                && matches!(event, Some(BattleEvent::PlayerAttack { visual: true, .. }))
+        });
         let fade_visibility = event
             .filter(|_| is_defeat_event)
             .map(|_| {
@@ -451,6 +469,11 @@ pub(super) fn render_battle_frame(
         if battle.hiding_time() != 0 {
             continue;
         }
+        let player_event = event_group
+            .iter()
+            .copied()
+            .find(|&event| player_feedback_target(event) == Some(index))
+            .or(event);
         let (mut x, mut y) = player_position(battle.players.len(), index);
         let attack_state = event
             .and_then(|event| player_attack_animation_state(battle, event, index, event_ticks));
@@ -504,7 +527,7 @@ pub(super) fn render_battle_frame(
             x += offset;
             y += offset / 2;
         }
-        if let Some(event) = event {
+        if let Some(event) = player_event {
             let (feedback_x, feedback_y) =
                 player_feedback_offset(battle, event, index, event_ticks, magic_timing);
             x += feedback_x;
@@ -572,7 +595,7 @@ pub(super) fn render_battle_frame(
         }
         let sprite = usize::from(player.battle_sprite_num);
         let available = resources.player_sprites.frame_count(sprite).unwrap_or(0);
-        let event_frame = match event {
+        let event_frame = match player_event {
             Some(BattleEvent::PlayerAttack { .. }) if attack_state.is_some() => {
                 attack_state.map(|(_, _, frame)| frame)
             }
@@ -652,7 +675,7 @@ pub(super) fn render_battle_frame(
         if let Some(bitmap) = resources.player_sprites.decode_frame(sprite, frame) {
             let left = x - i32::from(bitmap.width) / 2;
             let top = y - i32::from(bitmap.height);
-            let is_hit = match event {
+            let is_hit = match player_event {
                 Some(BattleEvent::EnemyAttack {
                     player,
                     auto_defended,
@@ -687,15 +710,29 @@ pub(super) fn render_battle_frame(
     draw_battle_fighter_sprites(renderer, &mut fighter_sprites);
 
     if let Some(event) = event {
-        let _ = render_shared_battle_effect(
-            renderer,
-            battle,
-            resources.battle_effects,
-            resources.magic_effect_sprites,
-            resources.player_sprites,
-            event,
-            event_ticks,
-        );
+        if matches!(event, BattleEvent::PlayerAttack { .. }) {
+            for &target_event in &event_group {
+                let _ = render_shared_battle_effect(
+                    renderer,
+                    battle,
+                    resources.battle_effects,
+                    resources.magic_effect_sprites,
+                    resources.player_sprites,
+                    enemy_feedback_timing_event(event, target_event),
+                    event_ticks,
+                );
+            }
+        } else {
+            let _ = render_shared_battle_effect(
+                renderer,
+                battle,
+                resources.battle_effects,
+                resources.magic_effect_sprites,
+                resources.player_sprites,
+                event,
+                event_ticks,
+            );
+        }
     }
 
     if let Some(event) = event {
@@ -713,15 +750,17 @@ pub(super) fn render_battle_frame(
     if let Some(event) = event {
         render_battle_action_label(renderer, event, event_ticks, resources.text, resources.font);
         if feedback_active {
-            render_battle_event(
-                renderer,
-                battle,
-                event,
-                event_ticks,
-                resources.ui_sprites,
-                resources.text,
-                resources.font,
-            );
+            for &feedback_event in &event_group {
+                render_battle_event(
+                    renderer,
+                    battle,
+                    feedback_event,
+                    event_ticks,
+                    resources.ui_sprites,
+                    resources.text,
+                    resources.font,
+                );
+            }
         }
     }
 
@@ -2672,6 +2711,15 @@ mod tests {
     }
 
     #[test]
+    fn enemy_idle_animation_starts_from_classic_initial_update() {
+        assert_eq!(enemy_idle_frame(4, 3, 0, false), 0);
+        assert_eq!(enemy_idle_frame(4, 1, 0, false), 1);
+        assert_eq!(enemy_idle_frame(4, 3, 1, false), 0);
+        assert_eq!(enemy_idle_frame(4, 3, 2, false), 1);
+        assert_eq!(enemy_idle_frame(4, 3, 99, true), 0);
+    }
+
+    #[test]
     fn classic_post_battle_notices_accumulate_and_primary_level_up_resets_the_screen() {
         let role = player_role();
         let pages = vec![
@@ -2975,5 +3023,14 @@ mod tests {
             BATTLE_COMMAND_ICONS,
             [(40, 27, 140), (41, 0, 155), (42, 54, 155), (43, 27, 170)]
         );
+    }
+
+    #[test]
+    fn defeated_enemies_stay_visible_while_feedback_is_pending() {
+        assert!(enemy_should_render(false, 0b001, 0));
+        assert!(enemy_should_render(false, 0b100, 2));
+        assert!(!enemy_should_render(false, 0b001, 1));
+        assert!(!enemy_should_render(false, 0, 0));
+        assert!(enemy_should_render(true, 0, 0));
     }
 }

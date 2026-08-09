@@ -15,6 +15,7 @@ pub(super) struct ScriptLocation {
 pub(super) struct ScriptNavigation {
     current: Option<ScriptLocation>,
     selected_instruction: Option<u16>,
+    scroll_to_selected: bool,
     back: Vec<ScriptLocation>,
     forward: Vec<ScriptLocation>,
 }
@@ -23,6 +24,7 @@ impl ScriptNavigation {
     pub(super) fn reset(&mut self, root: u16) {
         self.current = (root != 0).then_some(ScriptLocation { root, entry: root });
         self.selected_instruction = (root != 0).then_some(root);
+        self.scroll_to_selected = root != 0;
         self.back.clear();
         self.forward.clear();
     }
@@ -39,27 +41,26 @@ impl ScriptNavigation {
         self.selected_instruction = Some(entry);
     }
 
+    pub(super) fn take_scroll_request(&mut self) -> Option<u16> {
+        if !self.scroll_to_selected {
+            return None;
+        }
+        self.scroll_to_selected = false;
+        self.selected_instruction
+    }
+
     pub(super) fn navigate(&mut self, entry: u16) -> bool {
-        if entry == 0 {
-            return false;
-        }
-        let Some(current) = self.current else {
-            self.current = Some(ScriptLocation { root: entry, entry });
-            self.selected_instruction = Some(entry);
-            return true;
+        let root = self.current.map_or(entry, |location| location.root);
+        self.navigate_to_location(ScriptLocation { root, entry })
+    }
+
+    pub(super) fn navigate_in_context(&mut self, root: u16, entry: u16) -> bool {
+        let root = if root == 0 || root > entry {
+            entry
+        } else {
+            root
         };
-        if current.entry == entry {
-            self.selected_instruction = Some(entry);
-            return false;
-        }
-        self.back.push(current);
-        self.forward.clear();
-        self.current = Some(ScriptLocation {
-            root: current.root,
-            entry,
-        });
-        self.selected_instruction = Some(entry);
-        true
+        self.navigate_to_location(ScriptLocation { root, entry })
     }
 
     pub(super) fn go_back(&mut self) -> bool {
@@ -69,6 +70,7 @@ impl ScriptNavigation {
         self.forward.push(current);
         self.current = Some(previous);
         self.selected_instruction = Some(previous.entry);
+        self.scroll_to_selected = true;
         true
     }
 
@@ -79,6 +81,7 @@ impl ScriptNavigation {
         self.back.push(current);
         self.current = Some(next);
         self.selected_instruction = Some(next.entry);
+        self.scroll_to_selected = true;
         true
     }
 
@@ -93,6 +96,25 @@ impl ScriptNavigation {
 
     pub(super) fn can_go_forward(&self) -> bool {
         !self.forward.is_empty()
+    }
+
+    fn navigate_to_location(&mut self, location: ScriptLocation) -> bool {
+        if location.entry == 0 {
+            return false;
+        }
+        self.selected_instruction = Some(location.entry);
+        self.scroll_to_selected = true;
+        let Some(current) = self.current else {
+            self.current = Some(location);
+            return true;
+        };
+        if current == location {
+            return false;
+        }
+        self.back.push(current);
+        self.forward.clear();
+        self.current = Some(location);
+        true
     }
 }
 
@@ -208,8 +230,12 @@ mod tests {
         let mut navigation = ScriptNavigation::default();
         navigation.reset(10);
         assert_eq!(navigation.current().unwrap().entry, 10);
+        assert_eq!(navigation.take_scroll_request(), Some(10));
+        assert_eq!(navigation.take_scroll_request(), None);
         assert!(navigation.navigate(20));
         assert!(navigation.navigate(30));
+        assert_eq!(navigation.current().unwrap().root, 10);
+        assert_eq!(navigation.take_scroll_request(), Some(30));
         assert!(navigation.can_go_back());
         assert!(navigation.go_back());
         assert_eq!(navigation.current().unwrap().entry, 20);
@@ -218,6 +244,23 @@ mod tests {
         assert!(navigation.go_root());
         assert_eq!(navigation.current().unwrap().entry, 10);
         assert!(!navigation.can_go_forward());
+    }
+
+    #[test]
+    fn navigation_can_replace_root_with_inferred_context() {
+        let mut navigation = ScriptNavigation::default();
+        navigation.reset(10);
+        assert!(navigation.navigate_in_context(18, 20));
+        assert_eq!(
+            navigation.current(),
+            Some(ScriptLocation {
+                root: 18,
+                entry: 20,
+            })
+        );
+        assert_eq!(navigation.take_scroll_request(), Some(20));
+        assert!(!navigation.navigate_in_context(18, 20));
+        assert_eq!(navigation.take_scroll_request(), Some(20));
     }
 
     #[test]

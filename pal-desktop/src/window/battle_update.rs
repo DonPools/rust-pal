@@ -11,10 +11,11 @@ use super::battle_render::{
     BattleMenuState, BattlePendingCommand, BattleSettlementPage, PostBattlePresentation,
 };
 use super::battle_timing::{
-    battle_magic_for_event, battle_milliseconds_to_ticks, effect_sound_elapsed_tick,
-    enemy_attack_frames, enemy_escape_timeline, enemy_magic_pre_frames,
-    event_has_full_magic_visual, magic_event_timeline, offensive_effect_frame_count,
-    original_frames_to_ticks, player_attack_ticks, MagicEventTimeline, BATTLE_FADE_TICKS,
+    battle_event_group, battle_event_group_timing_event, battle_magic_for_event,
+    battle_milliseconds_to_ticks, effect_sound_elapsed_tick, enemy_attack_frames,
+    enemy_escape_timeline, enemy_magic_pre_frames, event_has_full_magic_visual,
+    magic_event_timeline, offensive_effect_frame_count, original_frames_to_ticks,
+    player_attack_ticks, MagicEventTimeline, BATTLE_FADE_TICKS,
 };
 use super::menu_state::{update_wrapping_selection, InventoryMenu, InventoryMode};
 use super::session::{BattleDebugHit, BattleDebugItemStart, BattleDebugTarget, DesktopSession};
@@ -647,14 +648,7 @@ pub(super) fn queue_battle_events(
     if !was_empty {
         return;
     }
-    let Some(&event) = services.battle.battle_events.front() else {
-        return;
-    };
-    services.battle.battle_event_ticks = dynamic_battle_event_duration(game, services, event);
-    services.battle.battle_effect_sound_count = 0;
-    services.battle.battle_feedback_sound_played = false;
-    play_battle_event_sounds(game, services, event);
-    play_due_magic_sounds(game, services);
+    start_battle_event_group(game, services);
 }
 
 fn update_battle_item_debug(
@@ -1036,12 +1030,13 @@ fn advance_battle_events(game: &GameState, services: &mut DesktopSession) -> boo
         BattleEventTick::Idle => false,
         BattleEventTick::Started(event) => {
             retain_completed_magic_effect(game, services, completed);
-            services.battle.battle_event_ticks =
-                dynamic_battle_event_duration(game, services, event);
-            services.battle.battle_effect_sound_count = 0;
-            services.battle.battle_feedback_sound_played = false;
-            play_battle_event_sounds(game, services, event);
-            play_due_magic_sounds(game, services);
+            debug_assert_eq!(
+                battle_event_group_timing_event(&battle_event_group(
+                    &services.battle.battle_events
+                )),
+                Some(event)
+            );
+            start_battle_event_group(game, services);
             true
         }
         BattleEventTick::Active => {
@@ -1078,13 +1073,30 @@ fn tick_battle_event_queue(
         return BattleEventTick::Active;
     }
 
-    events.pop_front();
-    let Some(event) = events.front().copied() else {
+    let completed_len = battle_event_group(events).len().max(1);
+    for _ in 0..completed_len {
+        events.pop_front();
+    }
+    let group = battle_event_group(events);
+    let Some(event) = battle_event_group_timing_event(&group) else {
         *ticks = 0;
         return BattleEventTick::Drained;
     };
     *ticks = battle_event_duration(event);
     BattleEventTick::Started(event)
+}
+
+fn start_battle_event_group(game: &GameState, services: &mut DesktopSession) {
+    let group = battle_event_group(&services.battle.battle_events);
+    let Some(event) = battle_event_group_timing_event(&group) else {
+        services.battle.battle_event_ticks = 0;
+        return;
+    };
+    services.battle.battle_event_ticks = dynamic_battle_event_duration(game, services, event);
+    services.battle.battle_effect_sound_count = 0;
+    services.battle.battle_feedback_sound_played = false;
+    play_battle_event_group_sounds(game, services, &group);
+    play_due_magic_sounds(game, services);
 }
 
 fn battle_event_duration(event: BattleEvent) -> u16 {
@@ -1249,7 +1261,8 @@ fn retain_completed_magic_effect(
 }
 
 fn play_due_magic_sounds(game: &GameState, services: &mut DesktopSession) {
-    let Some(event) = services.battle.battle_events.front().copied() else {
+    let group = battle_event_group(&services.battle.battle_events);
+    let Some(event) = battle_event_group_timing_event(&group) else {
         return;
     };
     match event {
@@ -1386,7 +1399,11 @@ fn play_due_magic_sounds(game: &GameState, services: &mut DesktopSession) {
         }
     }
     if !services.battle.battle_feedback_sound_played && elapsed >= timeline.tail_start() {
-        if let Some(sound) = magic_feedback_sound(game, event).filter(|sound| *sound != 0) {
+        for sound in group
+            .iter()
+            .filter_map(|&event| magic_feedback_sound(game, event))
+            .filter(|sound| *sound != 0)
+        {
             services.audio.sound_effects.play(sound);
         }
         services.battle.battle_feedback_sound_played = true;
@@ -1589,6 +1606,44 @@ fn play_battle_event_sounds(game: &GameState, services: &mut DesktopSession, eve
     .unwrap_or_default();
     for sound in sounds.into_iter().flatten().filter(|&sound| sound != 0) {
         services.audio.sound_effects.play(sound);
+    }
+}
+
+fn play_battle_event_group_sounds(
+    game: &GameState,
+    services: &mut DesktopSession,
+    group: &[BattleEvent],
+) {
+    let Some(&first) = group.first() else {
+        return;
+    };
+    play_battle_event_sounds(game, services, first);
+    if !matches!(first, BattleEvent::PlayerAttack { .. }) {
+        return;
+    }
+    let Some(battle) = game.battle() else {
+        return;
+    };
+    for &event in group.iter().skip(1) {
+        let BattleEvent::PlayerAttack {
+            enemy, defeated, ..
+        } = event
+        else {
+            continue;
+        };
+        let Some(enemy) = battle.enemies.get(enemy) else {
+            continue;
+        };
+        let sound = if defeated {
+            enemy.death_sound
+        } else {
+            enemy.action_sound
+        };
+        if let Ok(sound) = u16::try_from(sound) {
+            if sound != 0 {
+                services.audio.sound_effects.play(sound);
+            }
+        }
     }
 }
 
@@ -2198,6 +2253,31 @@ mod tests {
             tick_battle_event_queue(&mut events, &mut ticks),
             BattleEventTick::Idle
         );
+    }
+
+    #[test]
+    fn battle_event_queue_drains_all_target_feedback_as_one_batch() {
+        let feedback = |enemy, visual| BattleEvent::PlayerMagic {
+            player: 0,
+            enemy,
+            magic_object: 1,
+            blow: 0,
+            damage: 10,
+            phase: MagicEventPhase::Feedback,
+            visual,
+            defeated: true,
+        };
+        let finished = BattleEvent::Finished(BattleResult::Won);
+        let mut events =
+            std::collections::VecDeque::from([feedback(0, true), feedback(1, false), finished]);
+        let mut ticks = 1;
+
+        assert_eq!(
+            tick_battle_event_queue(&mut events, &mut ticks),
+            BattleEventTick::Started(finished)
+        );
+        assert_eq!(events, std::collections::VecDeque::from([finished]));
+        assert_eq!(ticks, FINISHED_EVENT_TICKS);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use pal_core::battle::BattleEvent;
 use pal_core::game::GameState;
 use pal_core::role::RoleSprites;
 use pal_core::script::ScriptDebugSnapshot;
+use std::collections::VecDeque;
 
 use super::battle_render::BattleMenuState;
 use super::battle_render::{
@@ -50,6 +51,7 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) battle_menu: BattleMenuState,
     pub(super) battle_auto_attack: bool,
     pub(super) battle_event: Option<BattleEvent>,
+    pub(super) battle_event_queue: Option<&'a VecDeque<BattleEvent>>,
     pub(super) battle_event_ticks: u16,
     pub(super) battle_kept_effects: &'a [BattleEvent],
     pub(super) post_battle: Option<&'a PostBattlePresentation>,
@@ -197,6 +199,11 @@ fn render_battle_or_world(
                     .post_battle
                     .is_none()
                     .then_some(ui.battle_event)
+                    .flatten(),
+                event_queue: ui
+                    .post_battle
+                    .is_none()
+                    .then_some(ui.battle_event_queue)
                     .flatten(),
                 event_ticks: if ui.post_battle.is_some() {
                     0

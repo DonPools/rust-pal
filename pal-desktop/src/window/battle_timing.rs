@@ -1,3 +1,6 @@
+use std::collections::VecDeque;
+
+use pal_assets::battle::MAX_ENEMIES_IN_TEAM;
 use pal_core::battle::{BattleEvent, BattleMagic, BattleMagicVisual, BattleState, MagicEventPhase};
 use pal_core::game::BATTLE_FRAME_MS;
 
@@ -9,8 +12,184 @@ const NORMAL_PRE_MAGIC_FRAMES: usize = 17;
 const SUMMON_PRE_MAGIC_FRAMES: usize = 7;
 const SUMMON_BRIGHTEN_FRAMES: usize = 10;
 const COOPERATIVE_PRE_MAGIC_FRAMES: usize = 20;
-pub(super) const BATTLE_FADE_MS: u64 = 12 * 6 * 16;
 pub(super) const BATTLE_FADE_TICKS: u16 = 29;
+
+fn follows_enemy_feedback_event(first: BattleEvent, next: BattleEvent) -> bool {
+    match (first, next) {
+        (
+            BattleEvent::PlayerAttack {
+                player,
+                visual: true,
+                ..
+            },
+            BattleEvent::PlayerAttack {
+                player: next_player,
+                visual: false,
+                ..
+            },
+        ) => player == next_player,
+        (
+            BattleEvent::PlayerMagic {
+                player,
+                magic_object,
+                phase: MagicEventPhase::Feedback,
+                visual: true,
+                ..
+            },
+            BattleEvent::PlayerMagic {
+                player: next_player,
+                magic_object: next_magic,
+                phase: MagicEventPhase::Feedback,
+                visual: false,
+                ..
+            },
+        ) => player == next_player && magic_object == next_magic,
+        (
+            BattleEvent::EnemyMagic {
+                enemy,
+                magic_object,
+                phase: MagicEventPhase::Feedback,
+                visual: true,
+                ..
+            },
+            BattleEvent::EnemyMagic {
+                enemy: next_enemy,
+                magic_object: next_magic,
+                phase: MagicEventPhase::Feedback,
+                visual: false,
+                ..
+            },
+        ) => enemy == next_enemy && magic_object == next_magic,
+        (
+            BattleEvent::PlayerCooperativeMagic {
+                player,
+                magic_object,
+                visual: true,
+                ..
+            },
+            BattleEvent::PlayerCooperativeMagic {
+                player: next_player,
+                magic_object: next_magic,
+                visual: false,
+                ..
+            },
+        ) => player == next_player && magic_object == next_magic,
+        (
+            BattleEvent::SimulatedMagic {
+                magic,
+                visual: true,
+                ..
+            },
+            BattleEvent::SimulatedMagic {
+                magic: next_magic,
+                visual: false,
+                ..
+            },
+        ) => magic.object_id == next_magic.object_id,
+        _ => false,
+    }
+}
+
+pub(super) fn battle_event_group(events: &VecDeque<BattleEvent>) -> Vec<BattleEvent> {
+    let Some(&first) = events.front() else {
+        return Vec::new();
+    };
+    let mut group = Vec::with_capacity(MAX_ENEMIES_IN_TEAM);
+    group.push(first);
+    for &event in events.iter().skip(1).take(MAX_ENEMIES_IN_TEAM - 1) {
+        if !follows_enemy_feedback_event(first, event) {
+            break;
+        }
+        group.push(event);
+    }
+    group
+}
+
+pub(super) fn battle_event_group_timing_event(group: &[BattleEvent]) -> Option<BattleEvent> {
+    let mut event = *group.first()?;
+    let defeated = group.iter().copied().any(enemy_defeated);
+    match &mut event {
+        BattleEvent::PlayerAttack {
+            defeated: value, ..
+        }
+        | BattleEvent::PlayerMagic {
+            defeated: value, ..
+        }
+        | BattleEvent::PlayerCooperativeMagic {
+            defeated: value, ..
+        }
+        | BattleEvent::SimulatedMagic {
+            defeated: value, ..
+        } => *value = defeated,
+        _ => {}
+    }
+    Some(event)
+}
+
+pub(super) fn enemy_feedback_target(event: BattleEvent) -> Option<usize> {
+    match event {
+        BattleEvent::PlayerAttack { enemy, .. }
+        | BattleEvent::PlayerMagic {
+            enemy,
+            phase: MagicEventPhase::Feedback,
+            ..
+        }
+        | BattleEvent::PlayerCooperativeMagic { enemy, .. }
+        | BattleEvent::SimulatedMagic { enemy, .. } => Some(enemy),
+        BattleEvent::EnemyConfusedAttack { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+pub(super) fn player_feedback_target(event: BattleEvent) -> Option<usize> {
+    match event {
+        BattleEvent::EnemyMagic {
+            player,
+            phase: MagicEventPhase::Feedback,
+            ..
+        } => Some(player),
+        _ => None,
+    }
+}
+
+pub(super) fn pending_enemy_feedback_mask(events: &VecDeque<BattleEvent>) -> u8 {
+    events.iter().fold(0, |mask, &event| {
+        enemy_feedback_target(event).map_or(mask, |enemy| {
+            u32::try_from(enemy)
+                .ok()
+                .and_then(|shift| 1u8.checked_shl(shift))
+                .map_or(mask, |bit| mask | bit)
+        })
+    })
+}
+
+pub(super) fn enemy_feedback_timing_event(
+    timing_event: BattleEvent,
+    target_event: BattleEvent,
+) -> BattleEvent {
+    match (timing_event, target_event) {
+        (
+            BattleEvent::PlayerAttack {
+                visual, defeated, ..
+            },
+            BattleEvent::PlayerAttack {
+                player,
+                enemy,
+                damage,
+                critical,
+                ..
+            },
+        ) => BattleEvent::PlayerAttack {
+            player,
+            enemy,
+            damage,
+            critical,
+            visual,
+            defeated,
+        },
+        _ => target_event,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct EnemyEscapeTimeline {
@@ -491,5 +670,66 @@ mod tests {
         magic.speed = -3;
         assert_eq!(timed_frames_to_ticks(10, magic.speed), 5);
         assert_eq!(timed_frame_at(1, 10, magic.speed), 2);
+    }
+
+    #[test]
+    fn all_target_feedback_is_one_group_with_one_shared_death_fade() {
+        let feedback = |enemy, visual, defeated| BattleEvent::PlayerMagic {
+            player: 0,
+            enemy,
+            magic_object: 7,
+            blow: 0,
+            damage: 10,
+            phase: MagicEventPhase::Feedback,
+            visual,
+            defeated,
+        };
+        let events = VecDeque::from([
+            feedback(0, true, false),
+            feedback(1, false, true),
+            BattleEvent::Finished(pal_core::battle::BattleResult::Won),
+        ]);
+
+        let group = battle_event_group(&events);
+        assert_eq!(group.len(), 2);
+        assert!(matches!(
+            battle_event_group_timing_event(&group),
+            Some(BattleEvent::PlayerMagic {
+                enemy: 0,
+                defeated: true,
+                ..
+            })
+        ));
+        assert_eq!(pending_enemy_feedback_mask(&events), 0b11);
+    }
+
+    #[test]
+    fn all_target_attack_shares_feedback_but_dual_attack_starts_a_new_group() {
+        let attack = |enemy, visual, defeated| BattleEvent::PlayerAttack {
+            player: 0,
+            enemy,
+            damage: 10,
+            critical: false,
+            visual,
+            defeated,
+        };
+        let events = VecDeque::from([
+            attack(0, true, false),
+            attack(1, false, true),
+            attack(0, true, true),
+        ]);
+
+        let group = battle_event_group(&events);
+        assert_eq!(group.len(), 2);
+        let timing = battle_event_group_timing_event(&group).unwrap();
+        assert!(matches!(
+            enemy_feedback_timing_event(timing, group[1]),
+            BattleEvent::PlayerAttack {
+                enemy: 1,
+                visual: true,
+                defeated: true,
+                ..
+            }
+        ));
     }
 }
