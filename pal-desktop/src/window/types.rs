@@ -12,6 +12,7 @@ use pal_core::game::Camera;
 use pal_core::map::Map;
 use pal_core::role::RoleSprites;
 use pal_core::scene::SceneObject;
+use pal_core::script::ScriptReferenceCatalog;
 
 use crate::audio::MusicBackend;
 
@@ -52,6 +53,9 @@ pub struct LoadedScene {
 pub struct SceneEditorResources {
     pub role_sprites: RoleSprites,
     pub script_table: ScriptTable,
+    pub text: TextLibrary,
+    pub font: BitmapFont,
+    pub script_references: ScriptReferenceCatalog,
     pub scene_count: u16,
 }
 

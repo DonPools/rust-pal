@@ -148,6 +148,9 @@ fn run_scene_editor(
         data_dir,
         scene_data,
         script_table,
+        text,
+        font,
+        script_references,
         role_sprites,
         renderer,
     } = boot;
@@ -169,6 +172,9 @@ fn run_scene_editor(
         SceneEditorResources {
             role_sprites,
             script_table,
+            text,
+            font,
+            script_references,
             scene_count,
         },
         move |number, sprites| {

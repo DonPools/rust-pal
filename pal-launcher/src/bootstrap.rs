@@ -16,6 +16,7 @@ use pal_core::game::GameState;
 use pal_core::map::tile_to_world;
 use pal_core::party::Party;
 use pal_core::role::{Direction, Role, RoleSprites};
+use pal_core::script::ScriptReferenceCatalog;
 use pal_desktop::renderer::Renderer;
 
 use crate::assets::{
@@ -72,6 +73,9 @@ pub(super) struct BootstrappedSceneEditor {
     pub(super) data_dir: PathBuf,
     pub(super) scene_data: SceneData,
     pub(super) script_table: ScriptTable,
+    pub(super) text: TextLibrary,
+    pub(super) font: BitmapFont,
+    pub(super) script_references: ScriptReferenceCatalog,
     pub(super) role_sprites: RoleSprites,
     pub(super) renderer: Renderer,
 }
@@ -86,12 +90,17 @@ pub(super) fn bootstrap_scene_editor(data_dir: PathBuf) -> BootstrappedSceneEdit
         .clone();
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
+    let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
+    let script_references = ScriptReferenceCatalog::build(&scene_data, &script_table);
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
 
     BootstrappedSceneEditor {
         data_dir,
         scene_data,
         script_table,
+        text,
+        font,
+        script_references,
         role_sprites,
         renderer: Renderer::new(
             palette,
