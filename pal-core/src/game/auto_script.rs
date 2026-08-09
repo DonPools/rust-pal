@@ -147,13 +147,9 @@ impl<M: CollisionMap> GameState<M> {
                     return Ok(true);
                 }
                 JumpByChance => {
-                    let roll = ((u32::from(object_id)
-                        .wrapping_mul(1_103_515_245)
-                        .wrapping_add(u32::from(script_entry))
-                        .wrapping_add(self.script_frame.wrapping_mul(12_345))
-                        >> 16)
-                        % 100
-                        + 1) as u16;
+                    let mut random_state = self.random_state();
+                    let roll = random::random_long(&mut random_state, 1, 100) as u16;
+                    self.set_random_state(random_state);
                     let object = &mut self.scene_objects[object_index];
                     if roll >= entry.operands[0] {
                         if entry.operands[1] != 0 {
@@ -250,6 +246,25 @@ impl<M: CollisionMap> GameState<M> {
                         },
                     );
                 }
+                SetPartyMemberPose => {
+                    let direction = Direction::from_pal(entry.operands[0]).ok_or(
+                        AutoScriptError::Unsupported {
+                            object_id,
+                            entry: script_entry,
+                            opcode: entry.opcode,
+                        },
+                    )?;
+                    return self.advance_with_auto_world_action(
+                        object_index,
+                        script_entry,
+                        object_id,
+                        ScriptAction::SetPlayerPose {
+                            direction,
+                            frame: u8::try_from(entry.operands[1]).unwrap_or(u8::MAX),
+                            party_index: entry.operands[2],
+                        },
+                    );
+                }
                 SetSelectedObjectPose => {
                     if entry.operands[0] != 0 {
                         let target_id = selected_object(entry.operands[0], object_id);
@@ -274,7 +289,23 @@ impl<M: CollisionMap> GameState<M> {
                     self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
                     return Ok(true);
                 }
-                SetObjectTriggerScript => {
+                SetObjectAutoScript if entry.operands[0] != 0 => {
+                    let target_id = selected_object(entry.operands[0], object_id);
+                    return self.advance_with_auto_world_action(
+                        object_index,
+                        script_entry,
+                        target_id,
+                        ScriptAction::SetObjectAutoScript {
+                            object_id: target_id,
+                            script_entry: entry.operands[1],
+                        },
+                    );
+                }
+                SetObjectAutoScript => {
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
+                SetObjectTriggerScript if entry.operands[0] != 0 => {
                     let target_id = selected_object(entry.operands[0], object_id);
                     return self.advance_with_auto_world_action(
                         object_index,
@@ -286,7 +317,11 @@ impl<M: CollisionMap> GameState<M> {
                         },
                     );
                 }
-                SetObjectTriggerMode => {
+                SetObjectTriggerScript => {
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
+                SetObjectTriggerMode if entry.operands[0] != 0 => {
                     let target_id = selected_object(entry.operands[0], object_id);
                     return self.advance_with_auto_world_action(
                         object_index,
@@ -298,7 +333,11 @@ impl<M: CollisionMap> GameState<M> {
                         },
                     );
                 }
-                SetObjectState => {
+                SetObjectTriggerMode => {
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
+                }
+                SetObjectState if entry.operands[0] != 0 => {
                     let target_id = selected_object(entry.operands[0], object_id);
                     return self.advance_with_auto_world_action(
                         object_index,
@@ -309,6 +348,10 @@ impl<M: CollisionMap> GameState<M> {
                             state: entry.operands[1] as i16,
                         },
                     );
+                }
+                SetObjectState => {
+                    self.scene_objects[object_index].auto_script = script_entry.wrapping_add(1);
+                    return Ok(true);
                 }
                 PlaySound => {
                     self.pending_auto_sounds.push(entry.operands[0]);
@@ -428,7 +471,6 @@ impl<M: CollisionMap> GameState<M> {
                 | Confirm
                 | SetObjectPositionRelative
                 | SetObjectPosition
-                | SetPartyMemberPose
                 | SetEquipmentEffect
                 | EquipItem
                 | AdjustPlayerAttribute
@@ -442,7 +484,6 @@ impl<M: CollisionMap> GameState<M> {
                 | DamageEnemy
                 | RevivePlayer
                 | RemoveEquipment
-                | SetObjectAutoScript
                 | OpenBuyMenu
                 | OpenSellMenu
                 | PoisonEnemy
@@ -680,8 +721,66 @@ impl<M: CollisionMap> GameState<M> {
                         )?;
                     }
                 }
+                SetPartyMemberPose => {
+                    let direction = Direction::from_pal(entry.operands[0]).ok_or(
+                        AutoScriptError::Unsupported {
+                            object_id,
+                            entry: script_entry,
+                            opcode: entry.opcode,
+                        },
+                    )?;
+                    self.apply_auto_world_action(
+                        object_id,
+                        script_entry,
+                        object_id,
+                        ScriptAction::SetPlayerPose {
+                            direction,
+                            frame: u8::try_from(entry.operands[1]).unwrap_or(u8::MAX),
+                            party_index: entry.operands[2],
+                        },
+                    )?;
+                }
                 PlaySound => self.pending_auto_sounds.push(entry.operands[0]),
-                SetObjectState => {
+                SetObjectAutoScript if entry.operands[0] != 0 => {
+                    let target_id = selected_object(entry.operands[0], object_id);
+                    self.apply_auto_world_action(
+                        object_id,
+                        script_entry,
+                        target_id,
+                        ScriptAction::SetObjectAutoScript {
+                            object_id: target_id,
+                            script_entry: entry.operands[1],
+                        },
+                    )?;
+                }
+                SetObjectAutoScript => {}
+                SetObjectTriggerScript if entry.operands[0] != 0 => {
+                    let target_id = selected_object(entry.operands[0], object_id);
+                    self.apply_auto_world_action(
+                        object_id,
+                        script_entry,
+                        target_id,
+                        ScriptAction::SetObjectTriggerScript {
+                            object_id: target_id,
+                            script_entry: entry.operands[1],
+                        },
+                    )?;
+                }
+                SetObjectTriggerScript => {}
+                SetObjectTriggerMode if entry.operands[0] != 0 => {
+                    let target_id = selected_object(entry.operands[0], object_id);
+                    self.apply_auto_world_action(
+                        object_id,
+                        script_entry,
+                        target_id,
+                        ScriptAction::SetObjectTriggerMode {
+                            object_id: target_id,
+                            trigger_mode: entry.operands[1],
+                        },
+                    )?;
+                }
+                SetObjectTriggerMode => {}
+                SetObjectState if entry.operands[0] != 0 => {
                     let target_id = selected_object(entry.operands[0], object_id);
                     self.apply_auto_world_action(
                         object_id,
@@ -693,6 +792,7 @@ impl<M: CollisionMap> GameState<M> {
                         },
                     )?;
                 }
+                SetObjectState => {}
                 HideObjectShort => {
                     self.apply_auto_world_action(
                         object_id,
@@ -711,6 +811,19 @@ impl<M: CollisionMap> GameState<M> {
                         script_entry,
                         target_id,
                         ScriptAction::OffsetObject {
+                            object_id: target_id,
+                            dx: i32::from(entry.operands[1] as i16),
+                            dy: i32::from(entry.operands[2] as i16),
+                        },
+                    )?;
+                }
+                OffsetObject => {
+                    let target_id = selected_object(entry.operands[0], object_id);
+                    self.apply_auto_world_action(
+                        object_id,
+                        script_entry,
+                        target_id,
+                        ScriptAction::MoveObjectBy {
                             object_id: target_id,
                             dx: i32::from(entry.operands[1] as i16),
                             dy: i32::from(entry.operands[2] as i16),
@@ -740,7 +853,6 @@ impl<M: CollisionMap> GameState<M> {
                 | WalkObjectToSlow
                 | SetObjectPositionRelative
                 | SetObjectPosition
-                | SetPartyMemberPose
                 | SetEquipmentEffect
                 | EquipItem
                 | AdjustPlayerAttribute
@@ -754,8 +866,6 @@ impl<M: CollisionMap> GameState<M> {
                 | DamageEnemy
                 | RevivePlayer
                 | RemoveEquipment
-                | SetObjectAutoScript
-                | SetObjectTriggerScript
                 | OpenBuyMenu
                 | OpenSellMenu
                 | PoisonEnemy
@@ -781,7 +891,6 @@ impl<M: CollisionMap> GameState<M> {
                 | DialogLower
                 | DialogCenterWindow
                 | RideObjectSlow
-                | SetObjectTriggerMode
                 | MarkScriptFailed
                 | SimulatePlayerMagic
                 | PlayMusic
@@ -836,7 +945,6 @@ impl<M: CollisionMap> GameState<M> {
                 | WalkPartyFast
                 | WalkPartyFastest
                 | WalkObjectHalfSpeed
-                | OffsetObject
                 | SetObjectLayer
                 | MoveViewport
                 | ToggleDayNightPalette

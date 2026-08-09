@@ -2464,6 +2464,102 @@ fn auto_script_sets_selected_object_pose() {
 }
 
 #[test]
+fn auto_script_replaces_another_objects_auto_script() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [0x0009, 16, 0, 0],
+        [0x0024, 422, 3, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut ship = blocking_object(1216, 1472);
+    ship.id = 422;
+    ship.auto_script = 1;
+    ship.auto_script_idle_frame = 15;
+    let mut npc = blocking_object(1152, 1408);
+    npc.id = 423;
+    npc.auto_script = 2;
+    let mut state = state(&[]).with_scene_objects(vec![ship, npc]);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 3);
+    assert_eq!(state.scene_objects[0].auto_script_idle_frame, 0);
+    assert_eq!(state.scene_objects[1].auto_script, 3);
+}
+
+#[test]
+fn auto_script_zero_object_selector_is_a_no_op() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [0x0024, 0, 7, 0],
+        [0x0025, 0, 8, 0],
+        [0x0040, 0, 7, 0],
+        [0x0049, 0, 0, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    object.trigger_script = 6;
+    object.trigger_mode = 5;
+    object.state = 2;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+
+    for _ in 0..4 {
+        assert!(state.update_auto_scripts(&scripts).unwrap());
+    }
+    assert_eq!(state.scene_objects[0].auto_script, 5);
+    assert_eq!(state.scene_objects[0].trigger_script, 6);
+    assert_eq!(state.scene_objects[0].trigger_mode, 5);
+    assert_eq!(state.scene_objects[0].state, 2);
+}
+
+#[test]
+fn auto_script_sets_party_member_pose_like_scene_173() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [0x0015, Direction::West as u16, 1, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 2);
+    assert_eq!(state.player.direction, Direction::West);
+    assert_eq!(state.player.anim_frame, 1);
+}
+
+#[test]
+fn auto_script_chance_uses_the_shared_classic_random_state() {
+    let script_data = [[0x0000, 0, 0, 0], [0x0006, 100, 2, 0], [0x0000, 0, 0, 0]]
+        .into_iter()
+        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+        .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 1;
+    let mut state = state(&[]).with_scene_objects(vec![object]);
+    state.set_random_state(1);
+    let mut expected_state = 1;
+    let _ = random::random_long(&mut expected_state, 1, 100);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.random_state(), expected_state);
+}
+
+#[test]
 fn auto_script_calls_immediate_world_subscript() {
     let script_data = [
         [0x0000, 0, 0, 0],
@@ -2493,6 +2589,49 @@ fn auto_script_calls_immediate_world_subscript() {
     assert_eq!(state.scene_objects[1].state, 1);
     assert_eq!(state.scene_objects[1].direction, Direction::South);
     assert_eq!(state.scene_objects[1].current_frame, 2);
+}
+
+#[test]
+fn auto_script_call_applies_real_object_setup_and_offset_instructions() {
+    let script_data = [
+        [0x0000, 0, 0, 0],
+        [0x0004, 4, 0, 0],
+        [0x0000, 0, 0, 0],
+        [0x0000, 0, 0, 0],
+        [0x0024, 2, 0, 0],
+        [0x0025, 2, 9, 0],
+        [0x0040, 2, 1, 0],
+        [0x007D, 0xffff, 10, (-6i16) as u16],
+        [0x0000, 0, 0, 0],
+        [0x0000, 0, 0, 0],
+    ]
+    .into_iter()
+    .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
+    .collect::<Vec<_>>();
+    let scripts = ScriptTable::parse(&script_data).unwrap();
+    let mut caller = blocking_object(80, 80);
+    caller.auto_script = 1;
+    let mut target = blocking_object(100, 100);
+    target.id = 2;
+    target.auto_script = 3;
+    target.auto_script_idle_frame = 12;
+    target.trigger_script = 4;
+    target.trigger_mode = 5;
+    let mut state = state(&[]).with_scene_objects(vec![caller, target]);
+
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.scene_objects[0].auto_script, 2);
+    assert_eq!(
+        (
+            state.scene_objects[0].world_x,
+            state.scene_objects[0].world_y
+        ),
+        (90, 74)
+    );
+    assert_eq!(state.scene_objects[1].auto_script, 0);
+    assert_eq!(state.scene_objects[1].auto_script_idle_frame, 0);
+    assert_eq!(state.scene_objects[1].trigger_script, 9);
+    assert_eq!(state.scene_objects[1].trigger_mode, 1);
 }
 
 #[test]
