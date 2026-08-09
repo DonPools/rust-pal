@@ -1,8 +1,8 @@
 //! Script-location history and editor-specific reference formatting.
 
 use pal_core::script::{
-    ScriptControlFlow, ScriptInstructionReferenceKind, ScriptRecordInspection,
-    ScriptReferenceSource,
+    ScriptControlFlow, ScriptInstructionReferenceKind, ScriptObjectOperand, ScriptObjectReference,
+    ScriptRecordInspection, ScriptReferenceSource,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,48 +108,6 @@ pub(super) fn navigable_target(record: ScriptRecordInspection) -> Option<u16> {
     }
 }
 
-pub(super) fn scene_object_references(
-    record: ScriptRecordInspection,
-    current_object: Option<u16>,
-) -> Vec<u16> {
-    use pal_core::script::ScriptOpcode::*;
-
-    let Some(opcode) = record.opcode else {
-        return Vec::new();
-    };
-    let indices: &[usize] = match opcode {
-        Call => &[1],
-        SetSelectedObjectPose
-        | SetObjectAutoScript
-        | SetObjectTriggerScript
-        | SetObjectState
-        | SetObjectTriggerMode
-        | OffsetObjectAndAnimate
-        | SyncObjectState
-        | OffsetObject
-        | SetObjectLayer
-        | JumpIfNotFacingObject
-        | JumpIfObjectOutsideZone
-        | JumpIfObjectStateEquals => &[0],
-        SetObjectStates => &[0, 1],
-        _ => &[],
-    };
-    let mut object_ids = indices
-        .iter()
-        .filter_map(|&index| {
-            let selector = record.instruction.operands[index];
-            if selector == 0 || selector == u16::MAX {
-                current_object
-            } else {
-                Some(selector)
-            }
-        })
-        .collect::<Vec<_>>();
-    object_ids.sort_unstable();
-    object_ids.dedup();
-    object_ids
-}
-
 pub(super) fn format_reference(source: ScriptReferenceSource) -> String {
     match source {
         ScriptReferenceSource::SceneEnter { scene } => format!("SCENE {scene} ENTER"),
@@ -223,11 +181,26 @@ pub(super) fn format_object_id(object_id: u16) -> String {
     format!("#{object_id:04X}")
 }
 
+pub(super) fn format_object_reference(object_id: u16, reference: ScriptObjectReference) -> String {
+    let operand = match reference.operand {
+        ScriptObjectOperand::Direct { index } => {
+            format!("OP{index}={}", format_object_id(object_id))
+        }
+        ScriptObjectOperand::Range { first, last } => format!(
+            "OP0..OP1={}..{}",
+            format_object_id(first),
+            format_object_id(last)
+        ),
+    };
+    format!(
+        "@{:04X} {} {operand}",
+        reference.entry,
+        reference.opcode.name()
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use pal_assets::script::ScriptEntry;
-    use pal_core::script::{ScriptOpcode, ScriptRecordInspection};
-
     use super::*;
 
     #[test]
@@ -248,27 +221,32 @@ mod tests {
     }
 
     #[test]
-    fn object_operands_resolve_current_sentinels_and_ranges() {
-        let selected = ScriptRecordInspection {
-            entry: 1,
-            instruction: ScriptEntry {
-                opcode: ScriptOpcode::SetSelectedObjectPose.raw(),
-                operands: [0, 0, 0],
-            },
-            opcode: Some(ScriptOpcode::SetSelectedObjectPose),
-            flow: ScriptControlFlow::Next,
-        };
-        assert_eq!(scene_object_references(selected, Some(7)), vec![7]);
-
-        let range = ScriptRecordInspection {
-            instruction: ScriptEntry {
-                opcode: ScriptOpcode::SetObjectStates.raw(),
-                operands: [8, 10, 1],
-            },
-            opcode: Some(ScriptOpcode::SetObjectStates),
-            ..selected
-        };
-        assert_eq!(scene_object_references(range, None), vec![8, 10]);
+    fn formats_direct_and_range_object_references() {
+        assert_eq!(
+            format_object_reference(
+                0x007e,
+                ScriptObjectReference {
+                    entry: 0x1db4,
+                    opcode: pal_core::script::ScriptOpcode::SetObjectTriggerScript,
+                    operand: ScriptObjectOperand::Direct { index: 0 },
+                },
+            ),
+            "@1DB4 SetObjectTriggerScript OP0=#007E"
+        );
+        assert_eq!(
+            format_object_reference(
+                0x007e,
+                ScriptObjectReference {
+                    entry: 0x1db5,
+                    opcode: pal_core::script::ScriptOpcode::SetObjectStates,
+                    operand: ScriptObjectOperand::Range {
+                        first: 0x007a,
+                        last: 0x0080,
+                    },
+                },
+            ),
+            "@1DB5 SetObjectStates OP0..OP1=#007A..#0080"
+        );
     }
 
     #[test]

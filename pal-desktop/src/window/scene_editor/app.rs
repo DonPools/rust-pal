@@ -4,16 +4,15 @@ use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::scene::SceneObject;
 use pal_core::script::{
-    inspect_script_record, ScriptRecordInspection, ScriptReferenceCatalog, ScriptReferenceSource,
+    inspect_script_object_targets, inspect_script_record, ScriptObjectReference,
+    ScriptRecordInspection, ScriptReferenceCatalog, ScriptReferenceSource,
 };
 
 use super::super::debug_render::render_object_overlay;
 use super::super::scene_render::render_tile_map;
 use super::super::{LoadedScene, SceneEditorResources, Viewport};
 use super::hit_test::{hit_test_object_marker, hit_test_visible_sprite};
-use super::navigation::{
-    format_object_id, navigable_target, scene_object_references, ScriptNavigation,
-};
+use super::navigation::{format_object_id, navigable_target, ScriptNavigation};
 use super::{
     canvas_view_size, clamped_viewport, scale_canvas, CANVAS_HEIGHT, CANVAS_WIDTH, MAX_ZOOM,
 };
@@ -142,10 +141,20 @@ where
         inspect_script_record(&self.scripts, self.navigation.selected_instruction()?)
     }
 
-    pub(super) fn selected_object_references(&self) -> Vec<u16> {
+    pub(super) fn selected_instruction_object_references(&self) -> Vec<u16> {
         self.selected_record().map_or_else(Vec::new, |record| {
-            scene_object_references(record, self.selected_object)
+            inspect_script_object_targets(record)
+                .into_iter()
+                .map(|target| target.object_id)
+                .collect()
         })
+    }
+
+    pub(super) fn selected_object_instruction_references(&self) -> &[ScriptObjectReference] {
+        match self.selected_object {
+            Some(object_id) => self.script_references.references_to_object(object_id),
+            None => &[],
+        }
     }
 
     pub(super) fn reset_script_navigation(&mut self) {

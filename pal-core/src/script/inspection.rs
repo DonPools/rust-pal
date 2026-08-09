@@ -89,6 +89,30 @@ pub struct ScriptInstructionTarget {
     pub kind: ScriptInstructionReferenceKind,
 }
 
+/// Operand shape that explicitly names one or more scene event objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScriptObjectOperand {
+    /// A zero-based operand slot contains one object ID.
+    Direct { index: u8 },
+    /// Operands 0 and 1 contain an inclusive object-ID range.
+    Range { first: u16, last: u16 },
+}
+
+/// One concrete event object explicitly targeted by a script instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScriptObjectTarget {
+    pub object_id: u16,
+    pub operand: ScriptObjectOperand,
+}
+
+/// One script instruction that explicitly refers to an event object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptObjectReference {
+    pub entry: u16,
+    pub opcode: ScriptOpcode,
+    pub operand: ScriptObjectOperand,
+}
+
 /// Static source that stores or refers to a script entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScriptReferenceSource {
@@ -112,15 +136,16 @@ pub enum ScriptReferenceSource {
     },
 }
 
-/// Read-only incoming-reference index for entry owners, control flow and entry writes.
+/// Read-only indexes for script-entry and explicit event-object references.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScriptReferenceCatalog {
     by_entry: BTreeMap<u16, Vec<ScriptReferenceSource>>,
+    by_object: BTreeMap<u16, Vec<ScriptObjectReference>>,
     object_scenes: BTreeMap<u16, u16>,
 }
 
 impl ScriptReferenceCatalog {
-    /// Index scene and event-object slots plus every recognized instruction target.
+    /// Index scene/object entry slots and every recognized instruction target.
     pub fn build(scenes: &SceneData, scripts: &ScriptTable) -> Self {
         let mut catalog = Self::default();
         for scene_number in 1..=scenes.scene_count() {
@@ -185,9 +210,26 @@ impl ScriptReferenceCatalog {
                     },
                 );
             }
+            if let Some(opcode) = record.opcode {
+                for target in inspect_script_object_targets(record) {
+                    catalog.by_object.entry(target.object_id).or_default().push(
+                        ScriptObjectReference {
+                            entry,
+                            opcode,
+                            operand: target.operand,
+                        },
+                    );
+                }
+            }
         }
         for references in catalog.by_entry.values_mut() {
             references.sort_unstable();
+            references.dedup();
+        }
+        for references in catalog.by_object.values_mut() {
+            references.sort_unstable_by_key(|reference| {
+                (reference.entry, reference.opcode.raw(), reference.operand)
+            });
             references.dedup();
         }
         catalog
@@ -195,6 +237,11 @@ impl ScriptReferenceCatalog {
 
     pub fn references_to(&self, entry: u16) -> &[ScriptReferenceSource] {
         self.by_entry.get(&entry).map_or(&[], Vec::as_slice)
+    }
+
+    /// Return every instruction whose operands explicitly name `object_id`.
+    pub fn references_to_object(&self, object_id: u16) -> &[ScriptObjectReference] {
+        self.by_object.get(&object_id).map_or(&[], Vec::as_slice)
     }
 
     pub fn scene_for_object(&self, object_id: u16) -> Option<u16> {
@@ -332,6 +379,64 @@ pub fn inspect_script_targets(record: ScriptRecordInspection) -> Vec<ScriptInstr
     targets
 }
 
+/// Return the concrete scene event objects explicitly named by one record.
+///
+/// Object selectors `0` and `0xFFFF` depend on the current script owner and are
+/// intentionally omitted: resolving them statically would require call-context
+/// analysis and could otherwise report the wrong object. `SetObjectStates`
+/// expands its valid inclusive range so every object in the range can be found.
+pub fn inspect_script_object_targets(record: ScriptRecordInspection) -> Vec<ScriptObjectTarget> {
+    use ScriptOpcode::*;
+
+    let Some(opcode) = record.opcode else {
+        return Vec::new();
+    };
+    let [op0, op1, _] = record.instruction.operands;
+    if opcode == SetObjectStates {
+        if op0 == 0 || op0 > op1 {
+            return Vec::new();
+        }
+        let operand = ScriptObjectOperand::Range {
+            first: op0,
+            last: op1,
+        };
+        return (op0..=op1)
+            .filter(|&object_id| object_id != u16::MAX)
+            .map(|object_id| ScriptObjectTarget { object_id, operand })
+            .collect();
+    }
+
+    let indices: &[u8] = match opcode {
+        Call => &[1],
+        SetObjectPosition
+        | SetObjectPositionRelative
+        | SetSelectedObjectPose
+        | SetObjectAutoScript
+        | SetObjectTriggerScript
+        | SetObjectState
+        | SetObjectTriggerMode
+        | OffsetObjectAndAnimate
+        | OffsetObject
+        | SetObjectLayer
+        | SyncObjectState
+        | PlaceUsedItemObject
+        | JumpIfNotFacingObject
+        | JumpIfObjectOutsideZone
+        | JumpIfObjectStateEquals => &[0],
+        _ => &[],
+    };
+    indices
+        .iter()
+        .filter_map(|&index| {
+            let object_id = record.instruction.operands[usize::from(index)];
+            (object_id != 0 && object_id != u16::MAX).then_some(ScriptObjectTarget {
+                object_id,
+                operand: ScriptObjectOperand::Direct { index },
+            })
+        })
+        .collect()
+}
+
 /// Inspect a bounded window without executing instructions or following branches.
 ///
 /// PAL entry points can share tails and jump into arbitrary records, so this API
@@ -415,6 +520,19 @@ mod tests {
             .flat_map(|entry| entry.iter().flat_map(|value| value.to_le_bytes()))
             .collect::<Vec<_>>();
         ScriptTable::parse(&data).unwrap()
+    }
+
+    fn record(entry: u16, opcode: ScriptOpcode, operands: [u16; 3]) -> ScriptRecordInspection {
+        let instruction = ScriptEntry {
+            opcode: opcode.raw(),
+            operands,
+        };
+        ScriptRecordInspection {
+            entry,
+            instruction,
+            opcode: Some(opcode),
+            flow: control_flow(opcode, instruction, entry),
+        }
     }
 
     fn make_mkf(chunks: &[&[u8]]) -> Vec<u8> {
@@ -549,6 +667,91 @@ mod tests {
     }
 
     #[test]
+    fn extracts_explicit_object_operands_and_ignores_context_selectors() {
+        let direct_op0 = [
+            ScriptOpcode::SetObjectPosition,
+            ScriptOpcode::SetObjectPositionRelative,
+            ScriptOpcode::SetSelectedObjectPose,
+            ScriptOpcode::SetObjectAutoScript,
+            ScriptOpcode::SetObjectTriggerScript,
+            ScriptOpcode::SetObjectState,
+            ScriptOpcode::SetObjectTriggerMode,
+            ScriptOpcode::OffsetObjectAndAnimate,
+            ScriptOpcode::OffsetObject,
+            ScriptOpcode::SetObjectLayer,
+            ScriptOpcode::SyncObjectState,
+            ScriptOpcode::PlaceUsedItemObject,
+            ScriptOpcode::JumpIfNotFacingObject,
+            ScriptOpcode::JumpIfObjectOutsideZone,
+            ScriptOpcode::JumpIfObjectStateEquals,
+        ];
+        for opcode in direct_op0 {
+            assert_eq!(
+                inspect_script_object_targets(record(1, opcode, [0x007e, 2, 3])),
+                [ScriptObjectTarget {
+                    object_id: 0x007e,
+                    operand: ScriptObjectOperand::Direct { index: 0 },
+                }],
+                "missing object operand for {opcode}"
+            );
+        }
+        assert_eq!(
+            inspect_script_object_targets(record(
+                0x1db4,
+                ScriptOpcode::SetObjectTriggerScript,
+                [0x007e, 0x1ed4, 0],
+            )),
+            [ScriptObjectTarget {
+                object_id: 0x007e,
+                operand: ScriptObjectOperand::Direct { index: 0 },
+            }]
+        );
+        assert_eq!(
+            inspect_script_object_targets(record(2, ScriptOpcode::Call, [7, 0x007e, 0])),
+            [ScriptObjectTarget {
+                object_id: 0x007e,
+                operand: ScriptObjectOperand::Direct { index: 1 },
+            }]
+        );
+        for selector in [0, u16::MAX] {
+            assert!(inspect_script_object_targets(record(
+                1,
+                ScriptOpcode::SetObjectPosition,
+                [selector, 2, 3],
+            ))
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn expands_valid_object_ranges_to_every_concrete_object() {
+        let operand = ScriptObjectOperand::Range { first: 8, last: 10 };
+        assert_eq!(
+            inspect_script_object_targets(record(1, ScriptOpcode::SetObjectStates, [8, 10, 1],)),
+            [
+                ScriptObjectTarget {
+                    object_id: 8,
+                    operand,
+                },
+                ScriptObjectTarget {
+                    object_id: 9,
+                    operand,
+                },
+                ScriptObjectTarget {
+                    object_id: 10,
+                    operand,
+                },
+            ]
+        );
+        assert!(inspect_script_object_targets(record(
+            1,
+            ScriptOpcode::SetObjectStates,
+            [10, 8, 1],
+        ))
+        .is_empty());
+    }
+
+    #[test]
     fn catalogs_fallthrough_and_entry_writes_but_not_rows_after_stop() {
         let scene_records = [
             1u16.to_le_bytes(),
@@ -638,5 +841,53 @@ mod tests {
         );
         assert_eq!(catalog.scene_for_object(1), Some(1));
         assert_eq!(catalog.scene_for_object(2), None);
+    }
+
+    #[test]
+    fn catalogs_instructions_by_explicit_object_id() {
+        let mut scene_records = Vec::new();
+        for values in [[1u16, 0, 0, 0], [0, 0, 0, 0]] {
+            for value in values {
+                scene_records.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let scene_data = SceneData::parse(&make_mkf(&[&[], &scene_records])).unwrap();
+        let scripts = table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::SetObjectTriggerScript.raw(), 0x007e, 8, 0],
+            [ScriptOpcode::SetObjectStates.raw(), 0x007d, 0x007f, 1],
+            [ScriptOpcode::Call.raw(), 8, 0x007e, 0],
+            [ScriptOpcode::SetObjectPosition.raw(), 0, 2, 3],
+            [ScriptOpcode::SetObjectPosition.raw(), u16::MAX, 2, 3],
+        ]);
+
+        let catalog = ScriptReferenceCatalog::build(&scene_data, &scripts);
+        assert_eq!(
+            catalog.references_to_object(0x007e),
+            [
+                ScriptObjectReference {
+                    entry: 1,
+                    opcode: ScriptOpcode::SetObjectTriggerScript,
+                    operand: ScriptObjectOperand::Direct { index: 0 },
+                },
+                ScriptObjectReference {
+                    entry: 2,
+                    opcode: ScriptOpcode::SetObjectStates,
+                    operand: ScriptObjectOperand::Range {
+                        first: 0x007d,
+                        last: 0x007f,
+                    },
+                },
+                ScriptObjectReference {
+                    entry: 3,
+                    opcode: ScriptOpcode::Call,
+                    operand: ScriptObjectOperand::Direct { index: 1 },
+                },
+            ]
+        );
+        assert_eq!(catalog.references_to_object(0x007d).len(), 1);
+        assert_eq!(catalog.references_to_object(0x007f).len(), 1);
+        assert!(catalog.references_to_object(0).is_empty());
+        assert!(catalog.references_to_object(u16::MAX).is_empty());
     }
 }

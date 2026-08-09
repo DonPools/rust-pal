@@ -22,7 +22,8 @@ use super::super::draw::{draw_debug_text, fill_rect, stroke_rect};
 use super::super::text_render::{draw_dialog_text, DialogTextMode, DialogTextStyle};
 use super::app::{script_object_ids, SceneEditorApp, SelectedScript};
 use super::navigation::{
-    format_instruction_kind, format_object_id, format_reference, show_instruction_target,
+    format_instruction_kind, format_object_id, format_object_reference, format_reference,
+    show_instruction_target,
 };
 use super::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::renderer::Renderer;
@@ -239,7 +240,12 @@ where
         } else if pressed(Key::R) {
             self.model.navigate_root();
         } else if pressed(Key::O) {
-            if let Some(id) = self.model.selected_object_references().first().copied() {
+            if let Some(id) = self
+                .model
+                .selected_instruction_object_references()
+                .first()
+                .copied()
+            {
                 self.model.locate_object_reference(id);
             }
         } else if pressed(Key::N) {
@@ -788,7 +794,7 @@ where
     }
 
     fn instruction_links_ui(&mut self, ui: &mut egui::Ui, record: ScriptRecordInspection) {
-        let object_ids = self.model.selected_object_references();
+        let object_ids = self.model.selected_instruction_object_references();
         let script_targets = instruction_script_targets(record);
         if object_ids.is_empty() && script_targets.is_empty() {
             return;
@@ -899,94 +905,143 @@ where
     }
 
     fn references_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(record) = self.model.selected_record() else {
-            ui.centered_and_justified(|ui| ui.label("Select a script instruction"));
+        let selected_object = self.model.selected_object;
+        let selected_record = self.model.selected_record();
+        if selected_object.is_none() && selected_record.is_none() {
+            ui.centered_and_justified(|ui| {
+                ui.label("Select an event object or script instruction")
+            });
             return;
-        };
-        ui.heading(format!("Incoming references to @{:04X}", record.entry));
-        let references = self
-            .model
-            .script_references
-            .references_to(record.entry)
-            .to_vec();
-        if references.is_empty() {
-            ui.label(RichText::new("No indexed incoming references").color(MUTED));
-        } else {
-            let owners = references
-                .iter()
-                .copied()
-                .filter(|source| !matches!(source, ScriptReferenceSource::Instruction { .. }))
-                .collect::<Vec<_>>();
-            let control_flow = references
-                .iter()
-                .copied()
-                .filter(|source| {
-                    matches!(
-                        source,
-                        ScriptReferenceSource::Instruction { kind, .. }
-                            if kind.category()
-                                == ScriptInstructionReferenceCategory::ControlFlow
-                    )
-                })
-                .collect::<Vec<_>>();
-            let entry_writes = references
-                .iter()
-                .copied()
-                .filter(|source| {
-                    matches!(
-                        source,
-                        ScriptReferenceSource::Instruction { kind, .. }
-                            if kind.category()
-                                == ScriptInstructionReferenceCategory::EntryWrite
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut follow = None;
-            for (label, sources) in [
-                ("Entry owners", owners.as_slice()),
-                ("Control flow", control_flow.as_slice()),
-                ("Entry writes", entry_writes.as_slice()),
-            ] {
-                if sources.is_empty() {
-                    continue;
-                }
-                ui.label(RichText::new(label).strong().color(MUTED));
-                for &source in sources {
+        }
+
+        if let Some(object_id) = selected_object {
+            ui.heading(format!(
+                "Instructions referencing object {}",
+                format_object_id(object_id)
+            ));
+            let references = self.model.selected_object_instruction_references().to_vec();
+            if references.is_empty() {
+                ui.label(
+                    RichText::new("No instruction explicitly references this object").color(MUTED),
+                );
+            } else {
+                let mut navigate = None;
+                for reference in references {
                     if ui
                         .button(
-                            RichText::new(format_reference(source))
+                            RichText::new(format_object_reference(object_id, reference))
                                 .monospace()
-                                .color(reference_color(source)),
+                                .color(ACCENT),
                         )
+                        .on_hover_text(format!(
+                            "Jump to this instruction; object {object_id} decimal"
+                        ))
                         .clicked()
                     {
-                        follow = Some(source);
+                        navigate = Some(reference.entry);
                     }
                 }
-                ui.add_space(4.0);
-            }
-            if let Some(source) = follow {
-                self.model.follow_reference(source);
+                if let Some(entry) = navigate {
+                    self.model.navigate_to_entry(entry);
+                }
             }
         }
 
-        ui.separator();
-        ui.heading("Referenced event objects");
-        let object_ids = self.model.selected_object_references();
-        if object_ids.is_empty() {
-            ui.label(
-                RichText::new("This instruction has no recognized object operand").color(MUTED),
-            );
-        } else {
-            for object_id in object_ids {
-                if ui
-                    .button(format!("Locate object {}", format_object_id(object_id)))
-                    .on_hover_text(format!("Object {object_id} decimal"))
-                    .clicked()
-                {
-                    self.model.locate_object_reference(object_id);
+        if let Some(record) = selected_record {
+            if selected_object.is_some() {
+                ui.separator();
+            }
+            ui.heading(format!("Incoming references to @{:04X}", record.entry));
+            let references = self
+                .model
+                .script_references
+                .references_to(record.entry)
+                .to_vec();
+            if references.is_empty() {
+                ui.label(RichText::new("No indexed incoming references").color(MUTED));
+            } else {
+                let owners = references
+                    .iter()
+                    .copied()
+                    .filter(|source| !matches!(source, ScriptReferenceSource::Instruction { .. }))
+                    .collect::<Vec<_>>();
+                let control_flow = references
+                    .iter()
+                    .copied()
+                    .filter(|source| {
+                        matches!(
+                            source,
+                            ScriptReferenceSource::Instruction { kind, .. }
+                                if kind.category()
+                                    == ScriptInstructionReferenceCategory::ControlFlow
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let entry_writes = references
+                    .iter()
+                    .copied()
+                    .filter(|source| {
+                        matches!(
+                            source,
+                            ScriptReferenceSource::Instruction { kind, .. }
+                                if kind.category()
+                                    == ScriptInstructionReferenceCategory::EntryWrite
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut follow = None;
+                for (label, sources) in [
+                    ("Entry owners", owners.as_slice()),
+                    ("Control flow", control_flow.as_slice()),
+                    ("Entry writes", entry_writes.as_slice()),
+                ] {
+                    if sources.is_empty() {
+                        continue;
+                    }
+                    ui.label(RichText::new(label).strong().color(MUTED));
+                    for &source in sources {
+                        if ui
+                            .button(
+                                RichText::new(format_reference(source))
+                                    .monospace()
+                                    .color(reference_color(source)),
+                            )
+                            .clicked()
+                        {
+                            follow = Some(source);
+                        }
+                    }
+                    ui.add_space(4.0);
+                }
+                if let Some(source) = follow {
+                    self.model.follow_reference(source);
                 }
             }
+
+            ui.separator();
+            ui.heading("Referenced event objects");
+            let object_ids = self.model.selected_instruction_object_references();
+            if object_ids.is_empty() {
+                ui.label(
+                    RichText::new("This instruction has no explicit object operand").color(MUTED),
+                );
+            } else {
+                for object_id in object_ids {
+                    if ui
+                        .button(format!("Locate object {}", format_object_id(object_id)))
+                        .on_hover_text(format!("Object {object_id} decimal"))
+                        .clicked()
+                    {
+                        self.model.locate_object_reference(object_id);
+                    }
+                }
+            }
+        } else if selected_object.is_some() {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("This object has no selected trigger or auto script entry.")
+                    .color(MUTED),
+            );
         }
     }
 
