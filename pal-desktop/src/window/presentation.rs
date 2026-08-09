@@ -8,7 +8,6 @@ use pal_core::game::GameState;
 use pal_core::role::RoleSprites;
 use pal_core::script::ScriptDebugSnapshot;
 
-use super::battle_debug_overlay::render_battle_assist;
 use super::battle_render::BattleMenuState;
 use super::battle_render::{
     render_battle_frame, render_post_battle_pages, BattleRenderResources, BattleRenderState,
@@ -53,7 +52,6 @@ pub(super) struct UiRenderContext<'a> {
     pub(super) battle_event: Option<BattleEvent>,
     pub(super) battle_event_ticks: u16,
     pub(super) battle_kept_effects: &'a [BattleEvent],
-    pub(super) show_battle_assist: bool,
     pub(super) post_battle: Option<&'a PostBattlePresentation>,
     pub(super) status_background: &'a Bitmap,
     pub(super) equip_background: &'a Bitmap,
@@ -223,16 +221,6 @@ fn render_battle_or_world(
                 ui.status_background,
                 selected,
                 Some(battle),
-            );
-        } else if ui.show_battle_assist && !matches!(ui.battle_menu, BattleMenuState::Magic { .. })
-        {
-            render_battle_assist(
-                renderer,
-                battle,
-                ui.text,
-                ui.font,
-                ui.battle_targeting_enemy
-                    .then_some(ui.battle_selected_enemy),
             );
         }
         return;

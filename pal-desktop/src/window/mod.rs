@@ -14,6 +14,7 @@ use winit::keyboard::PhysicalKey;
 use winit::window::WindowBuilder;
 
 use app::DesktopApp;
+use battle_debug_overlay::BattleAssistOverlay;
 use minimap::MiniMapOverlay;
 
 mod app;
@@ -94,6 +95,11 @@ pub fn run_game_window<L>(
         pixels.surface_texture_format(),
         window.scale_factor(),
     );
+    let mut battle_assist_overlay = BattleAssistOverlay::new(
+        pixels.device(),
+        pixels.surface_texture_format(),
+        window.scale_factor(),
+    );
     let mut app = DesktopApp::new(renderer, game, resources, load_scene);
     app.render_frame(0);
 
@@ -143,6 +149,17 @@ pub fn run_game_window<L>(
                             ),
                         );
                     }
+                    let show_battle_assist = app
+                        .battle_assist_snapshot(
+                            window.scale_factor(),
+                            surface_size.width,
+                            surface_size.height,
+                        )
+                        .map(|snapshot| {
+                            battle_assist_overlay.update(pixels.device(), pixels.queue(), snapshot);
+                            true
+                        })
+                        .unwrap_or(false);
                     let render_result = pixels.render_with(|encoder, render_target, context| {
                         context.scaling_renderer.render(encoder, render_target);
                         if show_minimap {
@@ -155,6 +172,14 @@ pub fn run_game_window<L>(
                         }
                         if app.show_script_debug() {
                             debug_overlay.render(
+                                encoder,
+                                render_target,
+                                surface_size.width,
+                                surface_size.height,
+                            );
+                        }
+                        if show_battle_assist {
+                            battle_assist_overlay.render(
                                 encoder,
                                 render_target,
                                 surface_size.width,
