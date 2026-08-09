@@ -37,50 +37,50 @@ use super::UI_TIME_QUANTUM_MS;
 const OPENING_MENU_MUSIC: u16 = 4;
 const DIALOG_POLL_INTERVAL_MS: u64 = 8;
 
-pub(super) struct AdvanceResult {
-    pub(super) exit: bool,
+pub(super) struct AdvanceControl {
+    pub(super) exit_requested: bool,
     pub(super) wait_until: Instant,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct TickOutcome {
-    changed: bool,
-    exit: bool,
+struct FixedTickEffects {
+    needs_redraw: bool,
+    exit_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VisualFinalization {
-    Run,
+enum PostTickVisuals {
+    Finish,
     Defer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccumulatorAction {
+enum ClockAction {
     ConsumeTick,
-    Reset,
+    ResetAccumulator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TargetOutcome {
-    changed: bool,
-    visual_finalization: VisualFinalization,
-    accumulator_action: AccumulatorAction,
+struct TickDirective {
+    needs_redraw: bool,
+    post_tick_visuals: PostTickVisuals,
+    clock_action: ClockAction,
 }
 
-impl TargetOutcome {
-    const fn run(changed: bool) -> Self {
+impl TickDirective {
+    const fn finish_visuals(needs_redraw: bool) -> Self {
         Self {
-            changed,
-            visual_finalization: VisualFinalization::Run,
-            accumulator_action: AccumulatorAction::ConsumeTick,
+            needs_redraw,
+            post_tick_visuals: PostTickVisuals::Finish,
+            clock_action: ClockAction::ConsumeTick,
         }
     }
 
-    const fn defer(changed: bool) -> Self {
+    const fn defer_visuals(needs_redraw: bool) -> Self {
         Self {
-            changed,
-            visual_finalization: VisualFinalization::Defer,
-            accumulator_action: AccumulatorAction::ConsumeTick,
+            needs_redraw,
+            post_tick_visuals: PostTickVisuals::Defer,
+            clock_action: ClockAction::ConsumeTick,
         }
     }
 }
@@ -652,15 +652,14 @@ where
             );
             return true;
         }
-        let outcome = update_battle(
+        if let Some(finished_battle) = update_battle(
             input,
             any_pressed,
             &mut self.game,
             &mut self.session,
             &mut self.battle_scripts,
-        );
-        if let Some(outcome) = outcome {
-            if !self.scripts.resolve_battle(outcome.result) {
+        ) {
+            if !self.scripts.resolve_battle(finished_battle.result) {
                 set_title("Rust-PAL [battle script resume failed]");
             } else {
                 self.session.sync_music(self.game.current_music);
@@ -838,23 +837,23 @@ where
         input: pal_core::game::GameInput,
         any_pressed: bool,
         set_title: &mut impl FnMut(&str),
-    ) -> TargetOutcome {
+    ) -> TickDirective {
         match target {
             TickTarget::OpeningAnimation => {
                 let (changed, finished) =
                     self.advance_opening_animation(update_tick, input, set_title);
-                TargetOutcome {
-                    changed,
-                    visual_finalization: VisualFinalization::Defer,
-                    accumulator_action: if finished {
-                        AccumulatorAction::Reset
+                TickDirective {
+                    needs_redraw: changed,
+                    post_tick_visuals: PostTickVisuals::Defer,
+                    clock_action: if finished {
+                        ClockAction::ResetAccumulator
                     } else {
-                        AccumulatorAction::ConsumeTick
+                        ClockAction::ConsumeTick
                     },
                 }
             }
             TickTarget::OpeningMenu => {
-                TargetOutcome::run(self.advance_opening_menu(input, set_title))
+                TickDirective::finish_visuals(self.advance_opening_menu(input, set_title))
             }
             TickTarget::Playing(target) => {
                 self.advance_playing_target(target, input, any_pressed, set_title)
@@ -868,42 +867,44 @@ where
         input: pal_core::game::GameInput,
         any_pressed: bool,
         set_title: &mut impl FnMut(&str),
-    ) -> TargetOutcome {
+    ) -> TickDirective {
         match target {
             PlayingTarget::WaitingForKey => {
                 if any_pressed {
                     self.session.scripts.waiting_for_key = false;
                     self.advance_active_script(set_title);
-                    TargetOutcome::run(true)
+                    TickDirective::finish_visuals(true)
                 } else {
-                    TargetOutcome::run(false)
+                    TickDirective::finish_visuals(false)
                 }
             }
             PlayingTarget::Dialog => {
-                TargetOutcome::run(self.advance_dialog(input, any_pressed, set_title))
+                TickDirective::finish_visuals(self.advance_dialog(input, any_pressed, set_title))
             }
             PlayingTarget::PostBattle => {
                 advance_post_battle(any_pressed, &mut self.game, &mut self.session);
-                TargetOutcome::run(true)
+                TickDirective::finish_visuals(true)
             }
             PlayingTarget::BattleScript => {
                 let changed = self.advance_battle(input, any_pressed, set_title);
-                TargetOutcome::defer(changed)
+                TickDirective::defer_visuals(changed)
             }
             PlayingTarget::Battle => {
-                TargetOutcome::run(self.advance_battle(input, any_pressed, set_title))
+                TickDirective::finish_visuals(self.advance_battle(input, any_pressed, set_title))
             }
-            PlayingTarget::Menu => TargetOutcome::run(self.advance_menu(input, set_title)),
+            PlayingTarget::Menu => {
+                TickDirective::finish_visuals(self.advance_menu(input, set_title))
+            }
             PlayingTarget::SceneScript => {
                 self.advance_scene_script(set_title);
-                TargetOutcome::run(true)
+                TickDirective::finish_visuals(true)
             }
             PlayingTarget::Exploration => {
                 let (changed, opened_menu) = self.advance_exploration(input, set_title);
                 if opened_menu {
-                    TargetOutcome::defer(changed)
+                    TickDirective::defer_visuals(changed)
                 } else {
-                    TargetOutcome::run(changed)
+                    TickDirective::finish_visuals(changed)
                 }
             }
         }
@@ -929,48 +930,48 @@ where
         &mut self,
         update_tick: Duration,
         set_title: &mut impl FnMut(&str),
-    ) -> TickOutcome {
+    ) -> FixedTickEffects {
         let (input, any_pressed) = self.input.sample();
-        let mut outcome = TickOutcome::default();
+        let mut effects = FixedTickEffects::default();
         let target = self.select_tick_target();
         let mut tick_consumed = false;
 
         if target != TickTarget::OpeningAnimation {
             let visual_was_blocking = self.session.visual.is_blocking();
             let visual_scene_update_due = self.session.visual.scene_update_due();
-            outcome.changed |= self.advance_visual(set_title);
+            effects.needs_redraw |= self.advance_visual(set_title);
 
             // This update belongs to the scene behind the visual and must run
             // before a pending save restore can replace the game state.
             if visual_scene_update_due {
-                outcome.changed |= self.update_auto_scripts(set_title);
+                effects.needs_redraw |= self.update_auto_scripts(set_title);
             }
 
-            outcome.exit =
+            effects.exit_requested =
                 self.session.persistence.quit_requested && !self.session.visual.is_blocking();
 
             let selected_load_handled = self.restore_selected_slot_if_ready(set_title);
             let last_save_load_handled = self.restore_last_save_if_requested(set_title);
             let restore_handled = selected_load_handled || last_save_load_handled;
-            outcome.changed |= restore_handled;
+            effects.needs_redraw |= restore_handled;
             tick_consumed = visual_was_blocking || restore_handled;
         }
 
-        let target_outcome = if tick_consumed {
-            TargetOutcome::run(false)
+        let directive = if tick_consumed {
+            TickDirective::finish_visuals(false)
         } else {
             self.advance_tick_target(target, update_tick, input, any_pressed, set_title)
         };
-        outcome.changed |= target_outcome.changed;
+        effects.needs_redraw |= directive.needs_redraw;
 
-        if target_outcome.visual_finalization == VisualFinalization::Run {
-            outcome.changed |= self.finish_tick_visuals(set_title);
+        if directive.post_tick_visuals == PostTickVisuals::Finish {
+            effects.needs_redraw |= self.finish_tick_visuals(set_title);
         }
-        match target_outcome.accumulator_action {
-            AccumulatorAction::ConsumeTick => self.clock.consume(update_tick),
-            AccumulatorAction::Reset => self.clock.reset_accumulator(),
+        match directive.clock_action {
+            ClockAction::ConsumeTick => self.clock.consume(update_tick),
+            ClockAction::ResetAccumulator => self.clock.reset_accumulator(),
         }
-        outcome
+        effects
     }
 
     fn needs_continuous_ui_redraw(&self) -> bool {
@@ -993,27 +994,27 @@ where
         &mut self,
         now: Instant,
         set_title: &mut impl FnMut(&str),
-    ) -> AdvanceResult {
+    ) -> AdvanceControl {
         self.session.audio.music.poll();
         let frame_elapsed = self.clock.begin_frame(now);
-        let mut changed = self.advance_realtime(frame_elapsed);
-        let mut exit = false;
+        let mut needs_redraw = self.advance_realtime(frame_elapsed);
+        let mut exit_requested = false;
 
         // Keep one timing mode for this catch-up cycle. State transitions affect
         // the wake-up interval calculated after the loop.
         let update_tick = self.current_update_tick();
         while self.clock.accumulator() >= update_tick {
-            let outcome = self.advance_fixed_tick(update_tick, set_title);
-            changed |= outcome.changed;
-            exit |= outcome.exit;
+            let effects = self.advance_fixed_tick(update_tick, set_title);
+            needs_redraw |= effects.needs_redraw;
+            exit_requested |= effects.exit_requested;
         }
 
-        changed |= self.needs_continuous_ui_redraw();
-        if changed {
+        needs_redraw |= self.needs_continuous_ui_redraw();
+        if needs_redraw {
             self.render_frame(elapsed_ui_ticks(self.clock.ui_elapsed(now)));
         }
-        AdvanceResult {
-            exit,
+        AdvanceControl {
+            exit_requested,
             wait_until: self.next_wakeup(now),
         }
     }

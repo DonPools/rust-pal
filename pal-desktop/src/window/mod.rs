@@ -225,7 +225,7 @@ pub fn run_game_window<L>(
                 _ => {}
             },
             Event::AboutToWait => {
-                let result = app.advance(Instant::now(), &mut |title| window.set_title(title));
+                let control = app.advance(Instant::now(), &mut |title| window.set_title(title));
                 battle_assist_reserved_scale = reserve_battle_assist_width(
                     window,
                     app.battle_assist_requested(),
@@ -233,13 +233,13 @@ pub fn run_game_window<L>(
                     viewport.width,
                     viewport.height,
                 );
-                if result.exit {
+                if control.exit_requested {
                     target.exit();
                 }
                 if app.is_dirty() {
                     window.request_redraw();
                 }
-                target.set_control_flow(ControlFlow::WaitUntil(result.wait_until));
+                target.set_control_flow(ControlFlow::WaitUntil(control.wait_until));
             }
             _ => {}
         })
