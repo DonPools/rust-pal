@@ -75,8 +75,10 @@ impl ScriptCursor {
 pub(crate) struct ScriptCallFrame {
     pub(crate) object_id: u16,
     pub(crate) return_entry: u16,
-    pub(crate) wait_frames: u16,
+    pub(crate) wait_frames: u32,
     pub(crate) wait_updates_auto_scripts: bool,
+    pub(crate) wait_processes_triggers: bool,
+    pub(crate) wait_updates_party_gestures: bool,
     pub(crate) viewport_frames_remaining: u16,
 }
 

@@ -15,11 +15,16 @@ impl ScriptRuntime {
         if execution.wait_frames > 0 {
             execution.wait_frames -= 1;
             self.execution = Some(execution);
-            return Some(if execution.wait_updates_auto_scripts {
-                ScriptEvent::Waiting
-            } else {
-                ScriptEvent::Delay
-            });
+            return Some(
+                if execution.wait_updates_auto_scripts && execution.wait_frames.is_multiple_of(2) {
+                    ScriptEvent::Waiting {
+                        process_triggers: execution.wait_processes_triggers,
+                        update_party_gestures: execution.wait_updates_party_gestures,
+                    }
+                } else {
+                    ScriptEvent::Delay
+                },
+            );
         }
         for _ in 0..MAX_INSTRUCTIONS_PER_ADVANCE {
             let decoded = match decode_instruction(&self.table, execution.entry) {
@@ -64,11 +69,18 @@ impl ScriptRuntime {
                     if execution.wait_frames > 0 {
                         execution.wait_frames -= 1;
                         self.execution = Some(execution);
-                        return Some(if execution.wait_updates_auto_scripts {
-                            ScriptEvent::Waiting
-                        } else {
-                            ScriptEvent::Delay
-                        });
+                        return Some(
+                            if execution.wait_updates_auto_scripts
+                                && execution.wait_frames.is_multiple_of(2)
+                            {
+                                ScriptEvent::Waiting {
+                                    process_triggers: execution.wait_processes_triggers,
+                                    update_party_gestures: execution.wait_updates_party_gestures,
+                                }
+                            } else {
+                                ScriptEvent::Delay
+                            },
+                        );
                     }
                 }
                 InstructionFlow::Yield(next, event) => {

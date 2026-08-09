@@ -784,8 +784,9 @@ impl<M: CollisionMap> GameState<M> {
                 magic_id,
                 add,
             } => return self.change_magic(role_id, magic_id, add),
-            ScriptAction::OffsetPlayer { dx, dy } => {
+            ScriptAction::OffsetPlayer { dx, dy, layer } => {
                 self.shift_party(dx, dy);
+                self.save_layer = layer;
             }
             ScriptAction::SetPlayerPosition {
                 tile_x,
@@ -863,6 +864,8 @@ impl<M: CollisionMap> GameState<M> {
                 self.player.frames_per_direction = leader.attributes.frames_per_direction();
                 self.extra_follower_ids.clear();
                 self.rebuild_party_followers();
+                self.player_poisons =
+                    [[BattlePoison::default(); MAX_BATTLE_POISONS]; PLAYER_ROLE_COUNT];
             }
             ScriptAction::SetPartyFollowers { followers } => {
                 self.sync_active_party_slots();

@@ -248,6 +248,7 @@ fn render_battle_or_world(
         &game.map,
         Some(role_sprites),
         &roles,
+        game.party_layer(),
         &game.scene_objects,
         viewport,
     );

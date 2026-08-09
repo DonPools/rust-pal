@@ -1217,6 +1217,15 @@ impl<M: CollisionMap> GameState<M> {
         self.scene_maps.get(&scene_number).copied()
     }
 
+    /// Logical depth offset applied to all party sprites by script opcode 0x006E.
+    pub fn party_layer(&self) -> u16 {
+        self.save_layer
+    }
+
+    pub fn set_party_layer(&mut self, layer: u16) {
+        self.save_layer = layer;
+    }
+
     pub fn replace_map(&mut self, map: M) {
         self.map = map;
         self.follow_player();

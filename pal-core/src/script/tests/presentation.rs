@@ -261,11 +261,16 @@ fn center_window_is_single_message_and_restores_default_upper_dialog() {
 fn redraw_delay_does_not_report_a_scene_updating_wait() {
     let mut runtime = ScriptRuntime::new(table(&[
         [0, 0, 0, 0],
-        [0x0005, 0, 0, 0],
+        [0x0005, 0, 0, 1],
         [0xffff, 12, 0, 0],
     ]));
     runtime.start(trigger(1));
-    assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+    assert_eq!(
+        runtime.advance(),
+        Some(ScriptEvent::Redraw {
+            update_party_gestures: true,
+        })
+    );
     assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
     assert_eq!(
         runtime.advance(),

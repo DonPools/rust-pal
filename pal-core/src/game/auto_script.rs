@@ -114,13 +114,15 @@ impl<M: CollisionMap> GameState<M> {
         );
         self.set_random_state(runtime.random_state());
         self.auto_instruction_runtime = Some(runtime);
-        let next_entry = self.apply_auto_instruction_step(object_id, script_entry, opcode, step)?;
+        let next_entry =
+            self.apply_auto_instruction_step(scripts, object_id, script_entry, opcode, step)?;
         self.scene_objects[object_index].auto_script = next_entry;
         Ok(true)
     }
 
     fn apply_auto_instruction_step(
         &mut self,
+        scripts: &ScriptTable,
         object_id: u16,
         script_entry: u16,
         opcode: ScriptOpcode,
@@ -133,7 +135,7 @@ impl<M: CollisionMap> GameState<M> {
         };
         match event {
             ScriptEvent::Action(action) => {
-                if let Some(target) = self.apply_dispatched_auto_action(action) {
+                if let Some(target) = self.apply_dispatched_auto_action(action, scripts) {
                     next_entry = target;
                 }
             }
@@ -166,7 +168,7 @@ impl<M: CollisionMap> GameState<M> {
             | ScriptEvent::WaitForKey
             | ScriptEvent::LoadLastSave
             | ScriptEvent::QuitGame) => self.pending_auto_events.push(event),
-            ScriptEvent::Waiting | ScriptEvent::Delay => {}
+            ScriptEvent::Waiting { .. } | ScriptEvent::Redraw { .. } | ScriptEvent::Delay => {}
             ScriptEvent::Unsupported { entry, opcode, .. } => {
                 return Err(AutoScriptError::Unsupported {
                     object_id,
@@ -220,7 +222,7 @@ impl<M: CollisionMap> GameState<M> {
             self.set_random_state(runtime.random_state());
             match event {
                 Some(ScriptEvent::Action(action)) => {
-                    if let Some(target) = self.apply_dispatched_auto_action(action) {
+                    if let Some(target) = self.apply_dispatched_auto_action(action, scripts) {
                         let _ = runtime.branch_to(target);
                     }
                 }
@@ -238,7 +240,8 @@ impl<M: CollisionMap> GameState<M> {
                 }
                 Some(
                     ScriptEvent::Message { .. }
-                    | ScriptEvent::Waiting
+                    | ScriptEvent::Waiting { .. }
+                    | ScriptEvent::Redraw { .. }
                     | ScriptEvent::Delay
                     | ScriptEvent::OpenBuyMenu { .. }
                     | ScriptEvent::OpenSellMenu
@@ -300,8 +303,17 @@ impl<M: CollisionMap> GameState<M> {
         })
     }
 
-    fn apply_dispatched_auto_action(&mut self, action: ScriptAction) -> Option<u16> {
+    fn apply_dispatched_auto_action(
+        &mut self,
+        action: ScriptAction,
+        scripts: &ScriptTable,
+    ) -> Option<u16> {
         match action {
+            action @ ScriptAction::SetParty { .. } => {
+                if self.apply_script_action(action) {
+                    let _ = self.refresh_equipment_effects(scripts);
+                }
+            }
             ScriptAction::AdjustCash {
                 amount,
                 insufficient_entry,

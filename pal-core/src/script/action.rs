@@ -326,6 +326,7 @@ pub enum ScriptAction {
     OffsetPlayer {
         dx: i32,
         dy: i32,
+        layer: u16,
     },
     SetPlayerPosition {
         tile_x: u16,

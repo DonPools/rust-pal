@@ -5,8 +5,8 @@ use crate::script::executor::{decode_instruction, ScriptCallFrame, ScriptCursor}
 use crate::script::{ScriptAction, ScriptOpcode};
 
 impl<M: CollisionMap> GameState<M> {
-    /// Re-run equipped-item scripts so battle attributes match current equipment.
-    pub(super) fn refresh_equipment_effects(&mut self, scripts: &ScriptTable) -> bool {
+    /// Re-run all equipped-item scripts so cached effects match current equipment.
+    pub fn refresh_equipment_effects(&mut self, scripts: &ScriptTable) -> bool {
         const MAX_EQUIPMENT_SCRIPT_INSTRUCTIONS: usize = 4096;
 
         let Some(roles) = self.player_roles.as_ref() else {
@@ -107,6 +107,8 @@ impl<M: CollisionMap> GameState<M> {
                             return_entry: cursor.entry.wrapping_add(1),
                             wait_frames: 0,
                             wait_updates_auto_scripts: false,
+                            wait_processes_triggers: false,
+                            wait_updates_party_gestures: false,
                             viewport_frames_remaining: 0,
                         });
                         cursor.entry = instruction.operands[0];

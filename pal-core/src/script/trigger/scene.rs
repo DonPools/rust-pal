@@ -291,6 +291,7 @@ impl ScriptRuntime {
                     ScriptEvent::Action(ScriptAction::OffsetPlayer {
                         dx: i32::from(entry.operands[0] as i16),
                         dy: i32::from(entry.operands[1] as i16),
+                        layer: entry.operands[2].wrapping_mul(8),
                     }),
                 );
             }

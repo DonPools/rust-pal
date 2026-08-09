@@ -30,8 +30,10 @@ struct Execution {
     dialog_color: u8,
     dialog_face: Option<u16>,
     dialog_playing_rng: bool,
-    wait_frames: u16,
+    wait_frames: u32,
     wait_updates_auto_scripts: bool,
+    wait_processes_triggers: bool,
+    wait_updates_party_gestures: bool,
     viewport_frames_remaining: u16,
     succeeded: bool,
 }
@@ -46,6 +48,8 @@ impl Execution {
         self.entry = frame.return_entry;
         self.wait_frames = frame.wait_frames;
         self.wait_updates_auto_scripts = frame.wait_updates_auto_scripts;
+        self.wait_processes_triggers = frame.wait_processes_triggers;
+        self.wait_updates_party_gestures = frame.wait_updates_party_gestures;
         self.viewport_frames_remaining = frame.viewport_frames_remaining;
     }
 }
@@ -89,7 +93,7 @@ pub struct ScriptDebugSnapshot {
     pub last_instruction: Option<ScriptInstructionDebug>,
     pub next_instruction: Option<ScriptInstructionDebug>,
     pub call_depth: usize,
-    pub wait_frames: u16,
+    pub wait_frames: u32,
 }
 
 pub struct ScriptRuntime {
@@ -134,6 +138,8 @@ impl ScriptRuntime {
             dialog_playing_rng: false,
             wait_frames: 0,
             wait_updates_auto_scripts: false,
+            wait_processes_triggers: false,
+            wait_updates_party_gestures: false,
             viewport_frames_remaining: 0,
             succeeded: true,
         });
@@ -160,12 +166,16 @@ impl ScriptRuntime {
             return_entry: execution.entry,
             wait_frames: execution.wait_frames,
             wait_updates_auto_scripts: execution.wait_updates_auto_scripts,
+            wait_processes_triggers: execution.wait_processes_triggers,
+            wait_updates_party_gestures: execution.wait_updates_party_gestures,
             viewport_frames_remaining: execution.viewport_frames_remaining,
         });
         execution.object_id = object_id;
         execution.entry = entry;
         execution.wait_frames = 0;
         execution.wait_updates_auto_scripts = false;
+        execution.wait_processes_triggers = false;
+        execution.wait_updates_party_gestures = false;
         execution.viewport_frames_remaining = 0;
         self.execution = Some(execution);
         true
@@ -229,6 +239,22 @@ impl ScriptRuntime {
         true
     }
 
+    /// Insert one 50 ms host delay before the active instruction resumes.
+    ///
+    /// Blocking movement helpers use this between their 100 ms scene steps;
+    /// synchronous script actions remain free to continue on the next host
+    /// update.
+    pub fn delay_next_advance(&mut self) -> bool {
+        let Some(execution) = self.execution.as_mut() else {
+            return false;
+        };
+        execution.wait_frames = execution.wait_frames.max(1);
+        execution.wait_updates_auto_scripts = false;
+        execution.wait_processes_triggers = false;
+        execution.wait_updates_party_gestures = false;
+        true
+    }
+
     /// Resume a script suspended by `BATTLE`, applying the original result branches.
     pub fn resolve_battle(&mut self, result: BattleResult) -> bool {
         let Some(request) = self.pending_battle.take() else {
@@ -286,6 +312,8 @@ impl ScriptRuntime {
             dialog_playing_rng: false,
             wait_frames: 0,
             wait_updates_auto_scripts: false,
+            wait_processes_triggers: false,
+            wait_updates_party_gestures: false,
             viewport_frames_remaining: 0,
             succeeded: true,
         };

@@ -23,7 +23,19 @@ pub enum ScriptEvent {
         face_index: Option<u16>,
         playing_rng: bool,
     },
-    Waiting,
+    /// One original 100 ms scene frame elapsed while a trigger script waits.
+    Waiting {
+        /// Classic passes this flag to `PAL_GameUpdate`; when false only
+        /// automatic scripts advance.
+        process_triggers: bool,
+        /// Reset party sprites to standing poses before drawing the frame.
+        update_party_gestures: bool,
+    },
+    /// Redraw the current scene, then retain the script delay requested by the
+    /// instruction.
+    Redraw {
+        update_party_gestures: bool,
+    },
     Delay,
     Confirm {
         no_entry: u16,

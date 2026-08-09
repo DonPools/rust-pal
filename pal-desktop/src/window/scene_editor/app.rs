@@ -129,6 +129,7 @@ where
             &self.scene.map,
             Some(&self.role_sprites),
             &[],
+            0,
             &self.scene.objects,
             self.viewport,
         );

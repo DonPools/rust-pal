@@ -69,6 +69,8 @@ impl ScriptRuntime {
                     return_entry: execution.entry.wrapping_add(1),
                     wait_frames: execution.wait_frames,
                     wait_updates_auto_scripts: execution.wait_updates_auto_scripts,
+                    wait_processes_triggers: execution.wait_processes_triggers,
+                    wait_updates_party_gestures: execution.wait_updates_party_gestures,
                     viewport_frames_remaining: execution.viewport_frames_remaining,
                 });
                 execution.object_id = selected_object(entry.operands[1], execution.object_id);
@@ -80,9 +82,13 @@ impl ScriptRuntime {
             }
             WaitFrames => {
                 execution.advance();
-                execution.wait_frames = entry.operands[0].max(1) - 1;
+                execution.wait_frames = u32::from(entry.operands[0].max(1)) * 2;
                 execution.wait_updates_auto_scripts = true;
-                return InstructionFlow::Yield(execution, ScriptEvent::Waiting);
+                execution.wait_processes_triggers = entry.operands[1] != 0;
+                execution.wait_updates_party_gestures = entry.operands[2] != 0;
+                // The first 50 ms half-frame only holds the current image. The
+                // following half completes Classic's 100 ms scene frame.
+                return InstructionFlow::Yield(execution, ScriptEvent::Delay);
             }
             JumpByChance => {
                 let roll = self.next_random_percent();
@@ -105,8 +111,11 @@ impl ScriptRuntime {
             }
             Delay => {
                 execution.advance();
-                execution.wait_frames = delay_80ms_ticks(entry.operands[0]).saturating_sub(1);
+                execution.wait_frames =
+                    u32::from(delay_80ms_ticks(entry.operands[0]).saturating_sub(1));
                 execution.wait_updates_auto_scripts = false;
+                execution.wait_processes_triggers = false;
+                execution.wait_updates_party_gestures = false;
                 return InstructionFlow::Yield(execution, ScriptEvent::Delay);
             }
             RandomSelect => {

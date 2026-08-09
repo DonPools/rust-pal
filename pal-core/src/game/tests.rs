@@ -1172,7 +1172,11 @@ fn script_actions_mutate_world_state_and_follow_player() {
         state: -1,
     }));
     assert_eq!(state.scene_objects[0].state, -1);
-    assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 32, dy: 16 }));
+    assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
+        dx: 32,
+        dy: 16,
+        layer: 0,
+    }));
     assert_eq!((state.player.world_x, state.player.world_y), (352, 256));
     assert_eq!((state.camera.x, state.camera.y), (192, 156));
     assert!(!state.apply_script_action(ScriptAction::SetObjectState {
@@ -1242,6 +1246,10 @@ fn party_script_action_replaces_members_and_updates_leader_sprite() {
     let player_roles = PlayerRoles::parse(&role_data).unwrap();
     let party = Party::single(0, &player_roles).unwrap();
     let mut state = state(&[]).with_party(party).with_player_roles(player_roles);
+    state.player_poisons[0][0] = BattlePoison {
+        object_id: 7,
+        script_entry: 99,
+    };
 
     assert!(state.apply_script_action(ScriptAction::SetParty {
         members: [Some(2), Some(1), None],
@@ -1257,6 +1265,7 @@ fn party_script_action_replaces_members_and_updates_leader_sprite() {
     );
     assert_eq!(state.player.sprite_index, 42);
     assert_eq!(state.player.frames_per_direction, 4);
+    assert_eq!(state.player_poisons(0).unwrap()[0], BattlePoison::default());
     assert_eq!(state.party_followers().len(), 1);
     assert_eq!(
         (
@@ -1538,6 +1547,8 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
         [ScriptOpcode::EquipItem.raw(), 0x0b, 1, 0],
         [ScriptOpcode::SetEquipmentEffect.raw(), 0x0b, 17, 5],
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        [ScriptOpcode::SetParty.raw(), 1, 0, 0],
+        [ScriptOpcode::Stop.raw(), 0, 0, 0],
     ]
     .into_iter()
     .flatten()
@@ -1555,6 +1566,18 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
     assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
     assert_eq!(state.player_role(0).unwrap().equipment[0], 1);
     assert_eq!(state.inventory_count(1), 0);
+
+    state.equipment_effects.insert((0, 0, 17), 99);
+    state.player_poisons[0][0] = BattlePoison {
+        object_id: 7,
+        script_entry: 99,
+    };
+    let mut object = blocking_object(80, 80);
+    object.auto_script = 4;
+    state.scene_objects.push(object);
+    assert!(state.update_auto_scripts(&scripts).unwrap());
+    assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+    assert_eq!(state.player_poisons(0).unwrap()[0], BattlePoison::default());
 
     let invalid_script_data = [
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
@@ -2239,13 +2262,27 @@ fn party_walk_moves_over_multiple_ticks_and_updates_camera() {
 fn scripted_party_offset_advances_walking_animation_only_when_moving() {
     let mut state = state(&[]);
 
-    assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 8, dy: 4 }));
+    assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
+        dx: 8,
+        dy: 4,
+        layer: 24,
+    }));
     assert_eq!(state.player.anim_frame, 1);
+    assert_eq!(state.party_layer(), 24);
 
-    assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 0, dy: 0 }));
+    assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
+        dx: 0,
+        dy: 0,
+        layer: 8,
+    }));
     assert_eq!(state.player.anim_frame, 1);
+    assert_eq!(state.party_layer(), 8);
 
-    assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 8, dy: 4 }));
+    assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
+        dx: 8,
+        dy: 4,
+        layer: 0,
+    }));
     assert_eq!(state.player.anim_frame, 2);
 }
 
@@ -2296,7 +2333,11 @@ fn scripted_viewport_stays_locked_until_restored() {
     }));
     let scripted_camera = (state.camera.x, state.camera.y);
     assert_eq!(scripted_camera, (162, 143));
-    assert!(state.apply_script_action(ScriptAction::OffsetPlayer { dx: 32, dy: 16 }));
+    assert!(state.apply_script_action(ScriptAction::OffsetPlayer {
+        dx: 32,
+        dy: 16,
+        layer: 0,
+    }));
     assert_eq!((state.camera.x, state.camera.y), scripted_camera);
 
     assert!(state.apply_script_action(ScriptAction::MoveViewport {

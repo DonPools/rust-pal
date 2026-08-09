@@ -678,6 +678,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         &game.map,
         Some(&role_sprites),
         &[],
+        0,
         &[],
         viewport,
     );
@@ -687,6 +688,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         &game.map,
         Some(&role_sprites),
         std::slice::from_ref(&game.player),
+        game.party_layer(),
         &game.scene_objects,
         viewport,
     );
@@ -729,6 +731,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         &game.map,
         Some(&role_sprites),
         &[],
+        0,
         &[],
         object_viewport,
     );
@@ -738,6 +741,7 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
         &game.map,
         Some(&role_sprites),
         &[],
+        0,
         std::slice::from_ref(visible_object),
         object_viewport,
     );
@@ -888,7 +892,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             .expect("movement script stopped without an event")
         {
             ScriptEvent::Action(_)
-            | ScriptEvent::Waiting
+            | ScriptEvent::Waiting { .. }
+            | ScriptEvent::Redraw { .. }
             | ScriptEvent::Delay
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
@@ -926,10 +931,15 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 speed,
                 repeat_entry,
             }) => {
+                let before = (game.player.world_x, game.player.world_y);
                 match game.walk_player_to(tile_x, tile_y, half, speed) {
                     Some(true) => {}
                     Some(false) => assert!(scripts.branch_to(repeat_entry)),
                     None => panic!("scene enter party walk target is invalid"),
+                }
+                if before != (game.player.world_x, game.player.world_y) {
+                    game.update_auto_scripts(&auto_scripts)
+                        .expect("scene 1 auto script failed during party walk");
                 }
                 intro_actions += 1;
             }
@@ -941,13 +951,16 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 speed,
                 repeat_entry,
             }) => {
+                let before = (game.player.world_x, game.player.world_y);
                 match game.ride_object_to(object_id, tile_x, tile_y, half, speed) {
                     Some(true) => {}
                     Some(false) => assert!(scripts.branch_to(repeat_entry)),
                     None => panic!("scene enter ride target is invalid"),
                 }
-                game.update_auto_scripts(&auto_scripts)
-                    .expect("scene 1 auto script failed during party ride");
+                if before != (game.player.world_x, game.player.world_y) {
+                    game.update_auto_scripts(&auto_scripts)
+                        .expect("scene 1 auto script failed during party ride");
+                }
                 intro_actions += 1;
             }
             ScriptEvent::Action(action @ ScriptAction::MoveViewport { x, y, frames }) => {
@@ -965,11 +978,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 );
                 intro_actions += 1;
             }
-            ScriptEvent::Waiting => {
+            ScriptEvent::Waiting { .. } => {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("scene 1 auto script failed during trigger wait");
             }
-            ScriptEvent::Delay
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
@@ -1037,8 +1051,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 assert!(text.message(usize::from(message_id)).is_some());
             }
             ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
-            ScriptEvent::Waiting => {}
-            ScriptEvent::Delay
+            ScriptEvent::Waiting { .. } => {}
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
@@ -1119,8 +1134,9 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 assert_eq!(game.map.map_num, source_map_number);
                 faded_source_scene = true;
             }
-            ScriptEvent::Waiting => {}
-            ScriptEvent::Delay
+            ScriptEvent::Waiting { .. } => {}
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
@@ -1167,11 +1183,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 game.apply_script_action(action),
                 "inn conversation action could not be applied: {action:?}"
             ),
-            ScriptEvent::Waiting => {
+            ScriptEvent::Waiting { .. } => {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("inn auto script failed during conversation");
             }
-            ScriptEvent::Delay
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
@@ -1261,7 +1278,8 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
             }
             ScriptEvent::Action(action) => assert!(game.apply_script_action(action)),
             ScriptEvent::Delay
-            | ScriptEvent::Waiting
+            | ScriptEvent::Waiting { .. }
+            | ScriptEvent::Redraw { .. }
             | ScriptEvent::Confirm { .. }
             | ScriptEvent::OpenBuyMenu { .. }
             | ScriptEvent::OpenSellMenu
@@ -1324,11 +1342,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 );
                 first_battle_actions += 1;
             }
-            ScriptEvent::Waiting => {
+            ScriptEvent::Waiting { .. } => {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("first battle setup auto script failed");
             }
-            ScriptEvent::Delay
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::FadeScene { .. }
             | ScriptEvent::Visual(_)
             | ScriptEvent::WaitForKey => {}
@@ -1848,11 +1867,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 );
                 post_battle_actions += 1;
             }
-            ScriptEvent::Waiting => {
+            ScriptEvent::Waiting { .. } => {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("first battle follow-up auto script failed");
             }
-            ScriptEvent::Delay
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::FadeScene { .. }
             | ScriptEvent::Visual(_)
             | ScriptEvent::WaitForKey => {}
@@ -1890,11 +1910,12 @@ pub(super) fn check_assets(boot: BootstrappedGame) {
                 );
                 extended_story_actions += 1;
             }
-            ScriptEvent::Waiting => {
+            ScriptEvent::Waiting { .. } => {
                 game.update_auto_scripts(&auto_scripts)
                     .expect("extended story auto script failed");
             }
-            ScriptEvent::Delay
+            ScriptEvent::Redraw { .. }
+            | ScriptEvent::Delay
             | ScriptEvent::FadeScene { .. }
             | ScriptEvent::Visual(_)
             | ScriptEvent::WaitForKey => {}
@@ -2464,7 +2485,8 @@ fn run_headless_battle_script(
                 text.message(usize::from(message_id)).is_some(),
                 "battle script references unavailable message {message_id}"
             ),
-            ScriptEvent::Waiting
+            ScriptEvent::Waiting { .. }
+            | ScriptEvent::Redraw { .. }
             | ScriptEvent::Delay
             | ScriptEvent::FadeScene { .. }
             | ScriptEvent::Visual(_)

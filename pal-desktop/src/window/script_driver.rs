@@ -129,9 +129,39 @@ fn advance_script_with_budget<L>(
             }
             set_title("Rust-PAL [Dialog]");
         }
-        Some(ScriptEvent::Waiting) => {
+        Some(ScriptEvent::Waiting {
+            process_triggers,
+            update_party_gestures,
+        }) => {
+            if update_party_gestures {
+                game.stop_party_walking_animation();
+            }
+            if process_triggers {
+                // A nested touch trigger must persist the callee's returned
+                // entry before this waiting script resumes. The current call
+                // stack does not expose that completion boundary yet.
+                set_title("Rust-PAL [WaitFrames touch update unsupported]");
+            }
             update_trigger_world(scripts, game, resources, load_scene, services, set_title);
+            if scripts.debug_snapshot().wait_frames == 0 && immediate_budget > 1 {
+                advance_script_with_budget(
+                    scripts,
+                    game,
+                    dialog,
+                    resources,
+                    load_scene,
+                    services,
+                    set_title,
+                    immediate_budget - 1,
+                );
+            }
         }
+        Some(ScriptEvent::Redraw {
+            update_party_gestures: true,
+        }) => {
+            game.stop_party_walking_animation();
+        }
+        Some(ScriptEvent::Redraw { .. }) => {}
         Some(ScriptEvent::Delay) => {}
         Some(ScriptEvent::Confirm { no_entry }) => {
             services.set_confirmation_menu(ConfirmationMenu {
@@ -248,6 +278,7 @@ fn advance_script_with_budget<L>(
                 &mut game.scene_number,
                 scene_number,
             ) {
+                game.set_party_layer(0);
                 set_title(&format!("Rust-PAL [scene {scene_number}]"));
             }
             if immediate_budget > 1 {
@@ -431,13 +462,36 @@ fn advance_script_with_budget<L>(
             half,
             speed,
             repeat_entry,
-        })) => match game.walk_player_to(tile_x, tile_y, half, speed) {
-            Some(true) => {}
-            Some(false) => {
-                scripts.branch_to(repeat_entry);
+        })) => {
+            let before = (game.player.world_x, game.player.world_y);
+            let mut completed = false;
+            match game.walk_player_to(tile_x, tile_y, half, speed) {
+                Some(true) => {
+                    game.stop_party_walking_animation();
+                    completed = true;
+                }
+                Some(false) => {
+                    scripts.branch_to(repeat_entry);
+                    scripts.delay_next_advance();
+                }
+                None => set_title("Rust-PAL [script party walk target is unavailable]"),
             }
-            None => set_title("Rust-PAL [script party walk target is unavailable]"),
-        },
+            if before != (game.player.world_x, game.player.world_y) {
+                update_trigger_world(scripts, game, resources, load_scene, services, set_title);
+            }
+            if completed && immediate_budget > 1 {
+                advance_script_with_budget(
+                    scripts,
+                    game,
+                    dialog,
+                    resources,
+                    load_scene,
+                    services,
+                    set_title,
+                    immediate_budget - 1,
+                );
+            }
+        }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::RideObjectTo {
             object_id,
             tile_x,
@@ -446,14 +500,31 @@ fn advance_script_with_budget<L>(
             speed,
             repeat_entry,
         })) => {
+            let before = (game.player.world_x, game.player.world_y);
+            let mut completed = false;
             match game.ride_object_to(object_id, tile_x, tile_y, half, speed) {
-                Some(true) => {}
+                Some(true) => completed = true,
                 Some(false) => {
                     scripts.branch_to(repeat_entry);
+                    scripts.delay_next_advance();
                 }
                 None => set_title("Rust-PAL [script ride target is unavailable]"),
             }
-            update_trigger_world(scripts, game, resources, load_scene, services, set_title);
+            if before != (game.player.world_x, game.player.world_y) {
+                update_trigger_world(scripts, game, resources, load_scene, services, set_title);
+            }
+            if completed && immediate_budget > 1 {
+                advance_script_with_budget(
+                    scripts,
+                    game,
+                    dialog,
+                    resources,
+                    load_scene,
+                    services,
+                    set_title,
+                    immediate_budget - 1,
+                );
+            }
         }
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::MoveViewport { x, y, frames },
@@ -461,6 +532,7 @@ fn advance_script_with_budget<L>(
             game.apply_script_action(action);
             if (x != 0 || y != 0) && frames != -1 {
                 update_trigger_world(scripts, game, resources, load_scene, services, set_title);
+                scripts.delay_next_advance();
             }
         }
         Some(ScriptEvent::Condition(condition)) => {
@@ -552,6 +624,13 @@ fn advance_script_with_budget<L>(
             }
             let events = game.advance_battle_resolution();
             queue_battle_events(game, services, events);
+        }
+        Some(ScriptEvent::Action(action @ pal_core::script::ScriptAction::SetParty { .. })) => {
+            if !game.apply_script_action(action) {
+                set_title("Rust-PAL [script party is unavailable]");
+            } else if !game.refresh_equipment_effects(&services.scripts.auto_scripts) {
+                set_title("Rust-PAL [failed to refresh party equipment effects]");
+            }
         }
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");
@@ -1058,7 +1137,7 @@ mod tests {
     fn auto_call_nests_inside_a_waiting_trigger_and_restores_its_wait() {
         let data = [
             [0x0000u16, 0, 0, 0],
-            [ScriptOpcode::WaitFrames.raw(), 3, 0, 0],
+            [ScriptOpcode::WaitFrames.raw(), 3, 1, 1],
             [0x0000, 0, 0, 0],
             [ScriptOpcode::SetObjectGesture.raw(), 7, 0, 0],
             [0x0000, 0, 0, 0],
@@ -1073,7 +1152,7 @@ mod tests {
             kind: TriggerKind::Touch,
         };
         assert!(scripts.start(parent));
-        assert_eq!(scripts.advance(), Some(ScriptEvent::Waiting));
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Delay));
 
         assert!(enter_auto_trigger(
             &mut scripts,
@@ -1093,8 +1172,16 @@ mod tests {
                 }
             ))
         );
-        assert_eq!(scripts.advance(), Some(ScriptEvent::Waiting));
-        assert_eq!(scripts.advance(), Some(ScriptEvent::Waiting));
+        let scene_frame = ScriptEvent::Waiting {
+            process_triggers: true,
+            update_party_gestures: true,
+        };
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Delay));
+        assert_eq!(scripts.advance(), Some(scene_frame));
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Delay));
+        assert_eq!(scripts.advance(), Some(scene_frame));
+        assert_eq!(scripts.advance(), Some(ScriptEvent::Delay));
+        assert_eq!(scripts.advance(), Some(scene_frame));
         assert_eq!(
             scripts.advance(),
             Some(ScriptEvent::Completed {

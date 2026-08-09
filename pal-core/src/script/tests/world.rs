@@ -276,6 +276,25 @@ fn moves_viewport_over_multiple_script_ticks() {
 }
 
 #[test]
+fn host_can_space_repeating_scene_motion_to_original_frames() {
+    let mut runtime = ScriptRuntime::new(table(&[[0, 0, 0, 0], [0x007f, 2, 0, 2], [0, 0, 0, 0]]));
+    runtime.start(trigger(1));
+
+    assert!(matches!(
+        runtime.advance(),
+        Some(ScriptEvent::Action(ScriptAction::MoveViewport { .. }))
+    ));
+    assert_eq!(runtime.debug_snapshot().next_instruction.unwrap().entry, 1);
+    assert!(runtime.delay_next_advance());
+    assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+    assert!(matches!(
+        runtime.advance(),
+        Some(ScriptEvent::Action(ScriptAction::MoveViewport { .. }))
+    ));
+    assert_eq!(runtime.debug_snapshot().next_instruction.unwrap().entry, 2);
+}
+
+#[test]
 fn sets_and_restores_viewport_without_repeating() {
     let mut runtime = ScriptRuntime::new(table(&[
         [0, 0, 0, 0],
@@ -557,12 +576,27 @@ fn yields_wait_ticks_and_world_actions() {
         [0x0009, 2, 0, 0],
         [0x000b, 0, 0, 0],
         [0x0049, 0xffff, 0xffff, 0],
-        [0x006e, 0xfff0, 8, 0],
+        [0x006e, 0xfff0, 8, 3],
         [0, 0, 0, 0],
     ]));
     runtime.start(trigger(1));
-    assert_eq!(runtime.advance(), Some(ScriptEvent::Waiting));
-    assert_eq!(runtime.advance(), Some(ScriptEvent::Waiting));
+    assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+    assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+    assert_eq!(
+        runtime.advance(),
+        Some(ScriptEvent::Waiting {
+            process_triggers: false,
+            update_party_gestures: false,
+        })
+    );
+    assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+    assert_eq!(
+        runtime.advance(),
+        Some(ScriptEvent::Waiting {
+            process_triggers: false,
+            update_party_gestures: false,
+        })
+    );
     assert_eq!(
         runtime.advance(),
         Some(ScriptEvent::Action(ScriptAction::MoveObject {
@@ -582,6 +616,7 @@ fn yields_wait_ticks_and_world_actions() {
         Some(ScriptEvent::Action(ScriptAction::OffsetPlayer {
             dx: -16,
             dy: 8,
+            layer: 24,
         }))
     );
     assert!(matches!(

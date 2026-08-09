@@ -43,7 +43,12 @@ fn debug_snapshot_tracks_trigger_and_instructions_after_completion() {
         }
     );
 
-    assert_eq!(runtime.advance(), Some(ScriptEvent::Delay));
+    assert_eq!(
+        runtime.advance(),
+        Some(ScriptEvent::Redraw {
+            update_party_gestures: false,
+        })
+    );
     let waiting = runtime.debug_snapshot();
     assert_eq!(waiting.last_instruction.unwrap().entry, 1);
     assert_eq!(waiting.next_instruction.unwrap().entry, 2);

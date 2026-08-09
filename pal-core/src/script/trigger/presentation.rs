@@ -17,9 +17,17 @@ impl ScriptRuntime {
         match opcode {
             Redraw => {
                 execution.advance();
-                execution.wait_frames = delay_60ms_ticks(entry.operands[1]).saturating_sub(1);
+                execution.wait_frames =
+                    u32::from(delay_60ms_ticks(entry.operands[1]).saturating_sub(1));
                 execution.wait_updates_auto_scripts = false;
-                return InstructionFlow::Yield(execution, ScriptEvent::Delay);
+                execution.wait_processes_triggers = false;
+                execution.wait_updates_party_gestures = false;
+                return InstructionFlow::Yield(
+                    execution,
+                    ScriptEvent::Redraw {
+                        update_party_gestures: entry.operands[2] != 0,
+                    },
+                );
             }
             ShakeScreen => {
                 execution.advance();

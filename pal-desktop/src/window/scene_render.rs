@@ -19,6 +19,7 @@ pub fn render_tile_map(
     map: &Map,
     role_sprites: Option<&RoleSprites>,
     roles: &[Role],
+    party_layer: u16,
     scene_objects: &[SceneObject],
     viewport: Viewport,
 ) {
@@ -31,17 +32,20 @@ pub fn render_tile_map(
         map,
         role_sprites,
         roles,
+        party_layer,
         scene_objects,
         viewport,
         bounds,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_depth_sorted_sprites(
     renderer: &mut Renderer,
     map: &Map,
     role_sprites: Option<&RoleSprites>,
     roles: &[Role],
+    party_layer: u16,
     scene_objects: &[SceneObject],
     viewport: Viewport,
     bounds: RenderBounds,
@@ -49,18 +53,21 @@ fn render_depth_sorted_sprites(
     let mut sprites = Vec::new();
 
     if let Some(role_sprites) = role_sprites {
+        let party_layer = i32::from(party_layer);
         for role in roles {
             let (anchor_x, anchor_y) = role.screen_anchor();
             if anchor_y < bounds.start_y * 16 || anchor_y >= bounds.end_y * 16 {
                 continue;
             }
             if let Some(bitmap) = role_sprites.decode_role_frame(role) {
+                let (cover_x, cover_y) =
+                    party_cover_anchor(role.world_x, role.world_y, bitmap.width, party_layer);
                 add_covering_tiles(
                     &mut sprites,
                     map,
                     viewport,
-                    role.world_x - i32::from(bitmap.width) / 2 - 3,
-                    role.world_y + 4,
+                    cover_x,
+                    cover_y,
                     bitmap.width,
                     bitmap.height,
                 );
@@ -69,7 +76,7 @@ fn render_depth_sorted_sprites(
                     y: anchor_y - bitmap.height as i32 - viewport.y,
                     // PAL sorts party sprites six logical pixels below the
                     // rendered foot anchor.
-                    depth: anchor_y + 6,
+                    depth: party_sprite_depth(anchor_y, party_layer),
                     bitmap,
                 });
             }
@@ -109,6 +116,22 @@ fn render_depth_sorted_sprites(
     for sprite in sprites {
         renderer.blit_rle(&sprite.bitmap, sprite.x, sprite.y);
     }
+}
+
+fn party_sprite_depth(anchor_y: i32, party_layer: i32) -> i32 {
+    anchor_y + party_layer + 6
+}
+
+fn party_cover_anchor(
+    world_x: i32,
+    world_y: i32,
+    bitmap_width: u16,
+    party_layer: i32,
+) -> (i32, i32) {
+    (
+        world_x - i32::from(bitmap_width) / 2 - (party_layer + 6) / 2,
+        world_y + 4,
+    )
 }
 
 fn add_covering_tiles(
@@ -236,5 +259,22 @@ fn render_tile_row(
                 y * 16 + h * 8 - 8 - viewport.y,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{party_cover_anchor, party_sprite_depth};
+
+    #[test]
+    fn party_layer_changes_depth_in_eight_pixel_units() {
+        assert_eq!(party_sprite_depth(120, 0), 126);
+        assert_eq!(party_sprite_depth(120, 24), 150);
+    }
+
+    #[test]
+    fn party_layer_shifts_cover_scan_horizontally_but_not_vertically() {
+        assert_eq!(party_cover_anchor(160, 120, 20, 0), (147, 124));
+        assert_eq!(party_cover_anchor(160, 120, 20, 24), (135, 124));
     }
 }
