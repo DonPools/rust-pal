@@ -85,7 +85,7 @@ use field::{
 pub use snapshot::GameSnapshot;
 use snapshot::{
     SavedPartySlot, SavedPlayerRole, SavedRole, SavedSceneObject, SavedTrailPoint, SnapshotData,
-    SNAPSHOT_VERSION,
+    LEGACY_SNAPSHOT_VERSION, SNAPSHOT_VERSION,
 };
 use state_support::{
     apply_equipment_effect, apply_role_attribute, unique_script_entries, valid_role_attribute,
@@ -1458,6 +1458,7 @@ impl<M: CollisionMap> GameState<M> {
         GameSnapshot {
             scene_number: self.scene_number,
             player: self.player.clone(),
+            party_layer: Some(self.save_layer),
             scene_objects: self.scene_objects.clone(),
             pending_trigger: self.pending_trigger,
             party: self.party.clone(),
@@ -1502,6 +1503,7 @@ impl<M: CollisionMap> GameState<M> {
             version: SNAPSHOT_VERSION,
             scene_number: snapshot.scene_number,
             player: SavedRole::from(&snapshot.player),
+            party_layer: Some(snapshot.party_layer?),
             scene_objects: snapshot
                 .scene_objects
                 .iter()
@@ -1590,7 +1592,8 @@ impl<M: CollisionMap> GameState<M> {
             return None;
         }
         let data: SnapshotData = serde_json::from_slice(bytes).ok()?;
-        if data.version != SNAPSHOT_VERSION
+        if (data.version != SNAPSHOT_VERSION && data.version != LEGACY_SNAPSHOT_VERSION)
+            || (data.version == SNAPSHOT_VERSION && data.party_layer.is_none())
             || data.scene_number == 0
             || data.scene_enter_scripts.len() > MAX_SCENES
             || data.scene_teleport_scripts.len() > MAX_SCENES
@@ -1770,6 +1773,7 @@ impl<M: CollisionMap> GameState<M> {
         Some(GameSnapshot {
             scene_number: data.scene_number,
             player: data.player.into_role()?,
+            party_layer: data.party_layer,
             scene_objects: data
                 .scene_objects
                 .into_iter()
@@ -1817,6 +1821,7 @@ impl<M: CollisionMap> GameState<M> {
         self.scene_number = snapshot.scene_number;
         self.map = map;
         self.player = snapshot.player;
+        self.save_layer = snapshot.party_layer.unwrap_or(0);
         self.scene_objects = snapshot.scene_objects;
         self.pending_trigger = snapshot.pending_trigger;
         self.party = snapshot.party;

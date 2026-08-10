@@ -7,6 +7,22 @@ use pal_assets::palette::Palette;
 use pal_assets::rle::RleBitmap;
 use pal_assets::text::{BitmapFont, FontGlyph};
 
+// Cumulative offsets produced by Classic's PAL_ApplyWave loop before scaling
+// by the active wave level. Phases 16..31 mirror these in the other direction.
+const PAL_WAVE_AMPLITUDES: [i32; 16] = [
+    60, 112, 156, 192, 220, 240, 252, 256, 252, 240, 220, 192, 156, 112, 60, 0,
+];
+
+fn pal_wave_offset(phase: i32, level: u16) -> i32 {
+    let phase = phase & 31;
+    let amplitude = PAL_WAVE_AMPLITUDES[(phase & 15) as usize] * i32::from(level) / 256;
+    if phase < 16 {
+        amplitude
+    } else {
+        -amplitude
+    }
+}
+
 /// 渲染管线状态
 pub struct Renderer {
     /// 调色板
@@ -142,18 +158,17 @@ impl Renderer {
         self.dirty = true;
     }
 
-    /// Apply PAL-style horizontal row displacement to the completed frame.
-    pub fn apply_wave(&mut self, level: u16, progression: i16) {
+    /// Apply Classic PAL's 32-row horizontal wave displacement.
+    pub fn apply_wave(&mut self, level: u16, phase: i16) {
         if level == 0 || self.width == 0 {
             return;
         }
         let source = self.screen.clone();
         for y in 0..self.height {
-            let phase = (i32::try_from(y).unwrap_or(i32::MAX) + i32::from(progression)) & 31;
-            let triangle = if phase < 16 { phase } else { 31 - phase } - 8;
-            let offset = triangle * i32::from(level) / 8;
+            let row_phase = (i32::try_from(y).unwrap_or(i32::MAX) + i32::from(phase)) & 31;
+            let offset = pal_wave_offset(row_phase, level);
             for x in 0..self.width {
-                let source_x = (i32::try_from(x).unwrap_or(i32::MAX) - offset)
+                let source_x = (i32::try_from(x).unwrap_or(i32::MAX) + offset)
                     .rem_euclid(self.width as i32) as usize;
                 let destination = (y * self.width + x) * 4;
                 let source_index = (y * self.width + source_x) * 4;
@@ -514,5 +529,48 @@ mod tests {
         assert!(renderer.replace_screen(&target));
         assert!(renderer.scroll_down_from(&previous, 3));
         assert_eq!(renderer.screen(), target);
+    }
+
+    #[test]
+    fn wave_uses_classic_offsets_in_both_directions() {
+        let source = (0u8..8)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+        let mut renderer = Renderer::new(Palette::default(), 8, 1);
+
+        assert!(renderer.replace_screen(&source));
+        renderer.apply_wave(4, 3);
+        assert_eq!(
+            renderer
+                .screen()
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [3, 4, 5, 6, 7, 0, 1, 2]
+        );
+
+        assert!(renderer.replace_screen(&source));
+        renderer.apply_wave(4, 19);
+        assert_eq!(
+            renderer
+                .screen()
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [5, 6, 7, 0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn wave_phase_with_zero_classic_offset_preserves_the_row() {
+        let source = (0u8..8)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+        let mut renderer = Renderer::new(Palette::default(), 8, 1);
+        assert!(renderer.replace_screen(&source));
+
+        renderer.apply_wave(255, 15);
+
+        assert_eq!(renderer.screen(), source);
     }
 }

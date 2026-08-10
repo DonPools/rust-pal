@@ -2121,6 +2121,7 @@ fn disk_snapshot_round_trips_and_rejects_invalid_data() {
         range: 3,
         cycles: 12,
     }));
+    state.set_party_layer(72);
     state.role_experience[0] = 42;
 
     let encoded = state.encode_snapshot().unwrap();
@@ -2140,6 +2141,7 @@ fn disk_snapshot_round_trips_and_rejects_invalid_data() {
     assert_eq!(state.item_throw_scripts.get(&9), Some(&77));
     assert_eq!(state.chase_range, 3);
     assert_eq!(state.chase_speed_change_cycles, 12);
+    assert_eq!(state.party_layer(), 72);
     assert_eq!(
         (
             state.scene_objects[0].world_x,
@@ -2147,6 +2149,15 @@ fn disk_snapshot_round_trips_and_rejects_invalid_data() {
         ),
         (40, 50)
     );
+
+    let legacy = String::from_utf8(encoded.clone())
+        .unwrap()
+        .replace(
+            &format!("\"version\":{SNAPSHOT_VERSION}"),
+            &format!("\"version\":{LEGACY_SNAPSHOT_VERSION}"),
+        )
+        .replace(",\"party_layer\":72", "");
+    assert!(state.decode_snapshot(legacy.as_bytes()).is_some());
 
     assert!(state.decode_snapshot(b"not json").is_none());
     assert!(state

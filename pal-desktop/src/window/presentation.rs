@@ -21,7 +21,7 @@ use super::menu_render::{
     render_shop_menu, render_status_menu,
 };
 use super::menu_state::{ActiveMenu, OpeningMenu};
-use super::scene_render::render_tile_map;
+use super::scene_render::render_tile_map_with_wave;
 use super::state::AppModeView;
 use super::visual::VisualState;
 use super::Viewport;
@@ -238,7 +238,7 @@ fn render_battle_or_world(
         .chain(game.party_followers())
         .cloned()
         .collect::<Vec<_>>();
-    render_tile_map(
+    render_tile_map_with_wave(
         renderer,
         &game.map,
         Some(role_sprites),
@@ -246,6 +246,7 @@ fn render_battle_or_world(
         game.party_layer(),
         &game.scene_objects,
         viewport,
+        ui.visual.active_scene_wave(),
     );
     if show_collision {
         render_collision_overlay(renderer, &game.map, &game.player, viewport);

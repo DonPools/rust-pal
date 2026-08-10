@@ -23,10 +23,37 @@ pub fn render_tile_map(
     scene_objects: &[SceneObject],
     viewport: Viewport,
 ) {
+    render_tile_map_with_wave(
+        renderer,
+        map,
+        role_sprites,
+        roles,
+        party_layer,
+        scene_objects,
+        viewport,
+        None,
+    );
+}
+
+/// Render a scene with Classic's map-only wave between the map and sprite passes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_tile_map_with_wave(
+    renderer: &mut Renderer,
+    map: &Map,
+    role_sprites: Option<&RoleSprites>,
+    roles: &[Role],
+    party_layer: u16,
+    scene_objects: &[SceneObject],
+    viewport: Viewport,
+    wave: Option<(u16, i16)>,
+) {
     renderer.clear_black();
     let bounds = RenderBounds::for_viewport(viewport);
     render_tile_layer(renderer, map, viewport, bounds, false);
     render_tile_layer(renderer, map, viewport, bounds, true);
+    if let Some((level, phase)) = wave {
+        renderer.apply_wave(level, phase);
+    }
     render_depth_sorted_sprites(
         renderer,
         map,

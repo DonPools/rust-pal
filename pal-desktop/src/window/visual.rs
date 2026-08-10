@@ -228,6 +228,13 @@ impl VisualState {
         u16::try_from(self.screen_wave.max(0)).unwrap_or(u16::MAX)
     }
 
+    /// Return the wave applied between the scene map and sprite passes.
+    pub(super) fn active_scene_wave(&self) -> Option<(u16, i16)> {
+        (1..256)
+            .contains(&self.screen_wave)
+            .then_some((self.screen_wave as u16, self.wave_phase))
+    }
+
     pub(super) fn update(
         &mut self,
         current_screen: &[u8],
@@ -749,9 +756,6 @@ impl VisualState {
         }
         if self.tint_amount != 0 {
             renderer.apply_color_tint(self.tint_color, self.tint_amount);
-        }
-        if self.screen_wave != 0 {
-            renderer.apply_wave(self.screen_wave as u16, self.wave_phase);
         }
         if self.shake_remaining != 0 {
             let level = i32::from(self.shake_level.min(i16::MAX as u16));
@@ -1484,6 +1488,24 @@ mod tests {
         assert_eq!(color_fade_ticks(1), 13);
         assert_eq!(duration_ticks(32 * 75), 48);
         assert_eq!(ending_sprite_frame_ticks(), 3);
+    }
+
+    #[test]
+    fn scene_wave_is_not_applied_as_a_full_frame_post_effect() {
+        let (palettes, _, _, role_sprites) = resources();
+        let source = (0u8..8)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+        let mut renderer = Renderer::new(palettes[0].day.clone(), 8, 1);
+        assert!(renderer.replace_screen(&source));
+        let mut visual = VisualState::new();
+        visual.screen_wave = 4;
+        visual.wave_phase = 3;
+
+        assert_eq!(visual.active_scene_wave(), Some((4, 3)));
+        visual.apply_post_effects(&mut renderer, &role_sprites);
+
+        assert_eq!(renderer.screen(), source);
     }
 
     #[test]

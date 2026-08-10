@@ -4,6 +4,7 @@ use pal_assets::player_roles::{PlayerRole, PlayerRoles};
 use serde::{Deserialize, Serialize};
 
 use crate::battle::{BattlePoison, BattleStatuses, BATTLE_STATUS_COUNT, MAX_BATTLE_POISONS};
+use crate::map::{world_to_tile, Map};
 
 use super::{
     Direction, Party, PartySlotState, Role, SceneObject, TrailPoint, TriggerRequest,
@@ -15,6 +16,7 @@ use super::{
 pub struct GameSnapshot {
     pub(super) scene_number: u16,
     pub(super) player: Role,
+    pub(super) party_layer: Option<u16>,
     pub(super) scene_objects: Vec<SceneObject>,
     pub(super) pending_trigger: Option<TriggerRequest>,
     pub(super) party: Party,
@@ -61,16 +63,34 @@ impl GameSnapshot {
     pub fn scene_map_override(&self) -> Option<u16> {
         self.scene_maps.get(&self.scene_number).copied()
     }
+
+    /// Recover the layer omitted by version 21 development snapshots.
+    ///
+    /// The standing bottom tile is the closest available equivalent to the
+    /// script-managed layer after the original value has already been lost.
+    pub fn recover_legacy_party_layer(&mut self, map: &Map) {
+        if self.party_layer.is_some() {
+            return;
+        }
+        self.party_layer = Some(
+            world_to_tile(self.player.world_x, self.player.world_y)
+                .and_then(|(x, y, h)| map.tile_height(x, y, h, false))
+                .map(|height| u16::from(height) * 8)
+                .unwrap_or(0),
+        );
+    }
 }
 
-// Version 21 preserves fixed party slots that scripts may prepare before adding a member.
-pub(super) const SNAPSHOT_VERSION: u16 = 21;
+// Version 22 preserves the party's logical map layer used for elevated floors.
+pub(super) const SNAPSHOT_VERSION: u16 = 22;
+pub(super) const LEGACY_SNAPSHOT_VERSION: u16 = 21;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SnapshotData {
     pub(super) version: u16,
     pub(super) scene_number: u16,
     pub(super) player: SavedRole,
+    pub(super) party_layer: Option<u16>,
     pub(super) scene_objects: Vec<SavedSceneObject>,
     pub(super) party: Vec<u16>,
     pub(super) current_music: Option<u16>,

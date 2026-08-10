@@ -36,7 +36,7 @@ where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
     let bytes = std::fs::read(path).map_err(|_| RestoreSnapshotError::Unavailable)?;
-    let snapshot = game
+    let mut snapshot = game
         .decode_snapshot(&bytes)
         .ok_or(RestoreSnapshotError::Unavailable)?;
     let scene = load_scene(
@@ -45,6 +45,7 @@ where
         role_sprites,
     )
     .ok_or(RestoreSnapshotError::SceneUnavailable)?;
+    snapshot.recover_legacy_party_layer(&scene.map);
     game.restore_snapshot(snapshot, scene.map);
     Ok(())
 }
