@@ -86,6 +86,33 @@ pub(super) fn apply_role_attribute(
     Some(())
 }
 
+/// Apply one field from Classic's per-slot `rgEquipmentEffect` table.
+///
+/// Numeric combat attributes add to the base role. Battle sprites and cooperative
+/// magic instead use the last non-zero equipment slot, while attack-all is enabled
+/// when any slot is non-zero.
+pub(super) fn apply_equipment_effect(
+    role: &mut PlayerRole,
+    attribute: u16,
+    value: i16,
+) -> Option<()> {
+    match attribute {
+        1 => {
+            if value != 0 {
+                role.battle_sprite_num = value as u16;
+            }
+        }
+        4 => role.attack_all |= value != 0,
+        65 => {
+            if value != 0 {
+                role.cooperative_magic = value as u16;
+            }
+        }
+        _ => apply_role_attribute(role, attribute, value, false)?,
+    }
+    Some(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoScriptError {
     InvalidEntry {

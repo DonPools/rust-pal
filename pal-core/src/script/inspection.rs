@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use pal_assets::objects::{ClassicObjectKind, GlobalObjects};
 use pal_assets::scene::SceneData;
 use pal_assets::script::{ScriptEntry, ScriptTable};
 
@@ -130,6 +131,10 @@ pub enum ScriptReferenceSource {
         scene: u16,
         object_id: u16,
     },
+    GlobalObjectScript {
+        object_id: u16,
+        field: u8,
+    },
     Instruction {
         entry: u16,
         kind: ScriptInstructionReferenceKind,
@@ -235,6 +240,31 @@ impl ScriptReferenceCatalog {
         catalog
     }
 
+    /// Add the three mutable script slots stored by every global object union.
+    pub fn index_global_object_scripts(&mut self, objects: &GlobalObjects) {
+        for object in objects.iter() {
+            let fields: &[u8] = match object.classic_kind() {
+                Some(ClassicObjectKind::Player | ClassicObjectKind::Magic) => &[2, 3],
+                Some(ClassicObjectKind::Item | ClassicObjectKind::Enemy) => &[2, 3, 4],
+                Some(ClassicObjectKind::Poison) => &[2, 4],
+                None => &[],
+            };
+            for &field in fields {
+                self.insert(
+                    object.data[usize::from(field)],
+                    ScriptReferenceSource::GlobalObjectScript {
+                        object_id: object.id,
+                        field,
+                    },
+                );
+            }
+        }
+        for references in self.by_entry.values_mut() {
+            references.sort_unstable();
+            references.dedup();
+        }
+    }
+
     pub fn references_to(&self, entry: u16) -> &[ScriptReferenceSource] {
         self.by_entry.get(&entry).map_or(&[], Vec::as_slice)
     }
@@ -290,7 +320,8 @@ const fn is_script_entry_source(source: ScriptReferenceSource) -> bool {
         ScriptReferenceSource::SceneEnter { .. }
         | ScriptReferenceSource::SceneTeleport { .. }
         | ScriptReferenceSource::ObjectTrigger { .. }
-        | ScriptReferenceSource::ObjectAuto { .. } => true,
+        | ScriptReferenceSource::ObjectAuto { .. }
+        | ScriptReferenceSource::GlobalObjectScript { .. } => true,
         ScriptReferenceSource::Instruction { kind, .. } => {
             matches!(kind, ScriptInstructionReferenceKind::Call)
                 || matches!(
@@ -896,6 +927,49 @@ mod tests {
         );
         assert_eq!(catalog.scene_for_object(1), Some(1));
         assert_eq!(catalog.scene_for_object(2), None);
+    }
+
+    #[test]
+    fn catalogs_only_semantic_global_object_script_fields() {
+        use pal_assets::objects::{
+            GlobalObjects, ObjectLayout, FIRST_ENEMY_OBJECT, FIRST_ITEM_OBJECT, FIRST_MAGIC_OBJECT,
+        };
+
+        let mut words = vec![0u16; (usize::from(FIRST_ENEMY_OBJECT) + 1) * 6];
+        words[usize::from(FIRST_ITEM_OBJECT) * 6 + 2] = 10;
+        words[usize::from(FIRST_MAGIC_OBJECT) * 6 + 2] = 20;
+        words[usize::from(FIRST_MAGIC_OBJECT) * 6 + 4] = 21;
+        words[usize::from(FIRST_ENEMY_OBJECT) * 6 + 4] = 30;
+        let bytes = words
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let objects = GlobalObjects::parse(&bytes, ObjectLayout::Dos).unwrap();
+        let mut catalog = ScriptReferenceCatalog::default();
+        catalog.index_global_object_scripts(&objects);
+
+        assert_eq!(
+            catalog.references_to(10),
+            [ScriptReferenceSource::GlobalObjectScript {
+                object_id: FIRST_ITEM_OBJECT,
+                field: 2,
+            }]
+        );
+        assert_eq!(
+            catalog.references_to(20),
+            [ScriptReferenceSource::GlobalObjectScript {
+                object_id: FIRST_MAGIC_OBJECT,
+                field: 2,
+            }]
+        );
+        assert!(catalog.references_to(21).is_empty());
+        assert_eq!(
+            catalog.references_to(30),
+            [ScriptReferenceSource::GlobalObjectScript {
+                object_id: FIRST_ENEMY_OBJECT,
+                field: 4,
+            }]
+        );
     }
 
     #[test]

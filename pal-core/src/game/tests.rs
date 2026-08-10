@@ -1534,6 +1534,7 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
     let role = roles.role_mut(0).unwrap();
     role.equipment[0] = 1;
     role.attack_strength = 10;
+    role.cooperative_magic = 0x017d;
     let party = Party::single(0, &roles).unwrap();
 
     let mut object_data = vec![0; 24];
@@ -1547,6 +1548,7 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
         [ScriptOpcode::EquipItem.raw(), 0x0b, 1, 0],
         [ScriptOpcode::SetEquipmentEffect.raw(), 0x0b, 17, 5],
+        [ScriptOpcode::SetPlayerAttribute.raw(), 65, 0x017f, 0],
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
         [ScriptOpcode::SetParty.raw(), 1, 0, 0],
         [ScriptOpcode::Stop.raw(), 0, 0, 0],
@@ -1563,8 +1565,16 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
 
     assert!(state.refresh_equipment_effects(&scripts));
     assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+    assert_eq!(
+        state.effective_player_role(0).unwrap().cooperative_magic,
+        0x017f
+    );
     assert!(state.refresh_equipment_effects(&scripts));
     assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+    assert_eq!(
+        state.effective_player_role(0).unwrap().cooperative_magic,
+        0x017f
+    );
     assert_eq!(state.player_role(0).unwrap().equipment[0], 1);
     assert_eq!(state.inventory_count(1), 0);
 
@@ -1574,10 +1584,14 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
         script_entry: 99,
     };
     let mut object = blocking_object(80, 80);
-    object.auto_script = 4;
+    object.auto_script = 5;
     state.scene_objects.push(object);
     assert!(state.update_auto_scripts(&scripts).unwrap());
     assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+    assert_eq!(
+        state.effective_player_role(0).unwrap().cooperative_magic,
+        0x017f
+    );
     assert_eq!(state.player_poisons(0).unwrap()[0], BattlePoison::default());
 
     let invalid_script_data = [
@@ -1593,6 +1607,10 @@ fn battle_equipment_refresh_replays_existing_equipment_without_stacking() {
     let invalid_scripts = ScriptTable::parse(&invalid_script_data).unwrap();
     assert!(!state.refresh_equipment_effects(&invalid_scripts));
     assert_eq!(state.effective_player_role(0).unwrap().attack_strength, 15);
+    assert_eq!(
+        state.effective_player_role(0).unwrap().cooperative_magic,
+        0x017f
+    );
     assert_eq!(state.player_role(0).unwrap().equipment[0], 1);
     assert_eq!(state.inventory_count(1), 0);
 }

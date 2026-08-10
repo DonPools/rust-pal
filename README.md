@@ -258,7 +258,11 @@ cargo run -p pal-launcher -- --scene-editor --scene=3
 ```
 
 检查器使用可拖拽、缩放、分栏和停靠的 IDE 式布局，默认提供 `Scenes`、`Objects`、
-`Map`、`Script`、`Inspector`、`References` 和 `Message` 面板。面板布局会自动保存，
+`Database`、`Map`、`Preview`、`Script`、`Inspector`、`References` 和 `Message` 面板。
+`Database` 以简体中文浏览物品、仙术和敌人，同时保留繁体原文，并使用系统中文字体显示；
+选择记录后可查看物品图标、法术效果或敌人 sprite、类型化字段、原始联合字段、说明、脚本入口，
+以及商店、角色、升级、敌队、敌人装备和脚本操作数等反向引用。内容之间及其脚本入口可以互相
+跳转。面板布局会自动保存，
 工具栏的 `Reset layout` 可恢复默认排列。在 `Map` 中拖动鼠标或使用 WASD/方向键
 平移，滚轮或加减键按光标位置进行 1–3 倍缩放；点击对象精灵、脚下标记或
 `Objects` 对象行即可选择，重叠对象可在相同位置重复点击轮换。`PageUp`、

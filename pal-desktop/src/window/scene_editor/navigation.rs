@@ -143,6 +143,12 @@ pub(super) fn format_reference(source: ScriptReferenceSource) -> String {
         ScriptReferenceSource::ObjectAuto { scene, object_id } => {
             format!("SCENE {scene} OBJECT {} AUTO", format_object_id(object_id))
         }
+        ScriptReferenceSource::GlobalObjectScript { object_id, field } => {
+            format!(
+                "GLOBAL OBJECT {} FIELD {field}",
+                format_object_id(object_id)
+            )
+        }
         ScriptReferenceSource::Instruction { entry, kind } => {
             format!("{} FROM @{entry:04X}", format_instruction_kind(kind))
         }

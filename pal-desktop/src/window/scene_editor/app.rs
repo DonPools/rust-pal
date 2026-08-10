@@ -1,5 +1,10 @@
 //! Read-only scene-editor state and interaction logic.
 
+use pal_assets::battle::{BattleData, BattleSpriteArchive};
+use pal_assets::magic::Magics;
+use pal_assets::objects::GlobalObjects;
+use pal_assets::player_roles::PlayerRoles;
+use pal_assets::rle::RleBitmap;
 use pal_assets::script::ScriptTable;
 use pal_assets::text::{BitmapFont, TextLibrary};
 use pal_core::scene::SceneObject;
@@ -11,6 +16,7 @@ use pal_core::script::{
 use super::super::debug_render::render_object_overlay;
 use super::super::scene_render::render_tile_map;
 use super::super::{LoadedScene, SceneEditorResources, Viewport};
+use super::content::{ContentCatalog, ContentReferenceCatalog, ContentSelection};
 use super::hit_test::{hit_test_object_marker, hit_test_visible_sprite};
 use super::navigation::{format_object_id, navigable_target, ScriptNavigation};
 use super::{
@@ -33,12 +39,23 @@ pub(super) struct SceneEditorApp<L> {
     pub(super) scripts: ScriptTable,
     pub(super) text: TextLibrary,
     pub(super) font: BitmapFont,
+    pub(super) player_roles: PlayerRoles,
+    pub(super) global_objects: GlobalObjects,
+    pub(super) magics: Magics,
+    pub(super) battle_data: BattleData,
+    pub(super) item_sprites: Vec<Option<RleBitmap>>,
+    pub(super) enemy_battle_sprites: BattleSpriteArchive,
+    pub(super) player_battle_sprites: BattleSpriteArchive,
+    pub(super) magic_effect_sprites: BattleSpriteArchive,
+    pub(super) content_catalog: ContentCatalog,
+    pub(super) content_references: ContentReferenceCatalog,
     pub(super) script_references: ScriptReferenceCatalog,
     pub(super) scene_count: u16,
     load_scene: L,
     pub(super) viewport: Viewport,
     pub(super) zoom: u8,
     pub(super) selected_object: Option<u16>,
+    pub(super) selected_content: Option<ContentSelection>,
     pub(super) selected_script: Option<SelectedScript>,
     pub(super) navigation: ScriptNavigation,
     pub(super) status: Option<String>,
@@ -55,6 +72,14 @@ where
         resources: SceneEditorResources,
         load_scene: L,
     ) -> Self {
+        let content_catalog = ContentCatalog::build(&resources.text, &resources.item_descriptions);
+        let content_references = ContentReferenceCatalog::build(
+            &resources.script_table,
+            &resources.global_objects,
+            &resources.battle_data,
+            &resources.player_roles,
+            &resources.stores,
+        );
         let mut app = Self {
             renderer,
             scene,
@@ -62,12 +87,23 @@ where
             scripts: resources.script_table,
             text: resources.text,
             font: resources.font,
+            player_roles: resources.player_roles,
+            global_objects: resources.global_objects,
+            magics: resources.magics,
+            battle_data: resources.battle_data,
+            item_sprites: resources.item_sprites,
+            enemy_battle_sprites: resources.enemy_battle_sprites,
+            player_battle_sprites: resources.player_battle_sprites,
+            magic_effect_sprites: resources.magic_effect_sprites,
+            content_catalog,
+            content_references,
             script_references: resources.script_references,
             scene_count: resources.scene_count,
             load_scene,
             viewport: Viewport::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT),
             zoom: 1,
             selected_object: None,
+            selected_content: None,
             selected_script: None,
             navigation: ScriptNavigation::default(),
             status: None,
@@ -226,6 +262,16 @@ where
                     self.reset_script_navigation();
                 }
             }
+            ScriptReferenceSource::GlobalObjectScript { object_id, .. } => {
+                if let Some(selection) = ContentSelection::from_object_id(object_id) {
+                    self.select_content(selection);
+                } else {
+                    self.status = Some(format!(
+                        "GLOBAL OBJECT #{object_id:04X} IS OUTSIDE THE CONTENT CATALOG"
+                    ));
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -245,6 +291,7 @@ where
 
     fn select_initial_entry(&mut self) {
         self.selected_object = None;
+        self.selected_content = None;
         self.selected_script = if self.scene.enter_script != 0 {
             Some(SelectedScript::SceneEnter)
         } else if self.scene.teleport_script != 0 {
@@ -269,6 +316,7 @@ where
             return;
         };
         self.selected_object = Some(id);
+        self.selected_content = None;
         self.selected_script = if object.trigger_script != 0 {
             Some(SelectedScript::ObjectTrigger)
         } else if object.auto_script != 0 {
@@ -280,6 +328,38 @@ where
             self.center_on_object(id);
         }
         self.reset_script_navigation();
+    }
+
+    pub(super) fn select_content(&mut self, selection: ContentSelection) {
+        if self.content_catalog.label(selection).is_none() {
+            return;
+        }
+        self.selected_content = Some(selection);
+        self.status = None;
+        self.dirty = true;
+    }
+
+    pub(super) fn content_preview_bitmap(&self, selection: ContentSelection) -> Option<RleBitmap> {
+        let object = self.global_objects.get(selection.object_id)?;
+        match selection.kind {
+            super::content::ContentKind::Item => self
+                .item_sprites
+                .get(usize::from(object.item_bitmap()))?
+                .clone(),
+            super::content::ContentKind::Magic => {
+                let magic = self.magics.get(object.magic_number())?;
+                if magic.magic_type == 9 {
+                    let sprite = usize::try_from(magic.specific).ok()?.checked_add(10)?;
+                    self.player_battle_sprites.decode_frame(sprite, 0)
+                } else {
+                    self.magic_effect_sprites
+                        .decode_frame(usize::from(magic.effect), 0)
+                }
+            }
+            super::content::ContentKind::Enemy => self
+                .enemy_battle_sprites
+                .decode_frame(usize::from(object.enemy_id()), 0),
+        }
     }
 
     pub(super) fn center_on_object(&mut self, id: u16) {

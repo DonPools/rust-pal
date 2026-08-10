@@ -1,9 +1,13 @@
 //! IDE-style egui shell for the read-only scene inspector.
 
+mod content_ui;
+
+use std::fs;
 use std::ops::Range;
 
 use eframe::egui::{
-    self, Color32, ColorImage, Key, Modifiers, RichText, Sense, TextureHandle, TextureOptions,
+    self, Color32, ColorImage, FontData, FontDefinitions, FontFamily, Key, Modifiers, RichText,
+    Sense, TextureHandle, TextureOptions,
 };
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use egui_extras::{Column, TableBuilder};
@@ -21,6 +25,7 @@ use super::super::dialog_text::{dialog_token, DialogTokenKind};
 use super::super::draw::{draw_debug_text, fill_rect, stroke_rect};
 use super::super::text_render::{draw_dialog_text, DialogTextMode, DialogTextStyle};
 use super::app::{script_object_ids, SceneEditorApp, SelectedScript};
+use super::content::{ContentKind, ContentSelection};
 use super::navigation::{
     format_instruction_kind, format_object_id, format_object_reference, format_reference,
     show_instruction_target,
@@ -28,7 +33,7 @@ use super::navigation::{
 use super::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::renderer::Renderer;
 
-const DOCK_STATE_KEY: &str = "scene_editor_dock_state_v2";
+const DOCK_STATE_KEY: &str = "scene_editor_dock_state_v4";
 // Render the original 320px-wide dialog layout, then let egui enlarge it with
 // nearest-neighbor filtering. This keeps the PAL bitmap glyphs crisp and makes
 // them comfortably readable on modern high-DPI displays.
@@ -46,7 +51,9 @@ const ERROR: Color32 = Color32::from_rgb(242, 100, 100);
 enum EditorTab {
     Scenes,
     Objects,
+    Database,
     Map,
+    Preview,
     Script,
     Inspector,
     References,
@@ -59,8 +66,12 @@ pub(super) struct EguiSceneEditorApp<L> {
     map_texture: Option<TextureHandle>,
     message_texture: Option<TextureHandle>,
     message_key: Option<(u16, u16)>,
+    content_texture: Option<TextureHandle>,
+    content_texture_key: Option<ContentSelection>,
     scene_filter: String,
     object_filter: String,
+    content_filter: String,
+    content_kind: ContentKind,
     entry_input: String,
 }
 
@@ -91,8 +102,12 @@ where
             map_texture: None,
             message_texture: None,
             message_key: None,
+            content_texture: None,
+            content_texture_key: None,
             scene_filter: String::new(),
             object_filter: String::new(),
+            content_filter: String::new(),
+            content_kind: ContentKind::Item,
             entry_input,
         }
     }
@@ -113,21 +128,30 @@ where
         }
 
         let key = selected_message(&self.model);
-        if key == self.message_key {
-            return;
+        if key != self.message_key {
+            self.message_key = key;
+            self.message_texture = key.and_then(|(entry, message_id)| {
+                let message = self.model.text.message(usize::from(message_id))?;
+                let image = message_preview_image(
+                    self.model.renderer.palette(),
+                    &self.model.font,
+                    message,
+                    message_id,
+                    entry,
+                );
+                Some(context.load_texture("script-message-preview", image, TextureOptions::NEAREST))
+            });
         }
-        self.message_key = key;
-        self.message_texture = key.and_then(|(entry, message_id)| {
-            let message = self.model.text.message(usize::from(message_id))?;
-            let image = message_preview_image(
-                self.model.renderer.palette(),
-                &self.model.font,
-                message,
-                message_id,
-                entry,
-            );
-            Some(context.load_texture("script-message-preview", image, TextureOptions::NEAREST))
-        });
+
+        let content_key = self.model.selected_content;
+        if content_key != self.content_texture_key {
+            self.content_texture_key = content_key;
+            self.content_texture = content_key.and_then(|selection| {
+                let bitmap = self.model.content_preview_bitmap(selection)?;
+                let image = content_preview_image(self.model.renderer.palette(), &bitmap);
+                Some(context.load_texture("content-preview", image, TextureOptions::NEAREST))
+            });
+        }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -317,8 +341,11 @@ where
                 model: &mut self.model,
                 map_texture: self.map_texture.as_ref(),
                 message_texture: self.message_texture.as_ref(),
+                content_texture: self.content_texture.as_ref(),
                 scene_filter: &mut self.scene_filter,
                 object_filter: &mut self.object_filter,
+                content_filter: &mut self.content_filter,
+                content_kind: &mut self.content_kind,
             };
             DockArea::new(&mut self.dock_state)
                 .style(Style::from_egui(ui.style().as_ref()))
@@ -339,8 +366,11 @@ struct EditorTabViewer<'a, L> {
     model: &'a mut SceneEditorApp<L>,
     map_texture: Option<&'a TextureHandle>,
     message_texture: Option<&'a TextureHandle>,
+    content_texture: Option<&'a TextureHandle>,
     scene_filter: &'a mut String,
     object_filter: &'a mut String,
+    content_filter: &'a mut String,
+    content_kind: &'a mut ContentKind,
 }
 
 impl<L> TabViewer for EditorTabViewer<'_, L>
@@ -353,7 +383,9 @@ where
         match tab {
             EditorTab::Scenes => "Scenes",
             EditorTab::Objects => "Objects",
+            EditorTab::Database => "Database",
             EditorTab::Map => "Map",
+            EditorTab::Preview => "Preview",
             EditorTab::Script => "Script",
             EditorTab::Inspector => "Inspector",
             EditorTab::References => "References",
@@ -366,7 +398,9 @@ where
         match tab {
             EditorTab::Scenes => self.scenes_ui(ui),
             EditorTab::Objects => self.objects_ui(ui),
+            EditorTab::Database => self.database_ui(ui),
             EditorTab::Map => self.map_ui(ui),
+            EditorTab::Preview => self.content_preview_ui(ui),
             EditorTab::Script => self.script_ui(ui),
             EditorTab::Inspector => self.inspector_ui(ui),
             EditorTab::References => self.references_ui(ui),
@@ -380,7 +414,7 @@ where
 
     fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
         match tab {
-            EditorTab::Map | EditorTab::Script => [false, false],
+            EditorTab::Map | EditorTab::Preview | EditorTab::Script => [false, false],
             _ => [true, true],
         }
     }
@@ -679,7 +713,9 @@ where
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Selection");
-        if let Some(object) = self.model.selected_object().cloned() {
+        if let Some(selection) = self.model.selected_content {
+            self.content_inspector_ui(ui, selection);
+        } else if let Some(object) = self.model.selected_object().cloned() {
             ui.label(
                 RichText::new(format!("OBJECT {}", format_object_id(object.id)))
                     .strong()
@@ -917,16 +953,19 @@ where
     }
 
     fn references_ui(&mut self, ui: &mut egui::Ui) {
+        let selected_content = self.model.selected_content;
         let selected_object = self.model.selected_object;
         let selected_record = self.model.selected_record();
-        if selected_object.is_none() && selected_record.is_none() {
+        if selected_content.is_none() && selected_object.is_none() && selected_record.is_none() {
             ui.centered_and_justified(|ui| {
-                ui.label("Select an event object or script instruction")
+                ui.label("Select content, an event object, or a script instruction")
             });
             return;
         }
 
-        if let Some(object_id) = selected_object {
+        if let Some(selection) = selected_content {
+            self.content_references_ui(ui, selection);
+        } else if let Some(object_id) = selected_object {
             ui.heading(format!(
                 "Instructions referencing object {}",
                 format_object_id(object_id)
@@ -960,7 +999,7 @@ where
         }
 
         if let Some(record) = selected_record {
-            if selected_object.is_some() {
+            if selected_content.is_some() || selected_object.is_some() {
                 ui.separator();
             }
             ui.heading(format!("Incoming references to @{:04X}", record.entry));
@@ -1048,7 +1087,7 @@ where
                     }
                 }
             }
-        } else if selected_object.is_some() {
+        } else if selected_content.is_none() && selected_object.is_some() {
             ui.add_space(6.0);
             ui.label(
                 RichText::new("This object has no selected trigger or auto script entry.")
@@ -1103,22 +1142,49 @@ where
 fn configure_egui(context: &egui::Context) {
     context.set_theme(egui::Theme::Dark);
     context.set_visuals(egui::Visuals::dark());
+    install_chinese_font(context);
     let mut style = (*context.style()).clone();
     style.spacing.item_spacing = egui::vec2(6.0, 5.0);
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
     context.set_style(style);
 }
 
+fn install_chinese_font(context: &egui::Context) {
+    for source in super::super::system_font::chinese_font_candidates() {
+        let Ok(bytes) = fs::read(&source.path) else {
+            continue;
+        };
+        let mut definitions = FontDefinitions::default();
+        let mut data = FontData::from_owned(bytes);
+        data.index = source.collection_index;
+        let font_name = "rust-pal-system-chinese".to_owned();
+        definitions.font_data.insert(font_name.clone(), data);
+        definitions
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .push(font_name.clone());
+        definitions
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .push(font_name);
+        context.set_fonts(definitions);
+        return;
+    }
+    eprintln!("warning: scene editor could not find a system Chinese font");
+}
+
 fn default_dock_state() -> DockState<EditorTab> {
-    let mut state = DockState::new(vec![EditorTab::Map]);
+    let mut state = DockState::new(vec![EditorTab::Map, EditorTab::Preview]);
     let [map_node, _left_node] = state.main_surface_mut().split_left(
         NodeIndex::root(),
-        0.18,
-        vec![EditorTab::Scenes, EditorTab::Objects],
+        0.25,
+        vec![EditorTab::Scenes, EditorTab::Objects, EditorTab::Database],
     );
     let [map_node, _right_node] = state.main_surface_mut().split_right(
         map_node,
-        0.76,
+        0.70,
         vec![EditorTab::Inspector, EditorTab::References],
     );
     state.main_surface_mut().split_below(
@@ -1364,7 +1430,8 @@ fn reference_color(source: ScriptReferenceSource) -> Color32 {
         ScriptReferenceSource::SceneEnter { .. }
         | ScriptReferenceSource::SceneTeleport { .. }
         | ScriptReferenceSource::ObjectTrigger { .. } => TRIGGER,
-        ScriptReferenceSource::ObjectAuto { .. } => AUTO,
+        ScriptReferenceSource::ObjectAuto { .. }
+        | ScriptReferenceSource::GlobalObjectScript { .. } => AUTO,
         ScriptReferenceSource::Instruction { kind, .. } => match kind.category() {
             ScriptInstructionReferenceCategory::ControlFlow => TEXT,
             ScriptInstructionReferenceCategory::EntryWrite => AUTO,
@@ -1397,6 +1464,17 @@ fn field(ui: &mut egui::Ui, label: &str, value: impl ToString) {
     ui.label(RichText::new(label).color(MUTED));
     ui.monospace(value.to_string());
     ui.end_row();
+}
+
+fn content_preview_image(palette: &Palette, bitmap: &pal_assets::rle::RleBitmap) -> ColorImage {
+    let width = (usize::from(bitmap.width) + 24).clamp(64, 320);
+    let height = (usize::from(bitmap.height) + 24).clamp(64, 200);
+    let mut renderer = Renderer::new(palette.clone(), width, height);
+    renderer.clear(14, 18, 22);
+    let x = (width as i32 - i32::from(bitmap.width)) / 2;
+    let y = (height as i32 - i32::from(bitmap.height)) / 2;
+    renderer.blit_rle(bitmap, x, y);
+    ColorImage::from_rgba_unmultiplied([width, height], renderer.screen())
 }
 
 fn message_preview_image(

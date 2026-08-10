@@ -119,24 +119,41 @@ pub(super) struct PostBattlePresentation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BattleFighterDrawStyle {
+enum BattleSpriteDrawStyle {
     Normal,
     ColorShift(i16),
     Dithered(u8),
 }
 
 #[derive(Debug, Clone)]
-struct BattleFighterSprite {
+struct BattleSpriteDrawItem {
     bitmap: RleBitmap,
     left: i32,
     top: i32,
     depth_x: i32,
     depth_y: i32,
-    style: BattleFighterDrawStyle,
+    style: BattleSpriteDrawStyle,
 }
 
-fn sort_battle_fighter_sprites(sprites: &mut [BattleFighterSprite]) {
+impl BattleSpriteDrawItem {
+    fn magic(bitmap: RleBitmap, x: i32, y: i32, visual: BattleMagicVisual) -> Self {
+        let depth_x = x + i32::from(visual.x_offset);
+        let depth_y = y + i32::from(visual.y_offset);
+        Self {
+            left: depth_x - i32::from(bitmap.width) / 2,
+            top: depth_y - i32::from(bitmap.height),
+            bitmap,
+            depth_x,
+            // Classic sorts magic at its anchor Y plus rgSpecific.sLayerOffset.
+            depth_y: depth_y + i32::from(visual.specific),
+            style: BattleSpriteDrawStyle::Normal,
+        }
+    }
+}
+
+fn sort_battle_sprites(sprites: &mut [BattleSpriteDrawItem]) {
     // Classic draws smaller Y first. On the same row, larger X is farther back.
+    // A stable sort preserves the queue's original magic/enemy/player order on exact ties.
     sprites.sort_by(|left, right| {
         left.depth_y
             .cmp(&right.depth_y)
@@ -144,20 +161,31 @@ fn sort_battle_fighter_sprites(sprites: &mut [BattleFighterSprite]) {
     });
 }
 
-fn draw_battle_fighter_sprites(renderer: &mut Renderer, sprites: &mut [BattleFighterSprite]) {
-    sort_battle_fighter_sprites(sprites);
-    for sprite in sprites {
-        match sprite.style {
-            BattleFighterDrawStyle::Normal => {
-                renderer.blit_rle(&sprite.bitmap, sprite.left, sprite.top)
-            }
-            BattleFighterDrawStyle::ColorShift(shift) => {
-                renderer.blit_rle_color_shift(&sprite.bitmap, sprite.left, sprite.top, shift)
-            }
-            BattleFighterDrawStyle::Dithered(visibility) => {
-                renderer.blit_rle_dithered(&sprite.bitmap, sprite.left, sprite.top, visibility)
-            }
+fn draw_battle_sprite(renderer: &mut Renderer, sprite: &BattleSpriteDrawItem) {
+    match sprite.style {
+        BattleSpriteDrawStyle::Normal => renderer.blit_rle(&sprite.bitmap, sprite.left, sprite.top),
+        BattleSpriteDrawStyle::ColorShift(shift) => {
+            renderer.blit_rle_color_shift(&sprite.bitmap, sprite.left, sprite.top, shift)
         }
+        BattleSpriteDrawStyle::Dithered(visibility) => {
+            renderer.blit_rle_dithered(&sprite.bitmap, sprite.left, sprite.top, visibility)
+        }
+    }
+}
+
+fn draw_battle_sprites(renderer: &mut Renderer, sprites: &mut [BattleSpriteDrawItem]) {
+    sort_battle_sprites(sprites);
+    for sprite in sprites.iter() {
+        draw_battle_sprite(renderer, sprite);
+    }
+
+    // Classic redraws color-shifted fighters after the depth-sorted pass. Hit flashes,
+    // scripted shifts and the selected target therefore sit above every normal sprite.
+    for sprite in sprites.iter() {
+        let BattleSpriteDrawStyle::ColorShift(shift) = sprite.style else {
+            continue;
+        };
+        renderer.blit_rle_color_shift(&sprite.bitmap, sprite.left, sprite.top, shift);
     }
 }
 
@@ -167,6 +195,13 @@ fn enemy_should_render(alive: bool, pending_feedback: u8, enemy: usize) -> bool 
             .ok()
             .and_then(|shift| 1u8.checked_shl(shift))
             .is_some_and(|bit| pending_feedback & bit != 0)
+}
+
+fn enemy_anchor(position: BattlePosition, y_offset: u16) -> (i32, i32) {
+    (
+        i32::from(position.x),
+        i32::from(position.y) + i32::from(y_offset),
+    )
 }
 
 impl PostBattlePresentation {
@@ -287,6 +322,12 @@ pub(super) fn render_battle_frame(
             event_ticks,
         )
     });
+    if let (Some(event), Some((magic, timeline, elapsed))) = (event, magic_timing) {
+        if elapsed >= timeline.tail_start() && magic.effect_visual().keep_effect == u16::MAX {
+            // Classic writes kept effects into the battlefield before composing sprites.
+            render_kept_magic_effect(renderer, battle, resources.magic_effect_sprites, event);
+        }
+    }
     let feedback_active =
         magic_timing.is_none_or(|(_, timeline, elapsed)| elapsed >= timeline.tail_start());
     let enemy_escape_timing = matches!(event, Some(BattleEvent::EnemyEscape)).then(|| {
@@ -305,19 +346,22 @@ pub(super) fn render_battle_frame(
         enemy_escape_timeline(rightmost_edge)
     });
 
-    if let Some(event) = event {
-        render_magic_effect(
-            renderer,
+    let mut battle_sprites = Vec::with_capacity(battle.enemies.len() + battle.players.len() + 3);
+    if let (Some(event), Some(timing)) = (event, magic_timing) {
+        push_active_magic_effect_sprites(
+            &mut battle_sprites,
             battle,
             resources.magic_effect_sprites,
-            resources.player_sprites,
             event,
-            event_ticks,
-            true,
+            timing,
         );
     }
-
-    let mut fighter_sprites = Vec::with_capacity(battle.enemies.len() + battle.players.len());
+    let summon_replaces_players = magic_timing.is_some_and(|(magic, timeline, elapsed)| {
+        let summon_start = timeline.pre_ticks.saturating_add(timeline.brighten_ticks);
+        magic.magic_type == 9 && elapsed >= summon_start && elapsed < timeline.total_ticks
+    });
+    let summon_sprite =
+        magic_timing.and_then(|timing| active_summon_sprite(resources.player_sprites, timing));
 
     for (index, enemy) in battle.enemies.iter().enumerate() {
         let target_event = event_group
@@ -359,6 +403,7 @@ pub(super) fn render_battle_frame(
         else {
             continue;
         };
+        let (enemy_x, enemy_y) = enemy_anchor(enemy.position, y_offset);
         let (enemy_action_x, enemy_action_y) = actor_state
             .map(|state| (state.0, state.1))
             .unwrap_or((0, 0));
@@ -380,12 +425,12 @@ pub(super) fn render_battle_frame(
             })
             .unwrap_or((0, 0, 64, 0));
         let enemy_offset = enemy_blow_offset;
-        let x = i32::from(enemy.position.x) - i32::from(bitmap.width) / 2
+        let x = enemy_x - i32::from(bitmap.width) / 2
             + enemy_offset
             + enemy_action_x
             + feedback_x
             + script_x;
-        let y = i32::from(enemy.position.y) + i32::from(y_offset) - i32::from(bitmap.height)
+        let y = enemy_y - i32::from(bitmap.height)
             + enemy_offset / 2
             + enemy_action_y
             + feedback_y
@@ -425,16 +470,16 @@ pub(super) fn render_battle_frame(
             .unwrap_or(64)
             .min(script_visibility);
         let style = if fade_visibility < 64 {
-            BattleFighterDrawStyle::Dithered(fade_visibility)
+            BattleSpriteDrawStyle::Dithered(fade_visibility)
         } else if script_color_shift != 0 {
-            BattleFighterDrawStyle::ColorShift(script_color_shift)
+            BattleSpriteDrawStyle::ColorShift(script_color_shift)
         } else if event.is_none()
             && targeting_enemy
             && index == selected_enemy
             && battle.phase() == BattlePhase::AwaitingCommand
             && battle_ticks & 1 != 0
         {
-            BattleFighterDrawStyle::ColorShift(7)
+            BattleSpriteDrawStyle::ColorShift(7)
         } else if is_hit
             && feedback_active
             && (if exact_attack_feedback {
@@ -443,30 +488,26 @@ pub(super) fn render_battle_frame(
                 exact_flash || event_ticks.is_multiple_of(2)
             })
         {
-            BattleFighterDrawStyle::ColorShift(6)
+            BattleSpriteDrawStyle::ColorShift(6)
         } else {
-            BattleFighterDrawStyle::Normal
+            BattleSpriteDrawStyle::Normal
         };
-        fighter_sprites.push(BattleFighterSprite {
+        battle_sprites.push(BattleSpriteDrawItem {
             bitmap,
             left: x,
             top: y,
-            depth_x: i32::from(enemy.position.x)
-                + enemy_offset
-                + enemy_action_x
-                + feedback_x
-                + script_x,
-            depth_y: i32::from(enemy.position.y)
-                + enemy_offset / 2
-                + enemy_action_y
-                + feedback_y
-                + script_y,
+            depth_x: enemy_x + enemy_offset + enemy_action_x + feedback_x + script_x,
+            depth_y: enemy_y + enemy_offset / 2 + enemy_action_y + feedback_y + script_y,
             style,
         });
     }
 
+    if let Some(summon_sprite) = summon_sprite {
+        battle_sprites.push(summon_sprite);
+    }
+
     for (index, player) in battle.players.iter().enumerate() {
-        if battle.hiding_time() != 0 {
+        if battle.hiding_time() != 0 || summon_replaces_players {
             continue;
         }
         let player_event = event_group
@@ -690,13 +731,13 @@ pub(super) fn render_battle_frame(
                 _ => false,
             };
             let style = if is_hit && feedback_active && event_ticks.is_multiple_of(2) {
-                BattleFighterDrawStyle::ColorShift(6)
+                BattleSpriteDrawStyle::ColorShift(6)
             } else if color_shift != 0 {
-                BattleFighterDrawStyle::ColorShift(color_shift)
+                BattleSpriteDrawStyle::ColorShift(color_shift)
             } else {
-                BattleFighterDrawStyle::Normal
+                BattleSpriteDrawStyle::Normal
             };
-            fighter_sprites.push(BattleFighterSprite {
+            battle_sprites.push(BattleSpriteDrawItem {
                 bitmap,
                 left,
                 top,
@@ -707,7 +748,7 @@ pub(super) fn render_battle_frame(
         }
     }
 
-    draw_battle_fighter_sprites(renderer, &mut fighter_sprites);
+    draw_battle_sprites(renderer, &mut battle_sprites);
 
     if let Some(event) = event {
         if matches!(event, BattleEvent::PlayerAttack { .. }) {
@@ -733,18 +774,6 @@ pub(super) fn render_battle_frame(
                 event_ticks,
             );
         }
-    }
-
-    if let Some(event) = event {
-        render_magic_effect(
-            renderer,
-            battle,
-            resources.magic_effect_sprites,
-            resources.player_sprites,
-            event,
-            event_ticks,
-            false,
-        );
     }
 
     if let Some(event) = event {
@@ -921,96 +950,18 @@ fn render_shared_battle_effect(
     Some(())
 }
 
-fn render_magic_effect(
-    renderer: &mut Renderer,
+fn push_active_magic_effect_sprites(
+    sprites: &mut Vec<BattleSpriteDrawItem>,
     battle: &BattleState,
     effects: &BattleSpriteArchive,
-    player_sprites: &BattleSpriteArchive,
     event: BattleEvent,
-    ticks_remaining: u16,
-    behind_fighters: bool,
+    timing: (BattleMagic, MagicEventTimeline, u16),
 ) {
-    let Some((magic, timeline, elapsed)) =
-        magic_render_timeline(battle, effects, player_sprites, event, ticks_remaining)
-    else {
-        return;
-    };
-    if magic.magic_type == 9 {
-        let summon_start = timeline.pre_ticks.saturating_add(timeline.brighten_ticks);
-        let summon_end = timeline.total_ticks;
-        if elapsed >= summon_start && elapsed < summon_end && !behind_fighters {
-            let Some(sprite) = usize::try_from(magic.specific)
-                .ok()
-                .and_then(|sprite| sprite.checked_add(10))
-            else {
-                return;
-            };
-            let Some(frame_count) = player_sprites
-                .frame_count(sprite)
-                .filter(|count| *count > 0)
-            else {
-                return;
-            };
-            let body_end = timeline.body_start().saturating_add(timeline.body_ticks);
-            let frame = if elapsed < timeline.body_start() {
-                0
-            } else if elapsed < body_end {
-                timed_frame_at(
-                    elapsed.saturating_sub(timeline.body_start()),
-                    frame_count.saturating_sub(1).max(1),
-                    magic.speed,
-                )
-            } else {
-                frame_count.saturating_sub(1)
-            };
-            let visibility = if elapsed < timeline.body_start() {
-                u8::try_from(
-                    u32::from(elapsed.saturating_sub(summon_start))
-                        .saturating_mul(64)
-                        .checked_div(u32::from(timeline.summon_fade_in_ticks.max(1)))
-                        .unwrap_or(0),
-                )
-                .unwrap_or(64)
-                .min(64)
-            } else {
-                let fade_out_start = summon_end.saturating_sub(timeline.summon_fade_out_ticks);
-                if elapsed >= fade_out_start {
-                    u8::try_from(
-                        u32::from(summon_end.saturating_sub(elapsed))
-                            .saturating_mul(64)
-                            .checked_div(u32::from(timeline.summon_fade_out_ticks.max(1)))
-                            .unwrap_or(0),
-                    )
-                    .unwrap_or(64)
-                    .min(64)
-                } else {
-                    64
-                }
-            };
-            if let Some(bitmap) = player_sprites.decode_frame(sprite, frame) {
-                let x = 240 + i32::from(magic.x_offset) - i32::from(bitmap.width) / 2;
-                let y = 165 + i32::from(magic.y_offset) - i32::from(bitmap.height);
-                if visibility < 64 {
-                    renderer.blit_rle_dithered(&bitmap, x, y, visibility);
-                } else {
-                    renderer.blit_rle(&bitmap, x, y);
-                }
-            }
-        }
-        if elapsed < timeline.effect_start() {
-            return;
-        }
-    }
+    let (magic, timeline, elapsed) = timing;
     if elapsed < timeline.effect_start() || elapsed >= timeline.tail_start() {
-        if elapsed >= timeline.tail_start() && magic.effect_visual().keep_effect == u16::MAX {
-            render_kept_magic_effect(renderer, battle, effects, event);
-        }
         return;
     }
     let visual = magic.effect_visual();
-    if (visual.specific < 0) != behind_fighters {
-        return;
-    }
     let effect = usize::from(visual.effect);
     let Some(frame_count) = effects.frame_count(effect).filter(|count| *count > 0) else {
         return;
@@ -1028,12 +979,75 @@ fn render_magic_effect(
         return;
     };
     for (x, y) in positions {
-        renderer.blit_rle(
-            &bitmap,
-            x + i32::from(visual.x_offset) - i32::from(bitmap.width) / 2,
-            y + i32::from(visual.y_offset) - i32::from(bitmap.height),
-        );
+        sprites.push(BattleSpriteDrawItem::magic(bitmap.clone(), x, y, visual));
     }
+}
+
+fn active_summon_sprite(
+    player_sprites: &BattleSpriteArchive,
+    timing: (BattleMagic, MagicEventTimeline, u16),
+) -> Option<BattleSpriteDrawItem> {
+    let (magic, timeline, elapsed) = timing;
+    let summon_start = timeline.pre_ticks.saturating_add(timeline.brighten_ticks);
+    let summon_end = timeline.total_ticks;
+    if magic.magic_type != 9 || elapsed < summon_start || elapsed >= summon_end {
+        return None;
+    }
+    let sprite = usize::try_from(magic.specific).ok()?.checked_add(10)?;
+    let frame_count = player_sprites
+        .frame_count(sprite)
+        .filter(|count| *count > 0)?;
+    let body_end = timeline.body_start().saturating_add(timeline.body_ticks);
+    let frame = if elapsed < timeline.body_start() {
+        0
+    } else if elapsed < body_end {
+        timed_frame_at(
+            elapsed.saturating_sub(timeline.body_start()),
+            frame_count.saturating_sub(1).max(1),
+            magic.speed,
+        )
+    } else {
+        frame_count.saturating_sub(1)
+    };
+    let visibility = if elapsed < timeline.body_start() {
+        u8::try_from(
+            u32::from(elapsed.saturating_sub(summon_start))
+                .saturating_mul(64)
+                .checked_div(u32::from(timeline.summon_fade_in_ticks.max(1)))
+                .unwrap_or(0),
+        )
+        .unwrap_or(64)
+        .min(64)
+    } else {
+        let fade_out_start = summon_end.saturating_sub(timeline.summon_fade_out_ticks);
+        if elapsed >= fade_out_start {
+            u8::try_from(
+                u32::from(summon_end.saturating_sub(elapsed))
+                    .saturating_mul(64)
+                    .checked_div(u32::from(timeline.summon_fade_out_ticks.max(1)))
+                    .unwrap_or(0),
+            )
+            .unwrap_or(64)
+            .min(64)
+        } else {
+            64
+        }
+    };
+    let bitmap = player_sprites.decode_frame(sprite, frame)?;
+    let depth_x = 240 + i32::from(magic.x_offset);
+    let depth_y = 165 + i32::from(magic.y_offset);
+    Some(BattleSpriteDrawItem {
+        left: depth_x - i32::from(bitmap.width) / 2,
+        top: depth_y - i32::from(bitmap.height),
+        bitmap,
+        depth_x,
+        depth_y,
+        style: if visibility < 64 {
+            BattleSpriteDrawStyle::Dithered(visibility)
+        } else {
+            BattleSpriteDrawStyle::Normal
+        },
+    })
 }
 
 fn magic_render_timeline(
@@ -1164,10 +1178,7 @@ fn fixed_magic_positions(event: BattleEvent, magic_type: u16) -> Option<Vec<(i32
 
 fn enemy_position(battle: &BattleState, enemy: usize) -> Option<(i32, i32)> {
     let enemy = battle.enemies.get(enemy)?;
-    Some((
-        i32::from(enemy.position.x),
-        i32::from(enemy.position.y) + i32::from(enemy.y_offset),
-    ))
+    Some(enemy_anchor(enemy.position, enemy.y_offset))
 }
 
 fn cooperative_contributor(player: &pal_core::battle::BattlePlayer) -> bool {
@@ -2687,14 +2698,33 @@ mod tests {
     use pal_assets::palette::{Palette, PaletteColor};
     use pal_assets::player_roles::{PlayerRoles, PLAYER_ROLE_COUNT};
 
-    fn fighter_sprite(color: u8, depth_x: i32, depth_y: i32) -> BattleFighterSprite {
-        BattleFighterSprite {
+    fn battle_sprite(color: u8, depth_x: i32, depth_y: i32) -> BattleSpriteDrawItem {
+        BattleSpriteDrawItem {
             bitmap: RleBitmap::decode(&[1, 0, 1, 0, 1, color]).unwrap(),
             left: 0,
             top: 0,
             depth_x,
             depth_y,
-            style: BattleFighterDrawStyle::Normal,
+            style: BattleSpriteDrawStyle::Normal,
+        }
+    }
+
+    fn magic_visual(layer_offset: i16) -> BattleMagicVisual {
+        BattleMagicVisual {
+            object_id: 1,
+            flags: 0,
+            effect: 0,
+            magic_type: 0,
+            x_offset: 4,
+            y_offset: -3,
+            specific: layer_offset,
+            speed: 0,
+            keep_effect: 0,
+            fire_delay: 0,
+            effect_times: 0,
+            shake: 0,
+            wave: 0,
+            sound: 0,
         }
     }
 
@@ -2838,12 +2868,12 @@ mod tests {
     #[test]
     fn fighter_depth_sort_matches_classic_y_then_reverse_x_order() {
         let mut sprites = vec![
-            fighter_sprite(1, 10, 20),
-            fighter_sprite(2, 5, 10),
-            fighter_sprite(3, 20, 10),
+            battle_sprite(1, 10, 20),
+            battle_sprite(2, 5, 10),
+            battle_sprite(3, 20, 10),
         ];
 
-        sort_battle_fighter_sprites(&mut sprites);
+        sort_battle_sprites(&mut sprites);
 
         assert_eq!(
             sprites
@@ -2855,14 +2885,58 @@ mod tests {
     }
 
     #[test]
+    fn enemy_record_y_offset_is_part_of_its_depth_anchor() {
+        assert_eq!(enemy_anchor(BattlePosition { x: 70, y: 90 }, 18), (70, 108));
+    }
+
+    #[test]
     fn fighter_with_lower_screen_position_covers_overlapping_sprite() {
         let mut palette = Palette::default();
         palette.colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
         palette.colors[2] = PaletteColor { r: 0, g: 63, b: 0 };
         let mut renderer = Renderer::new(palette, 1, 1);
-        let mut sprites = vec![fighter_sprite(1, 0, 20), fighter_sprite(2, 0, 10)];
+        let mut sprites = vec![battle_sprite(1, 0, 20), battle_sprite(2, 0, 10)];
 
-        draw_battle_fighter_sprites(&mut renderer, &mut sprites);
+        draw_battle_sprites(&mut renderer, &mut sprites);
+
+        assert_eq!(renderer.screen(), [252, 0, 0, 255]);
+    }
+
+    #[test]
+    fn magic_layer_offset_participates_in_the_same_depth_key_as_fighters() {
+        let bitmap = RleBitmap::decode(&[1, 0, 1, 0, 1, 1]).unwrap();
+        let sprite = BattleSpriteDrawItem::magic(bitmap, 100, 80, magic_visual(12));
+
+        assert_eq!((sprite.left, sprite.top), (104, 76));
+        assert_eq!((sprite.depth_x, sprite.depth_y), (104, 89));
+    }
+
+    #[test]
+    fn magic_inserted_before_an_exactly_tied_target_stays_behind_it() {
+        let mut palette = Palette::default();
+        palette.colors[1] = PaletteColor { r: 63, g: 0, b: 0 };
+        palette.colors[2] = PaletteColor { r: 0, g: 63, b: 0 };
+        let mut renderer = Renderer::new(palette, 1, 1);
+        // Classic inserts the magic object before fighters and its positional sort is stable
+        // when both X and Y are identical.
+        let mut sprites = vec![battle_sprite(1, 10, 20), battle_sprite(2, 10, 20)];
+
+        draw_battle_sprites(&mut renderer, &mut sprites);
+
+        assert_eq!(renderer.screen(), [0, 252, 0, 255]);
+    }
+
+    #[test]
+    fn color_shifted_fighter_is_redrawn_over_the_depth_sorted_pass() {
+        let mut palette = Palette::default();
+        palette.colors[2] = PaletteColor { r: 63, g: 0, b: 0 };
+        palette.colors[3] = PaletteColor { r: 0, g: 63, b: 0 };
+        let mut renderer = Renderer::new(palette, 1, 1);
+        let mut shifted_rear = battle_sprite(1, 0, 10);
+        shifted_rear.style = BattleSpriteDrawStyle::ColorShift(1);
+        let mut sprites = vec![shifted_rear, battle_sprite(3, 0, 20)];
+
+        draw_battle_sprites(&mut renderer, &mut sprites);
 
         assert_eq!(renderer.screen(), [252, 0, 0, 255]);
     }

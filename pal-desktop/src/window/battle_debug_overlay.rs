@@ -1,10 +1,7 @@
 //! Read-only battle assistance rendered above the scaled game framebuffer.
 
 use std::collections::HashMap;
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use encoding_rs::BIG5;
@@ -12,6 +9,8 @@ use fontdue::{Font, FontSettings};
 use pal_assets::text::TextLibrary;
 use pal_core::battle::{BattleState, BattleStatus};
 use pixels::wgpu;
+
+use super::system_font::chinese_font_candidates;
 
 const SURFACE_MARGIN: f32 = 12.0;
 const MIN_PANEL_WIDTH: f32 = 260.0;
@@ -930,11 +929,11 @@ struct UiFont {
 
 impl UiFont {
     fn discover() -> Self {
-        for (path, name, collection_index) in font_candidates() {
-            if let Some(font) = load_font(&path, collection_index) {
+        for source in chinese_font_candidates() {
+            if let Some(font) = load_font(&source) {
                 return Self {
                     font: Some(font),
-                    name,
+                    name: source.name,
                     glyphs: HashMap::new(),
                 };
             }
@@ -972,80 +971,16 @@ impl UiFont {
     }
 }
 
-fn load_font(path: &Path, collection_index: u32) -> Option<Font> {
-    let bytes = fs::read(path).ok()?;
+fn load_font(source: &super::system_font::ChineseFontSource) -> Option<Font> {
+    let bytes = fs::read(&source.path).ok()?;
     Font::from_bytes(
         bytes,
         FontSettings {
-            collection_index,
+            collection_index: source.collection_index,
             ..FontSettings::default()
         },
     )
     .ok()
-}
-
-fn font_candidates() -> Vec<(PathBuf, String, u32)> {
-    let mut candidates = Vec::new();
-    if let Some(path) = env::var_os("RUST_PAL_DEBUG_FONT") {
-        candidates.push((PathBuf::from(path), "自定义调试字体".to_owned(), 0));
-    }
-    #[cfg(target_os = "macos")]
-    candidates.extend([
-        (
-            PathBuf::from("/System/Library/Fonts/Hiragino Sans GB.ttc"),
-            "冬青黑体简体".to_owned(),
-            0,
-        ),
-        (
-            PathBuf::from("/System/Library/Fonts/STHeiti Medium.ttc"),
-            "华文黑体".to_owned(),
-            0,
-        ),
-    ]);
-    #[cfg(target_os = "windows")]
-    if let Some(windows) = env::var_os("WINDIR") {
-        let fonts = PathBuf::from(windows).join("Fonts");
-        candidates.extend([
-            (fonts.join("msyh.ttc"), "微软雅黑".to_owned(), 0),
-            (fonts.join("msyhbd.ttc"), "微软雅黑粗体".to_owned(), 0),
-            (fonts.join("simhei.ttf"), "黑体".to_owned(), 0),
-        ]);
-    }
-    #[cfg(target_os = "linux")]
-    candidates.extend([
-        (
-            PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-            "Noto Sans CJK SC".to_owned(),
-            2,
-        ),
-        (
-            PathBuf::from("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
-            "Noto Sans CJK SC".to_owned(),
-            2,
-        ),
-        (
-            PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
-            "文泉驿微米黑".to_owned(),
-            0,
-        ),
-    ]);
-    if let Some((path, collection_index)) = fontconfig_match() {
-        candidates.push((path, "系统中文字体".to_owned(), collection_index));
-    }
-    candidates
-}
-
-fn fontconfig_match() -> Option<(PathBuf, u32)> {
-    let output = Command::new("fc-match")
-        .args(["-f", "%{file}\t%{index}", "Noto Sans CJK SC:lang=zh-cn"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let output = String::from_utf8_lossy(&output.stdout);
-    let (path, index) = output.trim().rsplit_once('\t')?;
-    Some((PathBuf::from(path), index.parse().ok()?))
 }
 
 fn fallback_glyph(character: char, size: u16) -> CachedGlyph {

@@ -75,6 +75,16 @@ pub(super) struct BootstrappedSceneEditor {
     pub(super) script_table: ScriptTable,
     pub(super) text: TextLibrary,
     pub(super) font: BitmapFont,
+    pub(super) item_descriptions: ItemDescriptions,
+    pub(super) player_roles: PlayerRoles,
+    pub(super) global_objects: GlobalObjects,
+    pub(super) battle_data: BattleData,
+    pub(super) magics: pal_assets::magic::Magics,
+    pub(super) stores: pal_assets::store::Stores,
+    pub(super) item_sprites: Vec<Option<RleBitmap>>,
+    pub(super) enemy_battle_sprites: BattleSpriteArchive,
+    pub(super) player_battle_sprites: BattleSpriteArchive,
+    pub(super) magic_effect_sprites: BattleSpriteArchive,
     pub(super) script_references: ScriptReferenceCatalog,
     pub(super) role_sprites: RoleSprites,
     pub(super) renderer: Renderer,
@@ -91,7 +101,23 @@ pub(super) fn bootstrap_scene_editor(data_dir: PathBuf) -> BootstrappedSceneEdit
     let scene_data = load_scene_data(&data_dir).expect("failed to load scene data");
     let script_table = load_script_table(&data_dir).expect("failed to load script table");
     let (text, font) = load_text_resources(&data_dir).expect("failed to load text resources");
-    let script_references = ScriptReferenceCatalog::build(&scene_data, &script_table);
+    let item_descriptions = load_item_descriptions(&data_dir).unwrap_or_default();
+    let player_roles = load_player_roles(&data_dir).expect("failed to load player role data");
+    let global_objects =
+        load_global_objects(&data_dir).expect("failed to load global object definitions");
+    let battle_data = load_battle_data(&data_dir).expect("failed to load battle data");
+    let magics = load_magics(&data_dir).expect("failed to load magic data");
+    let stores = load_stores(&data_dir).expect("failed to load store definitions");
+    let item_sprites =
+        crate::assets::load_item_sprites(&data_dir).expect("failed to load BALL.MKF item sprites");
+    let enemy_battle_sprites =
+        load_enemy_battle_sprites(&data_dir).expect("failed to load ABC.MKF enemy sprites");
+    let player_battle_sprites =
+        load_player_battle_sprites(&data_dir).expect("failed to load F.MKF player sprites");
+    let magic_effect_sprites =
+        load_magic_effect_sprites(&data_dir).expect("failed to load FIRE.MKF magic effects");
+    let mut script_references = ScriptReferenceCatalog::build(&scene_data, &script_table);
+    script_references.index_global_object_scripts(&global_objects);
     let role_sprites = load_role_sprites(&data_dir).expect("failed to load role sprites");
 
     BootstrappedSceneEditor {
@@ -100,6 +126,16 @@ pub(super) fn bootstrap_scene_editor(data_dir: PathBuf) -> BootstrappedSceneEdit
         script_table,
         text,
         font,
+        item_descriptions,
+        player_roles,
+        global_objects,
+        battle_data,
+        magics,
+        stores,
+        item_sprites,
+        enemy_battle_sprites,
+        player_battle_sprites,
+        magic_effect_sprites,
         script_references,
         role_sprites,
         renderer: Renderer::new(

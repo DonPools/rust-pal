@@ -87,7 +87,9 @@ use snapshot::{
     SavedPartySlot, SavedPlayerRole, SavedRole, SavedSceneObject, SavedTrailPoint, SnapshotData,
     SNAPSHOT_VERSION,
 };
-use state_support::{apply_role_attribute, unique_script_entries, valid_role_attribute};
+use state_support::{
+    apply_equipment_effect, apply_role_attribute, unique_script_entries, valid_role_attribute,
+};
 pub use state_support::{AutoScriptError, AutoScriptUpdate};
 
 /// State for the current exploration scene.
@@ -395,7 +397,7 @@ impl<M: CollisionMap> GameState<M> {
         let mut role = self.player_role(role_id)?.clone();
         for (&(_, effect_role, attribute), &value) in &self.equipment_effects {
             if effect_role == role_id {
-                apply_role_attribute(&mut role, attribute, value, false)?;
+                apply_equipment_effect(&mut role, attribute, value)?;
             }
         }
         Some(role)

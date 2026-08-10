@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 
-use pal_assets::battle::{BattleEffects, BattleSpriteArchive};
+use pal_assets::battle::{BattleData, BattleEffects, BattleSpriteArchive};
 use pal_assets::bitmap::Bitmap;
 use pal_assets::fbp::FbpArchive;
+use pal_assets::magic::Magics;
+use pal_assets::objects::GlobalObjects;
 use pal_assets::palette::PaletteSet;
+use pal_assets::player_roles::PlayerRoles;
 use pal_assets::rle::RleBitmap;
 use pal_assets::rng::RngArchive;
 use pal_assets::script::ScriptTable;
+use pal_assets::store::Stores;
 use pal_assets::text::{BitmapFont, ItemDescriptions, TextLibrary};
 use pal_core::game::Camera;
 use pal_core::map::Map;
@@ -55,6 +59,16 @@ pub struct SceneEditorResources {
     pub script_table: ScriptTable,
     pub text: TextLibrary,
     pub font: BitmapFont,
+    pub item_descriptions: ItemDescriptions,
+    pub player_roles: PlayerRoles,
+    pub global_objects: GlobalObjects,
+    pub magics: Magics,
+    pub battle_data: BattleData,
+    pub stores: Stores,
+    pub item_sprites: Vec<Option<RleBitmap>>,
+    pub enemy_battle_sprites: BattleSpriteArchive,
+    pub player_battle_sprites: BattleSpriteArchive,
+    pub magic_effect_sprites: BattleSpriteArchive,
     pub script_references: ScriptReferenceCatalog,
     pub scene_count: u16,
 }

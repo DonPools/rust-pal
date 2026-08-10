@@ -1,6 +1,7 @@
 //! Standalone, read-only scene and script inspector.
 
 mod app;
+mod content;
 mod egui_app;
 mod hit_test;
 mod navigation;

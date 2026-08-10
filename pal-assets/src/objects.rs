@@ -3,10 +3,41 @@
 const DOS_RECORD_WORDS: usize = 6;
 const WIN_RECORD_WORDS: usize = 7;
 
+pub const FIRST_PLAYER_OBJECT: u16 = 0x0024;
+pub const LAST_PLAYER_OBJECT: u16 = 0x0029;
+pub const FIRST_ITEM_OBJECT: u16 = 0x003d;
+pub const LAST_ITEM_OBJECT: u16 = 0x0126;
+pub const FIRST_MAGIC_OBJECT: u16 = 0x0127;
+pub const LAST_MAGIC_OBJECT: u16 = 0x018d;
+pub const FIRST_ENEMY_OBJECT: u16 = 0x018e;
+pub const LAST_ENEMY_OBJECT: u16 = 0x0226;
+pub const FIRST_POISON_OBJECT: u16 = 0x0227;
+pub const LAST_POISON_OBJECT: u16 = 0x0232;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectLayout {
     Dos,
     Win95,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassicObjectKind {
+    Player,
+    Item,
+    Magic,
+    Enemy,
+    Poison,
+}
+
+pub const fn classic_object_kind(object_id: u16) -> Option<ClassicObjectKind> {
+    match object_id {
+        FIRST_PLAYER_OBJECT..=LAST_PLAYER_OBJECT => Some(ClassicObjectKind::Player),
+        FIRST_ITEM_OBJECT..=LAST_ITEM_OBJECT => Some(ClassicObjectKind::Item),
+        FIRST_MAGIC_OBJECT..=LAST_MAGIC_OBJECT => Some(ClassicObjectKind::Magic),
+        FIRST_ENEMY_OBJECT..=LAST_ENEMY_OBJECT => Some(ClassicObjectKind::Enemy),
+        FIRST_POISON_OBJECT..=LAST_POISON_OBJECT => Some(ClassicObjectKind::Poison),
+        _ => None,
+    }
 }
 
 /// A normalized object union. Word 5 is the optional description script and word 6 is flags.
@@ -17,6 +48,10 @@ pub struct GlobalObject {
 }
 
 impl GlobalObject {
+    pub const fn classic_kind(self) -> Option<ClassicObjectKind> {
+        classic_object_kind(self.id)
+    }
+
     pub fn player_friend_death_script(self) -> u16 {
         self.data[2]
     }
@@ -158,6 +193,10 @@ impl GlobalObjects {
     pub fn get_mut(&mut self, id: u16) -> Option<&mut GlobalObject> {
         self.objects.get_mut(usize::from(id))
     }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &GlobalObject> {
+        self.objects.iter()
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +258,22 @@ mod tests {
         assert!(GlobalObjects::parse(&[], ObjectLayout::Dos).is_none());
         assert!(GlobalObjects::parse(&[0; 11], ObjectLayout::Dos).is_none());
         assert!(GlobalObjects::parse(&[0; 12], ObjectLayout::Win95).is_none());
+    }
+
+    #[test]
+    fn classifies_classic_union_ranges_without_inspecting_field_values() {
+        assert_eq!(
+            classic_object_kind(FIRST_ITEM_OBJECT),
+            Some(ClassicObjectKind::Item)
+        );
+        assert_eq!(
+            classic_object_kind(LAST_MAGIC_OBJECT),
+            Some(ClassicObjectKind::Magic)
+        );
+        assert_eq!(
+            classic_object_kind(LAST_ENEMY_OBJECT),
+            Some(ClassicObjectKind::Enemy)
+        );
+        assert_eq!(classic_object_kind(LAST_POISON_OBJECT + 1), None);
     }
 }

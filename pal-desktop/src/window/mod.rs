@@ -44,6 +44,7 @@ mod script_driver;
 mod session;
 mod snapshot;
 mod state;
+mod system_font;
 mod text_render;
 mod types;
 mod visual;
