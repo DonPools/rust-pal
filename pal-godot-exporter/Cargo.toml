@@ -1,0 +1,15 @@
+[package]
+name = "pal-godot-exporter"
+version = "0.1.0"
+edition = "2021"
+description = "Offline conversion of locally owned PAL assets for Godot"
+
+[dependencies]
+encoding_rs = "0.8"
+hound = "3.5"
+image = "0.24"
+nuked-opl3 = "0.1.0"
+pal-assets = { path = "../pal-assets" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

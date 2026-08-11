@@ -5,4 +5,5 @@ members = [
     "pal-assets",
     "pal-desktop",
     "pal-launcher",
+    "pal-godot-exporter",
 ]
