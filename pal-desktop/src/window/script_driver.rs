@@ -16,13 +16,12 @@ use super::menu_state::{
 use super::session::DesktopSession;
 use super::LoadedScene;
 
-const MAX_IMMEDIATE_SCENE_SETUP_EVENTS: usize = 8;
+const MAX_IMMEDIATE_SCRIPT_EVENTS: usize = 1024;
 
-fn party_offset_must_finish_with_viewport_move(scripts: &ScriptRuntime) -> bool {
-    scripts
-        .debug_snapshot()
-        .next_instruction
-        .is_some_and(|instruction| instruction.opcode == ScriptOpcode::MoveViewport.raw())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptAdvanceFlow {
+    ContinueImmediately,
+    StopForFrame,
 }
 
 #[derive(Clone, Copy)]
@@ -50,23 +49,23 @@ pub(super) fn advance_script<L>(
 ) where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
-    // Original trigger scripts execute coordinate setup and scene selection
-    // synchronously. Keep those events in one desktop update so no intermediate
-    // scene frame is presented before a following fade-out.
-    advance_script_with_budget(
-        scripts,
-        game,
-        dialog,
-        resources,
-        load_scene,
-        services,
-        set_title,
-        MAX_IMMEDIATE_SCENE_SETUP_EVENTS,
-    );
+    // Classic trigger scripts keep interpreting instantaneous host actions until
+    // an opcode explicitly presents or waits for a frame. Drain those actions so
+    // state setup between a returned battle and a following fade-out cannot expose
+    // an intermediate world frame.
+    for _ in 0..MAX_IMMEDIATE_SCRIPT_EVENTS {
+        if advance_script_once(
+            scripts, game, dialog, resources, load_scene, services, set_title,
+        ) == ScriptAdvanceFlow::StopForFrame
+        {
+            return;
+        }
+    }
+    set_title("Rust-PAL [script host event limit]");
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_script_with_budget<L>(
+fn advance_script_once<L>(
     scripts: &mut ScriptRuntime,
     game: &mut GameState,
     dialog: &mut Option<ActiveDialog>,
@@ -74,8 +73,8 @@ fn advance_script_with_budget<L>(
     load_scene: &mut L,
     services: &mut DesktopSession,
     set_title: &mut impl FnMut(&str),
-    immediate_budget: usize,
-) where
+) -> ScriptAdvanceFlow
+where
     L: FnMut(u16, Option<u16>, &RoleSprites) -> Option<LoadedScene>,
 {
     let event = if let Some(event) = services.scripts.pending_script_event.take() {
@@ -93,12 +92,19 @@ fn advance_script_with_budget<L>(
             active.awaiting_input = true;
             active.auto_wait_ticks = None;
             services.scripts.pending_script_event = event;
-            return;
+            return ScriptAdvanceFlow::StopForFrame;
         }
         if !matches!(event_value, ScriptEvent::Message { .. }) {
             *dialog = None;
         }
     }
+
+    let mut flow = match event {
+        Some(ScriptEvent::Action(_) | ScriptEvent::Condition(_) | ScriptEvent::Teleport { .. }) => {
+            ScriptAdvanceFlow::ContinueImmediately
+        }
+        _ => ScriptAdvanceFlow::StopForFrame,
+    };
 
     match event {
         Some(ScriptEvent::Message {
@@ -153,17 +159,8 @@ fn advance_script_with_budget<L>(
                 set_title("Rust-PAL [WaitFrames touch update unsupported]");
             }
             update_trigger_world(scripts, game, resources, load_scene, services, set_title);
-            if scripts.debug_snapshot().wait_frames == 0 && immediate_budget > 1 {
-                advance_script_with_budget(
-                    scripts,
-                    game,
-                    dialog,
-                    resources,
-                    load_scene,
-                    services,
-                    set_title,
-                    immediate_budget - 1,
-                );
+            if scripts.debug_snapshot().wait_frames == 0 {
+                flow = ScriptAdvanceFlow::ContinueImmediately;
             }
         }
         Some(ScriptEvent::Redraw {
@@ -183,7 +180,7 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::OpenBuyMenu { store_number }) => {
             if game.store_items(store_number).is_none() {
                 set_title("Rust-PAL [invalid store]");
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             }
             services.set_shop_menu(ShopMenu {
                 mode: ShopMode::Buy { store_number },
@@ -234,7 +231,7 @@ fn advance_script_with_budget<L>(
                     .play(game.current_battle_music, true, 0)
                 {
                     set_title("Rust-PAL [battle music unavailable]");
-                    return;
+                    return ScriptAdvanceFlow::StopForFrame;
                 }
                 set_title("Rust-PAL [Battle]");
             } else {
@@ -265,46 +262,22 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::QuitGame) => services.persistence.quit_requested = true,
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SetPlayerPosition { .. },
-        )) => {
-            if !game.apply_script_action(action) {
-                set_title("Rust-PAL [script target is unavailable]");
-                return;
-            }
-            if immediate_budget > 1 {
-                advance_script_with_budget(
-                    scripts,
-                    game,
-                    dialog,
-                    resources,
-                    load_scene,
-                    services,
-                    set_title,
-                    immediate_budget - 1,
-                );
-            }
+        )) if !game.apply_script_action(action) => {
+            set_title("Rust-PAL [script target is unavailable]");
+            flow = ScriptAdvanceFlow::StopForFrame;
         }
-        Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number })) => {
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::SetPlayerPosition { .. })) => {}
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { scene_number }))
             if super::session::PendingSceneChange::request(
                 &mut services.scripts.pending_scene_change,
                 &mut game.scene_number,
                 scene_number,
-            ) {
-                game.set_party_layer(0);
-                set_title(&format!("Rust-PAL [scene {scene_number}]"));
-            }
-            if immediate_budget > 1 {
-                advance_script_with_budget(
-                    scripts,
-                    game,
-                    dialog,
-                    resources,
-                    load_scene,
-                    services,
-                    set_title,
-                    immediate_budget - 1,
-                );
-            }
+            ) =>
+        {
+            game.set_party_layer(0);
+            set_title(&format!("Rust-PAL [scene {scene_number}]"));
         }
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::ChangeScene { .. })) => {}
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SetSceneMap {
                 scene_number,
@@ -314,7 +287,7 @@ fn advance_script_with_budget<L>(
             let target_scene = scene_number.unwrap_or(game.scene_number);
             if !game.apply_script_action(action) {
                 set_title("Rust-PAL [invalid scene map]");
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             }
             if services.scripts.pending_scene_change.is_none() && target_scene == game.scene_number
             {
@@ -324,7 +297,7 @@ fn advance_script_with_budget<L>(
                     resources.role_sprites,
                 ) else {
                     set_title("Rust-PAL [failed to reload scene map]");
-                    return;
+                    return ScriptAdvanceFlow::StopForFrame;
                 };
                 game.replace_map(scene.map);
             }
@@ -390,6 +363,7 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::DivideEnemy { failure_entry, .. },
         )) => {
+            flow = ScriptAdvanceFlow::StopForFrame;
             if game.apply_script_action(action) {
                 let events = game.advance_battle_resolution();
                 queue_battle_events(game, services, events);
@@ -405,6 +379,7 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::SummonEnemy { failure_entry, .. },
         )) => {
+            flow = ScriptAdvanceFlow::StopForFrame;
             let succeeded = game.apply_script_action(action);
             let events = game.advance_battle_resolution();
             if !events.is_empty() {
@@ -417,14 +392,17 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::TransformEnemy {
             enemy_index,
             object_id,
-        })) => match game.transform_enemy(enemy_index, object_id) {
-            Some(true) => {
-                let events = game.advance_battle_resolution();
-                queue_battle_events(game, services, events);
+        })) => {
+            flow = ScriptAdvanceFlow::StopForFrame;
+            match game.transform_enemy(enemy_index, object_id) {
+                Some(true) => {
+                    let events = game.advance_battle_resolution();
+                    queue_battle_events(game, services, events);
+                }
+                Some(false) => {}
+                None => set_title("Rust-PAL [script transform target is unavailable]"),
             }
-            Some(false) => {}
-            None => set_title("Rust-PAL [script transform target is unavailable]"),
-        },
+        }
         Some(ScriptEvent::Action(
             pal_core::script::ScriptAction::SetEnemyStatus { .. }
             | pal_core::script::ScriptAction::FleeBattle { .. }
@@ -433,10 +411,13 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(action @ pal_core::script::ScriptAction::EnemyEscape))
             if game.apply_script_action(action) =>
         {
+            flow = ScriptAdvanceFlow::StopForFrame;
             let events = game.advance_battle_resolution();
             queue_battle_events(game, services, events);
         }
-        Some(ScriptEvent::Action(pal_core::script::ScriptAction::EnemyEscape)) => {}
+        Some(ScriptEvent::Action(pal_core::script::ScriptAction::EnemyEscape)) => {
+            flow = ScriptAdvanceFlow::StopForFrame;
+        }
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::PlaceObjectInFront { blocked_entry, .. },
         )) if !game.apply_script_action(action) => {
@@ -464,8 +445,12 @@ fn advance_script_with_budget<L>(
             Some(true) => {}
             Some(false) => {
                 scripts.branch_to(repeat_entry);
+                flow = ScriptAdvanceFlow::StopForFrame;
             }
-            None => set_title("Rust-PAL [script walk target is unavailable]"),
+            None => {
+                set_title("Rust-PAL [script walk target is unavailable]");
+                flow = ScriptAdvanceFlow::StopForFrame;
+            }
         },
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::WalkPlayerTo {
             tile_x,
@@ -490,17 +475,8 @@ fn advance_script_with_budget<L>(
             if before != (game.player.world_x, game.player.world_y) {
                 update_trigger_world(scripts, game, resources, load_scene, services, set_title);
             }
-            if completed && immediate_budget > 1 {
-                advance_script_with_budget(
-                    scripts,
-                    game,
-                    dialog,
-                    resources,
-                    load_scene,
-                    services,
-                    set_title,
-                    immediate_budget - 1,
-                );
+            if !completed {
+                flow = ScriptAdvanceFlow::StopForFrame;
             }
         }
         Some(ScriptEvent::Action(pal_core::script::ScriptAction::RideObjectTo {
@@ -524,17 +500,8 @@ fn advance_script_with_budget<L>(
             if before != (game.player.world_x, game.player.world_y) {
                 update_trigger_world(scripts, game, resources, load_scene, services, set_title);
             }
-            if completed && immediate_budget > 1 {
-                advance_script_with_budget(
-                    scripts,
-                    game,
-                    dialog,
-                    resources,
-                    load_scene,
-                    services,
-                    set_title,
-                    immediate_budget - 1,
-                );
+            if !completed {
+                flow = ScriptAdvanceFlow::StopForFrame;
             }
         }
         Some(ScriptEvent::Action(
@@ -544,6 +511,7 @@ fn advance_script_with_budget<L>(
             if (x != 0 || y != 0) && frames != -1 {
                 update_trigger_world(scripts, game, resources, load_scene, services, set_title);
                 scripts.delay_next_advance();
+                flow = ScriptAdvanceFlow::StopForFrame;
             }
         }
         Some(ScriptEvent::Condition(condition)) => {
@@ -618,9 +586,10 @@ fn advance_script_with_budget<L>(
         Some(ScriptEvent::Action(
             action @ pal_core::script::ScriptAction::PlayerMagicAnimation { .. },
         )) => {
+            flow = ScriptAdvanceFlow::StopForFrame;
             if !game.apply_script_action(action) {
                 set_title("Rust-PAL [script target is unavailable]");
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             }
             let events = game.advance_battle_resolution();
             queue_battle_events(game, services, events);
@@ -631,19 +600,21 @@ fn advance_script_with_budget<L>(
         })) => {
             let Some(stolen) = game.steal_enemy(enemy_index, rate) else {
                 set_title("Rust-PAL [script target is unavailable]");
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             };
             if let Some(text) = steal_result_text(resources.text, stolen) {
                 *dialog = Some(ActiveDialog::center_window_text(text));
             }
+            flow = ScriptAdvanceFlow::StopForFrame;
         }
         Some(ScriptEvent::Action(
             action @ (pal_core::script::ScriptAction::SimulatePlayerMagic { .. }
             | pal_core::script::ScriptAction::ThrowWeapon { .. }),
         )) => {
+            flow = ScriptAdvanceFlow::StopForFrame;
             if !game.apply_script_action(action) {
                 set_title("Rust-PAL [script target is unavailable]");
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             }
             let events = game.advance_battle_resolution();
             queue_battle_events(game, services, events);
@@ -655,30 +626,16 @@ fn advance_script_with_budget<L>(
                 set_title("Rust-PAL [failed to refresh party equipment effects]");
             }
         }
-        Some(ScriptEvent::Action(action @ ScriptAction::OffsetPlayer { .. })) => {
-            // Classic does not present a frame for opcode 0x006E itself. In
-            // scripts such as 0x3426..0x3436 it is paired with 0x007F: the
-            // first instruction shifts the party and camera, then the second
-            // restores the camera before drawing. Splitting the pair across
-            // host ticks makes the viewport visibly alternate back and forth.
-            let paired_viewport_move = party_offset_must_finish_with_viewport_move(scripts);
-            if !game.apply_script_action(action) {
-                set_title("Rust-PAL [script target is unavailable]");
-            } else if paired_viewport_move || immediate_budget > 1 {
-                advance_script_with_budget(
-                    scripts,
-                    game,
-                    dialog,
-                    resources,
-                    load_scene,
-                    services,
-                    set_title,
-                    immediate_budget.saturating_sub(1),
-                );
-            }
+        Some(ScriptEvent::Action(action @ ScriptAction::OffsetPlayer { .. }))
+            if !game.apply_script_action(action) =>
+        {
+            set_title("Rust-PAL [script target is unavailable]");
+            flow = ScriptAdvanceFlow::StopForFrame;
         }
+        Some(ScriptEvent::Action(ScriptAction::OffsetPlayer { .. })) => {}
         Some(ScriptEvent::Action(action)) if !game.apply_script_action(action) => {
             set_title("Rust-PAL [script target is unavailable]");
+            flow = ScriptAdvanceFlow::StopForFrame;
         }
         Some(ScriptEvent::Action(_)) => {}
         Some(ScriptEvent::Completed {
@@ -690,7 +647,7 @@ fn advance_script_with_budget<L>(
                 if !game.finish_battle_script(next_entry, succeeded) {
                     set_title("Rust-PAL [battle script completion failed]");
                 }
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Item {
                 if let Some(item_use) = services.menus.item_use.take() {
                     game.finish_item_use(item_use.item_id, next_entry, succeeded);
@@ -725,7 +682,7 @@ fn advance_script_with_budget<L>(
                         set_title("Rust-PAL [Use item]");
                     }
                 }
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Equip {
                 if let Some(equip) = services.menus.equip.take() {
                     game.finish_item_equip(equip.item_id, next_entry);
@@ -740,7 +697,7 @@ fn advance_script_with_budget<L>(
                     });
                     set_title("Rust-PAL [Equip item]");
                 }
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Magic {
                 if let Some(mut magic) = services.menus.magic.take() {
                     game.finish_magic_script(magic.magic_id, next_entry, magic.success_phase);
@@ -756,7 +713,7 @@ fn advance_script_with_budget<L>(
                             services.menus.magic = Some(magic);
                             scripts.start(request);
                             set_title("Rust-PAL [Casting]");
-                            return;
+                            return ScriptAdvanceFlow::StopForFrame;
                         }
                     }
                     if succeeded {
@@ -787,7 +744,7 @@ fn advance_script_with_budget<L>(
                         set_title("Rust-PAL");
                     }
                 }
-                return;
+                return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Auto {
                 // The owning event object already advanced past CALL before
                 // this nested trigger runtime started.
@@ -851,6 +808,7 @@ fn advance_script_with_budget<L>(
         }
         None => {}
     }
+    flow
 }
 
 /// Build the same centered theft result used by Classic's `PAL_BattleStealFromEnemy`.
@@ -1163,7 +1121,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::MusicBackend;
+    use pal_assets::battle::BattleSpriteArchive;
     use pal_assets::script::ScriptTable;
+    use pal_core::map::{Map, MAP_COLUMNS, MAP_HALVES, MAP_ROWS};
+    use pal_core::role::{Direction, Role};
+    use pal_core::scene::SceneObject;
+
+    use super::super::session::MusicResources;
 
     fn text_library(messages: &[&[u8]]) -> TextLibrary {
         let word_data = [b' '; 10];
@@ -1183,6 +1148,121 @@ mod tests {
         }
         TextLibrary::parse(&words, b"x", &[0, 0, 0, 0, 1, 0, 0, 0]).unwrap()
     }
+
+    fn mkf(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let table_size = (chunks.len() + 1) * 4;
+        let mut offset = table_size as u32;
+        let mut data = offset.to_le_bytes().to_vec();
+        for chunk in chunks {
+            offset += chunk.len() as u32;
+            data.extend_from_slice(&offset.to_le_bytes());
+        }
+        for chunk in chunks {
+            data.extend_from_slice(chunk);
+        }
+        data
+    }
+
+    fn raw_yj1(data: &[u8]) -> Vec<u8> {
+        let blocks = data.chunks(usize::from(u16::MAX)).collect::<Vec<_>>();
+        let compressed_len = 16 + blocks.iter().map(|block| 4 + block.len()).sum::<usize>();
+        let mut result = Vec::new();
+        result.extend_from_slice(b"YJ_1");
+        result.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        result.extend_from_slice(&(compressed_len as u32).to_le_bytes());
+        result.extend_from_slice(&(blocks.len() as u16).to_le_bytes());
+        result.extend_from_slice(&[0, 0]);
+        for block in blocks {
+            result.extend_from_slice(&(block.len() as u16).to_le_bytes());
+            result.extend_from_slice(&0u16.to_le_bytes());
+            result.extend_from_slice(block);
+        }
+        result
+    }
+
+    fn one_pixel_sprite() -> Vec<u8> {
+        let mut sprite = Vec::new();
+        sprite.extend_from_slice(&2u16.to_le_bytes());
+        sprite.extend_from_slice(&0u16.to_le_bytes());
+        sprite.extend_from_slice(&[1, 0, 1, 0, 1, 2]);
+        sprite
+    }
+
+    fn role_sprites() -> RoleSprites {
+        RoleSprites::load(&mkf(&[raw_yj1(&one_pixel_sprite())])).unwrap()
+    }
+
+    fn game_with_objects(object_count: u16) -> GameState {
+        let map_data = vec![0; MAP_ROWS * MAP_COLUMNS * MAP_HALVES * 4];
+        let map = Map::load(
+            1,
+            &mkf(&[Vec::new(), raw_yj1(&map_data)]),
+            &mkf(&[Vec::new(), one_pixel_sprite()]),
+        )
+        .unwrap();
+        let mut game = GameState::new(
+            map,
+            Role {
+                sprite_index: 0,
+                world_x: 0,
+                world_y: 0,
+                direction: Direction::South,
+                anim_frame: 0,
+                frames_per_direction: 1,
+            },
+            320,
+            200,
+        );
+        game.scene_objects = (1..=object_count)
+            .map(|id| SceneObject {
+                id,
+                world_x: 0,
+                world_y: 0,
+                layer: 0,
+                trigger_script: 0,
+                auto_script: 0,
+                state: 1,
+                trigger_mode: 0,
+                sprite_index: None,
+                frames_per_direction: 0,
+                sprite_frame_count: 0,
+                direction: Direction::South,
+                current_frame: 0,
+                vanish_time: 0,
+                auto_script_idle_frame: 0,
+            })
+            .collect();
+        game
+    }
+
+    fn desktop_session(auto_scripts: ScriptTable) -> DesktopSession {
+        let sprite_mkf = mkf(&[one_pixel_sprite()]);
+        let sprites = BattleSpriteArchive::load(&sprite_mkf).unwrap();
+        let empty_mkf = mkf(&[Vec::new()]);
+        DesktopSession::new(
+            auto_scripts,
+            &empty_mkf,
+            MusicResources {
+                rix_mkf: &empty_mkf,
+                midi_mkf: &[],
+                sound_font: &[],
+                requested_backend: MusicBackend::Rix,
+            },
+            &sprites,
+            &sprites,
+            &sprites,
+        )
+    }
+
+    fn script_table(entries: &[[u16; 4]]) -> ScriptTable {
+        let data = entries
+            .iter()
+            .flat_map(|entry| entry.iter().copied().flat_map(u16::to_le_bytes))
+            .collect::<Vec<_>>();
+        ScriptTable::parse(&data).unwrap()
+    }
+
+    fn ignore_title(_: &str) {}
 
     #[test]
     fn non_message_events_wait_for_body_confirmation_but_not_title_only_dialogs() {
@@ -1238,32 +1318,136 @@ mod tests {
     }
 
     #[test]
-    fn party_offset_requests_the_following_viewport_move_in_the_same_host_frame() {
-        let data = [
+    fn instantaneous_post_battle_actions_reach_fade_in_one_host_frame() {
+        let table = script_table(&[
             [ScriptOpcode::Stop.raw(), 0, 0, 0],
-            [ScriptOpcode::OffsetParty.raw(), (-16i16) as u16, 8, 0],
-            [ScriptOpcode::MoveViewport.raw(), 16, (-8i16) as u16, 0],
+            [ScriptOpcode::SetObjectState.raw(), 1, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 2, 2, 0],
+            [ScriptOpcode::SetObjectState.raw(), 3, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 4, 2, 0],
+            [ScriptOpcode::SetObjectState.raw(), 5, 0, 0],
+            [ScriptOpcode::FadeOut.raw(), 0, 0, 0],
             [ScriptOpcode::Stop.raw(), 0, 0, 0],
-        ]
-        .into_iter()
-        .flat_map(|entry| entry.into_iter().flat_map(u16::to_le_bytes))
-        .collect::<Vec<_>>();
-        let mut scripts = ScriptRuntime::new(ScriptTable::parse(&data).unwrap());
+        ]);
+        let mut scripts = ScriptRuntime::new(table.clone());
         assert!(scripts.start(TriggerRequest {
             object_id: u16::MAX,
             script_entry: 1,
             kind: TriggerKind::Touch,
         }));
+        let mut game = game_with_objects(5);
+        let sprites = role_sprites();
+        let text = text_library(&[b"x"]);
+        let mut services = desktop_session(table);
+        let mut dialog = None;
+        let mut load_scene = |_, _, _: &RoleSprites| None;
+        let mut title = String::new();
 
-        assert!(matches!(
-            scripts.advance(),
-            Some(ScriptEvent::Action(ScriptAction::OffsetPlayer {
-                dx: -16,
-                dy: 8,
-                ..
-            }))
-        ));
-        assert!(party_offset_must_finish_with_viewport_move(&scripts));
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut |value| title = value.to_owned(),
+        );
+
+        assert_eq!(
+            (1..=5)
+                .map(|object_id| game.object_state(object_id).unwrap())
+                .collect::<Vec<_>>(),
+            [0, 2, 0, 2, 0]
+        );
+        assert!(services.visual.is_blocking());
+        assert_eq!(
+            scripts.debug_snapshot().last_instruction.unwrap().opcode,
+            ScriptOpcode::FadeOut.raw()
+        );
+        assert_eq!(
+            scripts.debug_snapshot().next_instruction.unwrap().opcode,
+            ScriptOpcode::Stop.raw()
+        );
+        assert!(title.is_empty());
+    }
+
+    #[test]
+    fn explicit_redraw_still_stops_before_a_following_fade() {
+        let table = script_table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 1, 2, 0],
+            [ScriptOpcode::Redraw.raw(), 0, 0, 0],
+            [ScriptOpcode::FadeOut.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]);
+        let mut scripts = ScriptRuntime::new(table.clone());
+        assert!(scripts.start(TriggerRequest {
+            object_id: u16::MAX,
+            script_entry: 1,
+            kind: TriggerKind::Touch,
+        }));
+        let mut game = game_with_objects(1);
+        let sprites = role_sprites();
+        let text = text_library(&[b"x"]);
+        let mut services = desktop_session(table);
+        let mut dialog = None;
+        let mut load_scene = |_, _, _: &RoleSprites| None;
+        let mut set_title = ignore_title;
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut set_title,
+        );
+
+        assert_eq!(game.object_state(1), Some(2));
+        assert!(!services.visual.is_blocking());
+        assert_eq!(
+            scripts.debug_snapshot().last_instruction.unwrap().opcode,
+            ScriptOpcode::Redraw.raw()
+        );
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut set_title,
+        );
+        assert!(!services.visual.is_blocking());
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut set_title,
+        );
+        assert!(services.visual.is_blocking());
+        assert_eq!(
+            scripts.debug_snapshot().last_instruction.unwrap().opcode,
+            ScriptOpcode::FadeOut.raw()
+        );
     }
 
     #[test]
