@@ -866,6 +866,7 @@ where
         return true;
     };
     game.replace_scene(scene.number, scene.map, scene.objects);
+    let _ = game.scene_teleport_script(scene.teleport_script);
     let enter_script = game.scene_enter_script(scene.enter_script);
     if enter_script != 0 {
         scripts.start(pal_core::scene::TriggerRequest {
@@ -1193,13 +1194,7 @@ mod tests {
     }
 
     fn game_with_objects(object_count: u16) -> GameState {
-        let map_data = vec![0; MAP_ROWS * MAP_COLUMNS * MAP_HALVES * 4];
-        let map = Map::load(
-            1,
-            &mkf(&[Vec::new(), raw_yj1(&map_data)]),
-            &mkf(&[Vec::new(), one_pixel_sprite()]),
-        )
-        .unwrap();
+        let map = test_map();
         let mut game = GameState::new(
             map,
             Role {
@@ -1235,6 +1230,16 @@ mod tests {
         game
     }
 
+    fn test_map() -> Map {
+        let map_data = vec![0; MAP_ROWS * MAP_COLUMNS * MAP_HALVES * 4];
+        Map::load(
+            1,
+            &mkf(&[Vec::new(), raw_yj1(&map_data)]),
+            &mkf(&[Vec::new(), one_pixel_sprite()]),
+        )
+        .unwrap()
+    }
+
     fn desktop_session(auto_scripts: ScriptTable) -> DesktopSession {
         let sprite_mkf = mkf(&[one_pixel_sprite()]);
         let sprites = BattleSpriteArchive::load(&sprite_mkf).unwrap();
@@ -1263,6 +1268,41 @@ mod tests {
     }
 
     fn ignore_title(_: &str) {}
+
+    #[test]
+    fn scene_change_registers_the_loaded_teleport_script() {
+        let table = script_table(&[[ScriptOpcode::Stop.raw(), 0, 0, 0]]);
+        let mut scripts = ScriptRuntime::new(table.clone());
+        let mut game = game_with_objects(0);
+        let sprites = role_sprites();
+        let mut services = desktop_session(table);
+        assert!(super::super::session::PendingSceneChange::request(
+            &mut services.scripts.pending_scene_change,
+            &mut game.scene_number,
+            2,
+        ));
+        let mut load_scene = |number, _, _: &RoleSprites| {
+            Some(LoadedScene {
+                number,
+                map: test_map(),
+                objects: Vec::new(),
+                enter_script: 0,
+                teleport_script: 0x1234,
+            })
+        };
+
+        assert!(finish_pending_scene_change(
+            &mut scripts,
+            &mut game,
+            &sprites,
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        ));
+
+        assert_eq!(game.scene_number, 2);
+        assert_eq!(game.scene_teleport_script(0), 0x1234);
+    }
 
     #[test]
     fn non_message_events_wait_for_body_confirmation_but_not_title_only_dialogs() {
