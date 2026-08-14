@@ -120,9 +120,9 @@ impl ScriptNavigation {
 
 pub(super) fn navigable_target(record: ScriptRecordInspection) -> Option<u16> {
     match record.flow {
-        ScriptControlFlow::Jump { target, .. } | ScriptControlFlow::Call { target, .. } => {
-            (target != 0).then_some(target)
-        }
+        ScriptControlFlow::Jump { target, .. }
+        | ScriptControlFlow::Call { target, .. }
+        | ScriptControlFlow::Failure { target } => (target != 0).then_some(target),
         ScriptControlFlow::Next
         | ScriptControlFlow::Stop
         | ScriptControlFlow::Random { .. }

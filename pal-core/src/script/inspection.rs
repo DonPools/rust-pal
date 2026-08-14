@@ -13,9 +13,21 @@ use super::ScriptOpcode;
 pub enum ScriptControlFlow {
     Next,
     Stop,
-    Jump { target: u16, conditional: bool },
-    Call { target: u16, return_entry: u16 },
-    Random { choices: u16 },
+    Jump {
+        target: u16,
+        conditional: bool,
+    },
+    Call {
+        target: u16,
+        return_entry: u16,
+    },
+    /// Continue on success, or jump to the supplied entry when the operation fails.
+    Failure {
+        target: u16,
+    },
+    Random {
+        choices: u16,
+    },
     Unknown,
 }
 
@@ -407,6 +419,10 @@ pub fn inspect_script_targets(record: ScriptRecordInspection) -> Vec<ScriptInstr
             push(next, Reference::Next);
             push(op1, Reference::Failure);
         }
+        TeleportParty => {
+            push(next, Reference::Next);
+            push(op0, Reference::Failure);
+        }
         _ => match record.flow {
             ScriptControlFlow::Next => push(next, Reference::Next),
             ScriptControlFlow::Stop | ScriptControlFlow::Unknown => {}
@@ -427,6 +443,10 @@ pub fn inspect_script_targets(record: ScriptRecordInspection) -> Vec<ScriptInstr
             } => {
                 push(target, Reference::Call);
                 push(return_entry, Reference::CallReturn);
+            }
+            ScriptControlFlow::Failure { target } => {
+                push(next, Reference::Next);
+                push(target, Reference::Failure);
             }
             ScriptControlFlow::Random { choices } => {
                 for choice in 0..choices {
@@ -569,10 +589,12 @@ fn control_flow(opcode: ScriptOpcode, instruction: ScriptEntry, entry: u16) -> S
         | JumpIfEnemyNotFirstKind
         | JumpIfEnemyTurn
         | JumpIfPartyNotFullHp
-        | CollectEnemy
-        | TeleportParty => ScriptControlFlow::Jump {
+        | CollectEnemy => ScriptControlFlow::Jump {
             target: instruction.operands[0],
             conditional: true,
+        },
+        TeleportParty => ScriptControlFlow::Failure {
+            target: instruction.operands[0],
         },
         AdjustCash
         | JumpIfPlayerLacksPoison
@@ -749,6 +771,31 @@ mod tests {
                 entry: 6,
                 kind: ScriptInstructionReferenceKind::PersistNext,
             }]
+        );
+    }
+
+    #[test]
+    fn teleport_exposes_next_and_failure_edges_without_a_false_loop() {
+        let scripts = table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::TeleportParty.raw(), 0x0001, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]);
+        let record = inspect_script_record(&scripts, 1).unwrap();
+
+        assert_eq!(record.flow, ScriptControlFlow::Failure { target: 1 });
+        assert_eq!(
+            inspect_script_targets(record),
+            [
+                ScriptInstructionTarget {
+                    entry: 2,
+                    kind: ScriptInstructionReferenceKind::Next,
+                },
+                ScriptInstructionTarget {
+                    entry: 1,
+                    kind: ScriptInstructionReferenceKind::Failure,
+                },
+            ]
         );
     }
 

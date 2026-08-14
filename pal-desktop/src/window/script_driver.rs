@@ -239,7 +239,11 @@ where
             }
         }
         Some(ScriptEvent::Teleport { failure_entry }) => {
-            let teleport_entry = game.scene_teleport_script(0);
+            let teleport_entry = if game.battle().is_none() {
+                game.scene_teleport_script(0)
+            } else {
+                0
+            };
             if teleport_entry == 0 || !scripts.call(teleport_entry, 0xffff) {
                 scripts.set_success(false);
                 scripts.branch_to(failure_entry);
@@ -649,13 +653,14 @@ where
                 }
                 return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Item {
+                let scene_change_pending = services.scripts.pending_scene_change.is_some();
                 if let Some(item_use) = services.menus.item_use.take() {
                     game.finish_item_use(item_use.item_id, next_entry, succeeded);
                     let selected = item_use
                         .inventory_selected
                         .min(game.inventory().len().saturating_sub(1));
                     services.menus.inventory_selected = selected;
-                    if item_use.apply_to_all {
+                    if scene_change_pending || item_use.apply_to_all {
                         services.clear_active_menu();
                         set_title("Rust-PAL");
                     } else if game.usable_item(item_use.item_id).is_some() {
@@ -682,8 +687,19 @@ where
                         set_title("Rust-PAL [Use item]");
                     }
                 }
+                if scene_change_pending {
+                    finish_pending_scene_change(
+                        scripts,
+                        game,
+                        resources.role_sprites,
+                        load_scene,
+                        services,
+                        set_title,
+                    );
+                }
                 return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Equip {
+                let scene_change_pending = services.scripts.pending_scene_change.is_some();
                 if let Some(equip) = services.menus.equip.take() {
                     game.finish_item_equip(equip.item_id, next_entry);
                     let selected = equip
@@ -691,11 +707,25 @@ where
                         .min(game.equippable_inventory().len().saturating_sub(1));
                     services.menus.inventory_selected = selected;
                     services.menus.item_target_selected = equip.role_selected;
-                    services.set_inventory_menu(InventoryMenu {
-                        selected,
-                        mode: InventoryMode::EquipItems,
-                    });
-                    set_title("Rust-PAL [Equip item]");
+                    if scene_change_pending {
+                        services.clear_active_menu();
+                    } else {
+                        services.set_inventory_menu(InventoryMenu {
+                            selected,
+                            mode: InventoryMode::EquipItems,
+                        });
+                        set_title("Rust-PAL [Equip item]");
+                    }
+                }
+                if scene_change_pending {
+                    finish_pending_scene_change(
+                        scripts,
+                        game,
+                        resources.role_sprites,
+                        load_scene,
+                        services,
+                        set_title,
+                    );
                 }
                 return ScriptAdvanceFlow::StopForFrame;
             } else if trigger.kind == TriggerKind::Magic {
@@ -716,6 +746,7 @@ where
                             return ScriptAdvanceFlow::StopForFrame;
                         }
                     }
+                    let scene_change_pending = services.scripts.pending_scene_change.is_some();
                     if succeeded {
                         game.consume_magic_mp(caster_role, magic.magic_id);
                     }
@@ -725,7 +756,9 @@ where
                         .any(|field_magic| {
                             field_magic.magic_id == magic.magic_id && field_magic.enabled
                         });
-                    if available {
+                    if scene_change_pending {
+                        services.clear_active_menu();
+                    } else if available {
                         if let Some(selected) = magic.target_selected {
                             services.set_field_menu(FieldMenu::MagicTarget {
                                 caster: magic.caster_selected,
@@ -742,6 +775,16 @@ where
                         }
                     } else {
                         set_title("Rust-PAL");
+                    }
+                    if scene_change_pending {
+                        finish_pending_scene_change(
+                            scripts,
+                            game,
+                            resources.role_sprites,
+                            load_scene,
+                            services,
+                            set_title,
+                        );
                     }
                 }
                 return ScriptAdvanceFlow::StopForFrame;
@@ -1124,11 +1167,14 @@ mod tests {
     use super::*;
     use crate::audio::MusicBackend;
     use pal_assets::battle::BattleSpriteArchive;
+    use pal_assets::objects::{GlobalObjects, ObjectLayout};
     use pal_assets::script::ScriptTable;
+    use pal_assets::store::Stores;
     use pal_core::map::{Map, MAP_COLUMNS, MAP_HALVES, MAP_ROWS};
     use pal_core::role::{Direction, Role};
     use pal_core::scene::SceneObject;
 
+    use super::super::menu_state::ItemUseSession;
     use super::super::session::MusicResources;
 
     fn text_library(messages: &[&[u8]]) -> TextLibrary {
@@ -1302,6 +1348,202 @@ mod tests {
 
         assert_eq!(game.scene_number, 2);
         assert_eq!(game.scene_teleport_script(0), 0x1234);
+    }
+
+    #[test]
+    fn scene_change_preserves_an_existing_teleport_override() {
+        let table = script_table(&[[ScriptOpcode::Stop.raw(), 0, 0, 0]]);
+        let mut scripts = ScriptRuntime::new(table.clone());
+        let mut game = game_with_objects(0);
+        assert!(game.apply_script_action(ScriptAction::SetSceneScripts {
+            scene_number: 2,
+            enter_script: None,
+            teleport_script: Some(0x4321),
+        }));
+        let sprites = role_sprites();
+        let mut services = desktop_session(table);
+        assert!(super::super::session::PendingSceneChange::request(
+            &mut services.scripts.pending_scene_change,
+            &mut game.scene_number,
+            2,
+        ));
+        let mut load_scene = |number, _, _: &RoleSprites| {
+            Some(LoadedScene {
+                number,
+                map: test_map(),
+                objects: Vec::new(),
+                enter_script: 0,
+                teleport_script: 0x1234,
+            })
+        };
+
+        assert!(finish_pending_scene_change(
+            &mut scripts,
+            &mut game,
+            &sprites,
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        ));
+
+        assert_eq!(game.scene_teleport_script(0), 0x4321);
+    }
+
+    #[test]
+    fn item_teleport_replaces_the_scene_and_starts_its_entry_script() {
+        let table = script_table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::TeleportParty.raw(), 7, 0, 0],
+            [ScriptOpcode::NoOp.raw(), 0, 0, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::ChangeScene.raw(), 2, 0, 0],
+            [ScriptOpcode::SetPartyPosition.raw(), 3, 4, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::MarkScriptFailed.raw(), 0, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 42, 2, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]);
+        let objects = GlobalObjects::parse(
+            &[[0u16; 6], [0, 0, 1, 0, 0, 0x0011]]
+                .into_iter()
+                .flatten()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            ObjectLayout::Dos,
+        )
+        .unwrap();
+        let stores = Stores::parse(&[0; 18]).unwrap();
+        let mut game = game_with_objects(0).with_economy_data(stores, objects);
+        assert!(game.apply_script_action(ScriptAction::AddItem {
+            item_id: 1,
+            amount: 1,
+        }));
+        assert_eq!(game.scene_teleport_script(4), 4);
+
+        let mut scripts = ScriptRuntime::new(table.clone());
+        assert!(scripts.start(TriggerRequest {
+            object_id: u16::MAX,
+            script_entry: 1,
+            kind: TriggerKind::Item,
+        }));
+        let sprites = role_sprites();
+        let text = text_library(&[b"x"]);
+        let mut services = desktop_session(table);
+        services.menus.item_use = Some(ItemUseSession {
+            item_id: 1,
+            inventory_selected: 0,
+            apply_to_all: true,
+        });
+        services.set_inventory_menu(InventoryMenu {
+            selected: 0,
+            mode: InventoryMode::Items,
+        });
+        let mut load_scene = |number, _, _: &RoleSprites| {
+            let mut map = test_map();
+            map.map_num = usize::from(number);
+            let object = SceneObject {
+                id: 42,
+                world_x: 0,
+                world_y: 0,
+                layer: 0,
+                trigger_script: 0,
+                auto_script: 0,
+                state: 1,
+                trigger_mode: 0,
+                sprite_index: None,
+                frames_per_direction: 0,
+                sprite_frame_count: 0,
+                direction: Direction::South,
+                current_frame: 0,
+                vanish_time: 0,
+                auto_script_idle_frame: 0,
+            };
+            Some(LoadedScene {
+                number,
+                map,
+                objects: vec![object],
+                enter_script: 8,
+                teleport_script: 0x2222,
+            })
+        };
+        let mut dialog = None;
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        );
+
+        assert_eq!(game.scene_number, 2);
+        assert_eq!(game.map.map_num, 2);
+        assert_eq!(game.object_state(42), Some(1));
+        assert_eq!((game.player.world_x, game.player.world_y), (96, 64));
+        assert_eq!(game.scene_teleport_script(0), 0x2222);
+        assert!(services.scripts.pending_scene_change.is_none());
+        assert!(!services.has_active_menu());
+        assert!(services.menus.item_use.is_none());
+        assert_eq!(scripts.debug_snapshot().next_instruction.unwrap().entry, 8);
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        );
+        assert_eq!(game.object_state(42), Some(2));
+    }
+
+    #[test]
+    fn item_teleport_without_a_scene_script_uses_the_failure_entry() {
+        let table = script_table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::TeleportParty.raw(), 3, 0, 0],
+            [ScriptOpcode::SetObjectState.raw(), 1, 2, 0],
+            [ScriptOpcode::SetObjectState.raw(), 1, 3, 0],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]);
+        let mut game = game_with_objects(1);
+        let mut scripts = ScriptRuntime::new(table.clone());
+        assert!(scripts.start(TriggerRequest {
+            object_id: u16::MAX,
+            script_entry: 1,
+            kind: TriggerKind::Item,
+        }));
+        let sprites = role_sprites();
+        let text = text_library(&[b"x"]);
+        let mut services = desktop_session(table);
+        let mut load_scene = |_, _, _: &RoleSprites| None;
+        let mut dialog = None;
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        );
+
+        assert_eq!(game.scene_number, 1);
+        assert_eq!(game.object_state(1), Some(3));
+        assert!(services.scripts.pending_scene_change.is_none());
     }
 
     #[test]

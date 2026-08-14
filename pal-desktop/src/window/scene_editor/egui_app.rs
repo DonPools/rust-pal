@@ -1248,6 +1248,7 @@ fn format_flow(record: ScriptRecordInspection) -> (String, Option<u16>) {
             ),
             Some(target),
         ),
+        ScriptControlFlow::Failure { target } => (format!("FAIL -> @{target:04X}"), Some(target)),
         ScriptControlFlow::Call { target, .. } => (format!("CALL -> @{target:04X}"), Some(target)),
         ScriptControlFlow::Random { .. } => ("RANDOM".to_owned(), None),
         ScriptControlFlow::Unknown => ("INVALID".to_owned(), None),
@@ -1264,6 +1265,9 @@ fn flow_explanation(record: ScriptRecordInspection) -> String {
             conditional: true,
         } => format!("Jump to @{target:04X} when true; otherwise continue at @{next:04X}."),
         ScriptControlFlow::Jump { target, .. } => format!("Jump directly to @{target:04X}."),
+        ScriptControlFlow::Failure { target } => {
+            format!("Continue at @{next:04X} on success; jump to @{target:04X} on failure.")
+        }
         ScriptControlFlow::Call {
             target,
             return_entry,
@@ -1323,6 +1327,9 @@ fn opcode_explanation(
             )
         }
         ChangeScene => format!("Switch to scene {op0}."),
+        TeleportParty => format!(
+            "Call the current scene teleport script; if unavailable or in battle, jump to @{op0:04X}."
+        ),
         AddItem => format!("Add {} of item #{op0} to the inventory.", op1 as i16),
         RemoveItem => format!("Remove {} of item #{op0} from the inventory.", op1.max(1)),
         OpenBuyMenu => format!("Open store #{op0} for buying."),
@@ -1418,6 +1425,7 @@ fn flow_color(record: ScriptRecordInspection) -> Color32 {
             conditional: true, ..
         } => TRIGGER,
         ScriptControlFlow::Jump { .. } => ACCENT,
+        ScriptControlFlow::Failure { .. } => TRIGGER,
         ScriptControlFlow::Call { .. } => AUTO,
         ScriptControlFlow::Stop | ScriptControlFlow::Random { .. } => MUTED,
         ScriptControlFlow::Unknown => ERROR,
@@ -1693,6 +1701,29 @@ mod tests {
             },
         };
         assert_eq!(format_flow(branch).0, "BRANCH -> @0005 LOOP");
+
+        let teleport = ScriptRecordInspection {
+            instruction: ScriptEntry {
+                opcode: ScriptOpcode::TeleportParty.raw(),
+                operands: [5, 0, 0],
+            },
+            opcode: Some(ScriptOpcode::TeleportParty),
+            flow: ScriptControlFlow::Failure { target: 5 },
+            ..branch
+        };
+        assert_eq!(format_flow(teleport).0, "FAIL -> @0005");
+        assert_eq!(
+            flow_explanation(teleport),
+            "Continue at @000B on success; jump to @0005 on failure."
+        );
+        assert_eq!(
+            instruction_script_targets(teleport),
+            vec![("ON FAILURE".to_owned(), 5)]
+        );
+        assert_eq!(
+            opcode_explanation(ScriptOpcode::TeleportParty, teleport, None),
+            "Call the current scene teleport script; if unavailable or in battle, jump to @0005."
+        );
 
         let call = ScriptRecordInspection {
             flow: ScriptControlFlow::Call {
