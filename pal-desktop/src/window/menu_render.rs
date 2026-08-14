@@ -23,6 +23,33 @@ const ITEM_DETAIL_PANEL_HEIGHT: i32 = 60;
 const ITEM_DESCRIPTION_X: i32 = 72;
 const ITEM_DESCRIPTION_GLYPH_HEIGHT: i32 = 15;
 const ITEM_DESCRIPTION_LINE_HEIGHT: i32 = 18;
+const EQUIP_ROLE_WORD_RANGE: std::ops::Range<usize> = 36..40;
+
+fn pal_word_width(word: &[u8]) -> usize {
+    let mut pixel_width = 0usize;
+    let mut index = 0;
+    while index < word.len() {
+        if word[index] < 0x80 {
+            pixel_width += 8;
+            index += 1;
+        } else {
+            pixel_width += 16;
+            index += usize::from(index + 1 < word.len()) + 1;
+        }
+    }
+
+    // Classic rounds the pixel width to units of one full-width PAL glyph.
+    (pixel_width + 8) >> 4
+}
+
+fn equip_role_list_columns(text: &TextLibrary) -> usize {
+    EQUIP_ROLE_WORD_RANGE
+        .filter_map(|word_id| text.word(word_id))
+        .map(pal_word_width)
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1)
+}
 
 fn draw_ui_box(
     renderer: &mut Renderer,
@@ -1535,7 +1562,7 @@ fn render_equip_target_menu(
         2,
         95,
         game.party.members().len().saturating_sub(1),
-        4,
+        equip_role_list_columns(text),
         0,
     );
     for (index, party_member) in game.party.members().iter().enumerate() {
@@ -1603,5 +1630,19 @@ mod tests {
         assert_eq!(item_description_y(2), 153);
         assert_eq!(item_description_y(3), 144);
         assert_eq!(item_description_y(4), 144);
+    }
+
+    #[test]
+    fn equip_role_list_matches_original_three_character_width() {
+        let mut words = vec![b' '; 40 * 10];
+        let three_big5_characters = [0xa4, 0x40, 0xa4, 0x40, 0xa4, 0x40];
+        for word_id in EQUIP_ROLE_WORD_RANGE {
+            let start = word_id * 10;
+            words[start..start + three_big5_characters.len()]
+                .copy_from_slice(&three_big5_characters);
+        }
+        let text = TextLibrary::parse(&words, &[], &[0; 8]).unwrap();
+
+        assert_eq!(equip_role_list_columns(&text), 2);
     }
 }
