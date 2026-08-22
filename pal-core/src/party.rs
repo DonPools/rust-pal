@@ -50,6 +50,10 @@ impl Party {
     }
 
     /// Replace the active party from zero-based role IDs.
+    ///
+    /// Scripted battles may deliberately repeat a role in multiple party slots.
+    /// Each slot keeps its own position and battle actor while sharing the role's
+    /// underlying persistent attributes.
     pub fn replace(&mut self, role_ids: &[u16], roles: &PlayerRoles) -> bool {
         if role_ids.is_empty() || role_ids.len() > MAX_PARTY_MEMBERS {
             return false;
@@ -57,12 +61,6 @@ impl Party {
 
         let mut replacement = Vec::with_capacity(role_ids.len());
         for &role_id in role_ids {
-            if replacement
-                .iter()
-                .any(|member: &PartyMember| member.role_id == role_id)
-            {
-                return false;
-            }
             let Some(attributes) = roles.role(usize::from(role_id)).cloned() else {
                 return false;
             };
@@ -115,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn party_enforces_unique_members_and_capacity() {
+    fn party_add_enforces_unique_members_and_capacity() {
         let roles = roles();
         let mut party = Party::single(0, &roles).unwrap();
         assert!(!party.add(0, &roles));
@@ -151,9 +149,17 @@ mod tests {
             vec![2, 1]
         );
 
-        assert!(!party.replace(&[2, 2], &roles));
-        assert_eq!(party.members().len(), 2);
+        assert!(party.replace(&[2, 2], &roles));
+        assert_eq!(
+            party
+                .members()
+                .iter()
+                .map(|member| member.role_id)
+                .collect::<Vec<_>>(),
+            vec![2, 2]
+        );
         assert_eq!(party.leader().unwrap().role_id, 2);
         assert!(!party.replace(&[], &roles));
+        assert_eq!(party.members().len(), 2);
     }
 }

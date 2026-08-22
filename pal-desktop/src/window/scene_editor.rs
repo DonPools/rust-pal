@@ -1,10 +1,11 @@
-//! Standalone, read-only scene and script inspector.
+//! Standalone scene/script inspector with an isolated original-save editor.
 
 mod app;
 mod content;
 mod egui_app;
 mod hit_test;
 mod navigation;
+mod save;
 
 use pal_core::map::{MAP_PIXEL_HEIGHT, MAP_PIXEL_WIDTH};
 
@@ -19,7 +20,7 @@ pub(super) const CANVAS_WIDTH: u32 = SCENE_EDITOR_WIDTH;
 pub(super) const CANVAS_HEIGHT: u32 = SCENE_EDITOR_HEIGHT;
 pub(super) const MAX_ZOOM: u8 = 3;
 
-/// Run the scene inspector in an eframe host independent from normal gameplay.
+/// Run the inspector in an eframe host independent from normal gameplay.
 pub fn run_scene_editor_window<L>(
     renderer: Renderer,
     initial_scene: LoadedScene,
@@ -36,7 +37,7 @@ pub fn run_scene_editor_window<L>(
         ..Default::default()
     };
     eframe::run_native(
-        "Rust-PAL Scene Inspector",
+        "Rust-PAL Inspector",
         native_options,
         Box::new(move |context| {
             Ok(Box::new(EguiSceneEditorApp::new(

@@ -180,6 +180,7 @@ fn run_scene_editor(
         renderer,
         initial_scene,
         SceneEditorResources {
+            data_dir,
             role_sprites,
             script_table,
             text,

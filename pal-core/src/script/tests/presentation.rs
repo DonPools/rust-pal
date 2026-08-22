@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn visual_opcodes_yield_typed_blocking_events() {
+fn visual_opcodes_yield_typed_events() {
     let mut runtime = ScriptRuntime::new(table(&[
         [0, 0, 0, 0],
         [ScriptOpcode::ShakeScreen.raw(), 3, 0, 0],
@@ -14,7 +14,7 @@ fn visual_opcodes_yield_typed_blocking_events() {
         [ScriptOpcode::ShowFbp.raw(), 9, 2, 0],
         [ScriptOpcode::ToggleDayNightPalette.raw(), 0, 0, 0],
         [ScriptOpcode::SetPalette.raw(), 3, 0, 0],
-        [ScriptOpcode::FadeColor.raw(), 0x4f, 1, 2],
+        [ScriptOpcode::FadeColor.raw(), 0x1a, 4, 0xffff],
         [ScriptOpcode::RestoreScreen.raw(), 0, 0, 0],
         [ScriptOpcode::FadeSceneWithUpdate.raw(), 0xfffe, 0, 0],
         [ScriptOpcode::FadeToCurrentScene.raw(), 0, 0, 0],
@@ -84,9 +84,9 @@ fn visual_opcodes_yield_typed_blocking_events() {
     assert_eq!(
         runtime.advance(),
         Some(ScriptEvent::Visual(ScriptVisual::FadeColor {
-            color: 0x4f,
+            color: 0x1a,
             from_color: true,
-            delay: 2,
+            delay: 4,
         }))
     );
     assert_eq!(

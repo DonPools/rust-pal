@@ -1441,6 +1441,7 @@ impl<M: CollisionMap> GameState<M> {
             chase_range: self.chase_range,
             chase_speed_change_cycles: self.chase_speed_change_cycles,
             follower_count: u16::try_from(self.extra_follower_ids.len()).ok()?,
+            reserved: [0; 3],
             cash: self.cash,
             party,
             trail,

@@ -1326,10 +1326,88 @@ fn party_script_action_replaces_members_and_updates_leader_sprite() {
         (320, 192)
     );
 
-    assert!(!state.apply_script_action(ScriptAction::SetParty {
+    assert!(state.apply_script_action(ScriptAction::SetParty {
         members: [Some(2), Some(2), None],
     }));
     assert_eq!(state.party.members().len(), 2);
+}
+
+#[test]
+fn scripted_party_preserves_repeated_role_slots_and_condition_branches() {
+    let mut role_data = vec![0; 900];
+    let gai_name_offset = (3 * PLAYER_ROLE_COUNT + 5) * 2;
+    role_data[gai_name_offset..gai_name_offset + 2].copy_from_slice(&0x29u16.to_le_bytes());
+    let player_roles = PlayerRoles::parse(&role_data).unwrap();
+    let party = Party::single(0, &player_roles).unwrap();
+    let object_words = vec![[0u16; 6]; 0x2a];
+    let objects = GlobalObjects::parse(
+        &object_words
+            .into_iter()
+            .flatten()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+        pal_assets::objects::ObjectLayout::Dos,
+    )
+    .unwrap();
+    let stores = Stores::parse(&[0; 18]).unwrap();
+    let magics = Magics::parse(&[0; 32]).unwrap();
+    let scripts = ScriptTable::parse(&[0; 8]).unwrap();
+    let mut state = state(&[])
+        .with_party(party)
+        .with_player_roles(player_roles)
+        .with_economy_data(stores, objects)
+        .with_magic_data(magics)
+        .with_battle_data(battle_data_for_growth());
+
+    // Scene 106 entry 0x525D sets [Anu, Gai Luojiao, Anu] for the
+    // scripted fight against Elder Shi. Classic preserves both Anu slots.
+    assert!(state.apply_script_action(ScriptAction::SetParty {
+        members: [Some(4), Some(5), Some(4)],
+    }));
+    assert_eq!(
+        state
+            .party
+            .members()
+            .iter()
+            .map(|member| member.role_id)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 4]
+    );
+    assert_eq!(state.party_followers().len(), 2);
+    assert!(state.party_contains_name(0x29));
+
+    let snapshot = state
+        .decode_snapshot(&state.encode_snapshot().unwrap())
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .party
+            .members()
+            .iter()
+            .map(|member| member.role_id)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 4]
+    );
+
+    assert!(state.start_battle(
+        BattleRequest {
+            enemy_team: 0,
+            lost_entry: 0,
+            flee_entry: 0,
+            is_boss: true,
+        },
+        &scripts,
+    ));
+    assert_eq!(
+        state
+            .battle()
+            .unwrap()
+            .players
+            .iter()
+            .map(|player| player.role_id)
+            .collect::<Vec<_>>(),
+        vec![4, 5, 4]
+    );
 }
 
 #[test]

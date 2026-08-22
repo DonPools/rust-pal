@@ -1,9 +1,11 @@
 //! IDE-style egui shell for the read-only scene inspector.
 
 mod content_ui;
+mod save_ui;
 
 use std::fs;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use eframe::egui::{
     self, Color32, ColorImage, FontData, FontDefinitions, FontFamily, Key, Modifiers, RichText,
@@ -32,8 +34,9 @@ use super::navigation::{
 };
 use super::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::renderer::Renderer;
+use save_ui::{SavePage, SaveUiAction};
 
-const DOCK_STATE_KEY: &str = "scene_editor_dock_state_v4";
+const DOCK_STATE_KEY: &str = "scene_editor_dock_state_v5";
 // Render the original 320px-wide dialog layout, then let egui enlarge it with
 // nearest-neighbor filtering. This keeps the PAL bitmap glyphs crisp and makes
 // them comfortably readable on modern high-DPI displays.
@@ -52,12 +55,22 @@ enum EditorTab {
     Scenes,
     Objects,
     Database,
+    Saves,
     Map,
     Preview,
     Script,
     Inspector,
     References,
     Message,
+    Save,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingAction {
+    Save(PathBuf),
+    DiscardAndOpen(PathBuf),
+    DiscardAndReload,
+    DiscardAndClose,
 }
 
 pub(super) struct EguiSceneEditorApp<L> {
@@ -73,6 +86,15 @@ pub(super) struct EguiSceneEditorApp<L> {
     content_filter: String,
     content_kind: ContentKind,
     entry_input: String,
+    save_page: SavePage,
+    save_role: usize,
+    save_add_item: u16,
+    save_add_amount: u16,
+    save_add_magic: u16,
+    save_open_path: String,
+    save_as_path: String,
+    pending_action: Option<PendingAction>,
+    allow_close: bool,
 }
 
 impl<L> EguiSceneEditorApp<L>
@@ -96,6 +118,10 @@ where
             .navigation
             .current()
             .map_or_else(String::new, |location| format!("{:04X}", location.entry));
+        let save_path = model
+            .save_editor
+            .current_path()
+            .map_or_else(String::new, |path| path.display().to_string());
         Self {
             model,
             dock_state,
@@ -109,6 +135,15 @@ where
             content_filter: String::new(),
             content_kind: ContentKind::Item,
             entry_input,
+            save_page: SavePage::Overview,
+            save_role: 0,
+            save_add_item: pal_assets::objects::FIRST_ITEM_OBJECT,
+            save_add_amount: 1,
+            save_add_magic: pal_assets::objects::FIRST_MAGIC_OBJECT,
+            save_open_path: save_path.clone(),
+            save_as_path: save_path,
+            pending_action: None,
+            allow_close: false,
         }
     }
 
@@ -247,13 +282,18 @@ where
                 self.dock_state = default_dock_state();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("READ ONLY").strong().color(TRIGGER));
+                let (label, color) = if self.model.save_editor.is_dirty() {
+                    ("SAVE MODIFIED", TRIGGER)
+                } else {
+                    ("SCENE DATA READ ONLY", ACCENT)
+                };
+                ui.label(RichText::new(label).strong().color(color));
             });
         });
     }
 
     fn handle_shortcuts(&mut self, context: &egui::Context) {
-        if context.wants_keyboard_input() {
+        if self.pending_action.is_some() || context.wants_keyboard_input() {
             return;
         }
         let pressed = |key| context.input_mut(|input| input.consume_key(Modifiers::NONE, key));
@@ -307,6 +347,152 @@ where
             }
         }
     }
+
+    fn handle_save_action(&mut self, action: Option<SaveUiAction>) {
+        let Some(action) = action else {
+            return;
+        };
+        match action {
+            SaveUiAction::Open(path) => {
+                if self.model.save_editor.is_dirty() {
+                    self.pending_action = Some(PendingAction::DiscardAndOpen(path));
+                } else {
+                    self.open_save(path);
+                }
+            }
+            SaveUiAction::Reload => {
+                if self.model.save_editor.is_dirty() {
+                    self.pending_action = Some(PendingAction::DiscardAndReload);
+                } else if let Err(error) = self.model.save_editor.reload() {
+                    self.model.save_editor.status = Some(error);
+                }
+            }
+            SaveUiAction::Save(path) => {
+                if self.model.save_editor.document.is_some() {
+                    self.pending_action = Some(PendingAction::Save(path));
+                }
+            }
+        }
+    }
+
+    fn open_save(&mut self, path: PathBuf) {
+        match self.model.save_editor.open_path(path) {
+            Ok(()) => {
+                let path = self
+                    .model
+                    .save_editor
+                    .current_path()
+                    .map_or_else(String::new, |path| path.display().to_string());
+                self.save_open_path.clone_from(&path);
+                self.save_as_path = path;
+            }
+            Err(error) => self.model.save_editor.status = Some(error),
+        }
+    }
+
+    fn handle_close_request(&mut self, context: &egui::Context) {
+        if !context.input(|input| input.viewport().close_requested()) || self.allow_close {
+            return;
+        }
+        if self.model.save_editor.is_dirty() {
+            context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.pending_action.is_none() {
+                self.pending_action = Some(PendingAction::DiscardAndClose);
+            }
+        }
+    }
+
+    fn confirmation_ui(&mut self, context: &egui::Context) {
+        let Some(action) = self.pending_action.clone() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let title = match &action {
+            PendingAction::Save(_) => "确认写入存档",
+            PendingAction::DiscardAndOpen(_)
+            | PendingAction::DiscardAndReload
+            | PendingAction::DiscardAndClose => "放弃未保存修改",
+        };
+        egui::Window::new(title)
+            .id(egui::Id::new("save-editor-confirmation"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .show(context, |ui| {
+                ui.set_min_width(420.0);
+                match &action {
+                    PendingAction::Save(path) => {
+                        ui.label("目标文件");
+                        ui.monospace(path.display().to_string());
+                        ui.separator();
+                        let changes = self.model.save_editor.changes();
+                        if changes.is_empty() {
+                            ui.label(RichText::new("另存当前存档，不包含字段修改").color(MUTED));
+                        } else {
+                            for change in changes {
+                                ui.label(change.text);
+                            }
+                        }
+                        ui.separator();
+                        ui.label(RichText::new("覆盖现有文件时会先创建同目录备份。"));
+                    }
+                    PendingAction::DiscardAndOpen(path) => {
+                        ui.label("当前存档包含未保存修改。");
+                        ui.label(format!("继续打开 {}？", path.display()));
+                    }
+                    PendingAction::DiscardAndReload => {
+                        ui.label("重新加载会丢弃当前存档的全部未保存修改。");
+                    }
+                    PendingAction::DiscardAndClose => {
+                        ui.label("关闭检查器会丢弃当前存档的全部未保存修改。");
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let confirm_label = match action {
+                        PendingAction::Save(_) => "Save",
+                        _ => "Discard",
+                    };
+                    confirm = ui.button(confirm_label).clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if cancel {
+            self.pending_action = None;
+            return;
+        }
+        if !confirm {
+            return;
+        }
+        self.pending_action = None;
+        match action {
+            PendingAction::Save(path) => match self.model.save_editor.save_to(path) {
+                Ok(_) => {
+                    let path = self
+                        .model
+                        .save_editor
+                        .current_path()
+                        .map_or_else(String::new, |path| path.display().to_string());
+                    self.save_open_path.clone_from(&path);
+                    self.save_as_path = path;
+                }
+                Err(error) => self.model.save_editor.status = Some(error),
+            },
+            PendingAction::DiscardAndOpen(path) => {
+                self.open_save(path);
+            }
+            PendingAction::DiscardAndReload => {
+                if let Err(error) = self.model.save_editor.reload() {
+                    self.model.save_editor.status = Some(error);
+                }
+            }
+            PendingAction::DiscardAndClose => {
+                self.allow_close = true;
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
 }
 
 impl<L> eframe::App for EguiSceneEditorApp<L>
@@ -314,43 +500,68 @@ where
     L: FnMut(u16, &pal_core::role::RoleSprites) -> Option<super::super::LoadedScene> + 'static,
 {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_close_request(context);
         self.handle_shortcuts(context);
         self.refresh_textures(context);
         context.send_viewport_cmd(egui::ViewportCommand::Title(self.model.title()));
 
         egui::TopBottomPanel::top("scene-editor-toolbar")
             .exact_height(38.0)
-            .show(context, |ui| self.toolbar(ui));
+            .show(context, |ui| {
+                ui.add_enabled_ui(self.pending_action.is_none(), |ui| self.toolbar(ui));
+            });
         egui::TopBottomPanel::bottom("scene-editor-status")
             .exact_height(24.0)
             .show(context, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(self.model.status.as_deref().unwrap_or(
-                        "Drag map to pan • wheel to zoom • click flow rows to navigate",
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.monospace(format!(
-                            "VIEW {},{}  ZOOM {}x",
-                            self.model.viewport.x, self.model.viewport.y, self.model.zoom
-                        ));
+                ui.add_enabled_ui(self.pending_action.is_none(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            self.model
+                                .save_editor
+                                .status
+                                .as_deref()
+                                .or(self.model.status.as_deref())
+                                .unwrap_or(
+                                    "Drag map to pan • wheel to zoom • click flow rows to navigate",
+                                ),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.monospace(format!(
+                                "VIEW {},{}  ZOOM {}x",
+                                self.model.viewport.x, self.model.viewport.y, self.model.zoom
+                            ));
+                        });
                     });
                 });
             });
+        let mut save_action = None;
         egui::CentralPanel::default().show(context, |ui| {
-            let mut viewer = EditorTabViewer {
-                model: &mut self.model,
-                map_texture: self.map_texture.as_ref(),
-                message_texture: self.message_texture.as_ref(),
-                content_texture: self.content_texture.as_ref(),
-                scene_filter: &mut self.scene_filter,
-                object_filter: &mut self.object_filter,
-                content_filter: &mut self.content_filter,
-                content_kind: &mut self.content_kind,
-            };
-            DockArea::new(&mut self.dock_state)
-                .style(Style::from_egui(ui.style().as_ref()))
-                .show_inside(ui, &mut viewer);
+            ui.add_enabled_ui(self.pending_action.is_none(), |ui| {
+                let mut viewer = EditorTabViewer {
+                    model: &mut self.model,
+                    map_texture: self.map_texture.as_ref(),
+                    message_texture: self.message_texture.as_ref(),
+                    content_texture: self.content_texture.as_ref(),
+                    scene_filter: &mut self.scene_filter,
+                    object_filter: &mut self.object_filter,
+                    content_filter: &mut self.content_filter,
+                    content_kind: &mut self.content_kind,
+                    save_page: &mut self.save_page,
+                    save_role: &mut self.save_role,
+                    save_add_item: &mut self.save_add_item,
+                    save_add_amount: &mut self.save_add_amount,
+                    save_add_magic: &mut self.save_add_magic,
+                    save_open_path: &mut self.save_open_path,
+                    save_as_path: &mut self.save_as_path,
+                    save_action: &mut save_action,
+                };
+                DockArea::new(&mut self.dock_state)
+                    .style(Style::from_egui(ui.style().as_ref()))
+                    .show_inside(ui, &mut viewer);
+            });
         });
+        self.handle_save_action(save_action);
+        self.confirmation_ui(context);
 
         if self.model.is_dirty() {
             context.request_repaint();
@@ -371,6 +582,14 @@ struct EditorTabViewer<'a, L> {
     object_filter: &'a mut String,
     content_filter: &'a mut String,
     content_kind: &'a mut ContentKind,
+    save_page: &'a mut SavePage,
+    save_role: &'a mut usize,
+    save_add_item: &'a mut u16,
+    save_add_amount: &'a mut u16,
+    save_add_magic: &'a mut u16,
+    save_open_path: &'a mut String,
+    save_as_path: &'a mut String,
+    save_action: &'a mut Option<SaveUiAction>,
 }
 
 impl<L> TabViewer for EditorTabViewer<'_, L>
@@ -384,12 +603,14 @@ where
             EditorTab::Scenes => "Scenes",
             EditorTab::Objects => "Objects",
             EditorTab::Database => "Database",
+            EditorTab::Saves => "Saves",
             EditorTab::Map => "Map",
             EditorTab::Preview => "Preview",
             EditorTab::Script => "Script",
             EditorTab::Inspector => "Inspector",
             EditorTab::References => "References",
             EditorTab::Message => "Message",
+            EditorTab::Save => "Save",
         }
         .into()
     }
@@ -399,12 +620,14 @@ where
             EditorTab::Scenes => self.scenes_ui(ui),
             EditorTab::Objects => self.objects_ui(ui),
             EditorTab::Database => self.database_ui(ui),
+            EditorTab::Saves => self.saves_ui(ui),
             EditorTab::Map => self.map_ui(ui),
             EditorTab::Preview => self.content_preview_ui(ui),
             EditorTab::Script => self.script_ui(ui),
             EditorTab::Inspector => self.inspector_ui(ui),
             EditorTab::References => self.references_ui(ui),
             EditorTab::Message => self.message_ui(ui),
+            EditorTab::Save => self.save_ui(ui),
         }
     }
 
@@ -1176,11 +1399,16 @@ fn install_chinese_font(context: &egui::Context) {
 }
 
 fn default_dock_state() -> DockState<EditorTab> {
-    let mut state = DockState::new(vec![EditorTab::Map, EditorTab::Preview]);
+    let mut state = DockState::new(vec![EditorTab::Map, EditorTab::Preview, EditorTab::Save]);
     let [map_node, _left_node] = state.main_surface_mut().split_left(
         NodeIndex::root(),
         0.25,
-        vec![EditorTab::Scenes, EditorTab::Objects, EditorTab::Database],
+        vec![
+            EditorTab::Scenes,
+            EditorTab::Objects,
+            EditorTab::Database,
+            EditorTab::Saves,
+        ],
     );
     let [map_node, _right_node] = state.main_surface_mut().split_right(
         map_node,

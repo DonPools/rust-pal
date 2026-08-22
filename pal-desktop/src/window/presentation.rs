@@ -283,6 +283,7 @@ fn render_dialog_or_menu(renderer: &mut Renderer, game: &GameState, ui: &UiRende
                 game,
                 ui.text,
                 ui.font,
+                ui.item_descriptions,
                 ui.dialog_faces,
                 ui.ui_sprites,
                 ui.item_sprites,

@@ -249,8 +249,8 @@ cargo build
 cargo run -p pal-launcher
 ```
 
-只读场景检查器使用独立启动模式，不创建正常游戏的开场、脚本调度、战斗、菜单、音频或
-存档会话：
+场景检查器使用独立启动模式，不创建正常游戏的开场、脚本调度、战斗、菜单、音频或
+运行期存档会话：
 
 ```shell
 cargo run -p pal-launcher -- --scene-editor
@@ -258,7 +258,14 @@ cargo run -p pal-launcher -- --scene-editor --scene=3
 ```
 
 检查器使用可拖拽、缩放、分栏和停靠的 IDE 式布局，默认提供 `Scenes`、`Objects`、
-`Database`、`Map`、`Preview`、`Script`、`Inspector`、`References` 和 `Message` 面板。
+`Database`、`Saves`、`Map`、`Preview`、`Script`、`Inspector`、`References`、`Message`
+和 `Save` 面板。
+`Saves` 会按游戏相同的优先级扫描 `data/1.RPG` 至 `data/5.RPG` 及 `data/SAVES/`，默认打开
+保存次数最新的有效槽，也可输入任意原版 DOS/Win95 `.rpg` 路径。`Save` 可修改金钱、背包、
+角色等级和经验、HP/MP、基础战斗属性、抗性及已学仙术；队伍编成、装备、位置、场景与剧情状态
+只读，高级页可查看运行头、场景、全局对象和事件对象的十进制/十六进制原始记录。覆盖保存前会
+显示字段变更摘要，写入同目录临时文件并重新解析，自动保留递增后缀的 `.bak` 备份；关闭、重载
+或切换存档时若有未保存修改会要求确认。场景、资源、对象和脚本面板始终只读。
 `Database` 以简体中文浏览物品、仙术和敌人，同时保留繁体原文，并使用系统中文字体显示；
 选择记录后可查看物品图标、法术效果或敌人 sprite、类型化字段、原始联合字段、说明、脚本入口，
 以及商店、角色、升级、敌队、敌人装备和脚本操作数等反向引用。内容之间及其脚本入口可以互相

@@ -223,8 +223,8 @@ impl ScriptRuntime {
                     execution,
                     ScriptEvent::Visual(ScriptVisual::FadeColor {
                         color: entry.operands[0] as u8,
-                        from_color: entry.operands[1] != 0,
-                        delay: entry.operands[2],
+                        from_color: entry.operands[2] != 0,
+                        delay: entry.operands[1],
                     }),
                 );
             }

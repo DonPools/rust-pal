@@ -79,7 +79,7 @@ pub struct SaveInventoryEntry {
 }
 
 /// Fully parsed original save data. The layout identifies the source edition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginalSave {
     pub layout: ObjectLayout,
     pub saved_times: u16,
@@ -100,6 +100,8 @@ pub struct OriginalSave {
     pub chase_range: u16,
     pub chase_speed_change_cycles: u16,
     pub follower_count: u16,
+    /// Three unknown header words retained verbatim across edits.
+    pub reserved: [u16; 3],
     pub cash: u32,
     pub party: [SavePartyMember; SAVE_PARTY_CAPACITY],
     pub trail: [SaveTrail; SAVE_PARTY_CAPACITY],
@@ -135,7 +137,7 @@ impl OriginalSave {
         let chase_range = cursor.u16()?;
         let chase_speed_change_cycles = cursor.u16()?;
         let follower_count = cursor.u16()?;
-        cursor.take(6)?; // three reserved words
+        let reserved = parse_array(&mut cursor, |cursor| cursor.u16())?;
         let cash = cursor.u32()?;
 
         if usize::from(party_member_index) >= SAVE_PARTY_CAPACITY
@@ -237,6 +239,7 @@ impl OriginalSave {
             chase_range,
             chase_speed_change_cycles,
             follower_count,
+            reserved,
             cash,
             party,
             trail,
@@ -291,7 +294,9 @@ impl OriginalSave {
         push_u16(&mut data, self.chase_range);
         push_u16(&mut data, self.chase_speed_change_cycles);
         push_u16(&mut data, self.follower_count);
-        data.extend_from_slice(&[0; 6]);
+        for value in self.reserved {
+            push_u16(&mut data, value);
+        }
         data.extend_from_slice(&self.cash.to_le_bytes());
 
         for member in self.party {
@@ -500,6 +505,9 @@ mod tests {
         write_u16(&mut data, 16, 5);
         write_u16(&mut data, 18, 9);
         write_u16(&mut data, 32, 1);
+        write_u16(&mut data, 34, 0x1111);
+        write_u16(&mut data, 36, 0x2222);
+        write_u16(&mut data, 38, 0x3333);
         data[40..44].copy_from_slice(&123_456u32.to_le_bytes());
 
         write_u16(&mut data, HEADER_SIZE, 2);
@@ -530,6 +538,7 @@ mod tests {
         assert_eq!(save.scene_number, 7);
         assert!(save.night_palette);
         assert_eq!(save.music_number, 31);
+        assert_eq!(save.reserved, [0x1111, 0x2222, 0x3333]);
         assert_eq!(save.cash, 123_456);
         assert_eq!(save.party[0].role_id, 2);
         assert_eq!(save.party[1].role_id, 4);
@@ -560,6 +569,7 @@ mod tests {
             assert_eq!(reparsed.saved_times, 12);
             assert_eq!((reparsed.viewport_x, reparsed.viewport_y), (-24, 48));
             assert_eq!(reparsed.party_member_count(), 2);
+            assert_eq!(reparsed.reserved, [0x1111, 0x2222, 0x3333]);
             assert_eq!(reparsed.objects.get(0).unwrap().data[0], 10);
             assert_eq!(reparsed.objects.get(0).unwrap().data[6], 0x55aa);
             assert_eq!(reparsed.event_objects, original.event_objects);

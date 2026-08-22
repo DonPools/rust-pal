@@ -1,4 +1,4 @@
-//! Read-only scene-editor state and interaction logic.
+//! Scene-inspector state and interaction logic.
 
 use pal_assets::battle::{BattleData, BattleSpriteArchive};
 use pal_assets::magic::Magics;
@@ -19,6 +19,7 @@ use super::super::{LoadedScene, SceneEditorResources, Viewport};
 use super::content::{ContentCatalog, ContentReferenceCatalog, ContentSelection};
 use super::hit_test::{hit_test_object_marker, hit_test_visible_sprite};
 use super::navigation::{format_object_id, navigable_target, ScriptNavigation};
+use super::save::SaveEditor;
 use super::{
     canvas_view_size, clamped_viewport, scale_canvas, CANVAS_HEIGHT, CANVAS_WIDTH, MAX_ZOOM,
 };
@@ -50,6 +51,7 @@ pub(super) struct SceneEditorApp<L> {
     pub(super) content_catalog: ContentCatalog,
     pub(super) content_references: ContentReferenceCatalog,
     pub(super) script_references: ScriptReferenceCatalog,
+    pub(super) save_editor: SaveEditor,
     pub(super) scene_count: u16,
     load_scene: L,
     pub(super) viewport: Viewport,
@@ -80,6 +82,7 @@ where
             &resources.player_roles,
             &resources.stores,
         );
+        let save_editor = SaveEditor::new(resources.data_dir);
         let mut app = Self {
             renderer,
             scene,
@@ -98,6 +101,7 @@ where
             content_catalog,
             content_references,
             script_references: resources.script_references,
+            save_editor,
             scene_count: resources.scene_count,
             load_scene,
             viewport: Viewport::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT),
@@ -114,8 +118,22 @@ where
     }
 
     pub(super) fn title(&self) -> String {
+        let save = self.save_editor.current_path().map_or_else(
+            || "no save".to_owned(),
+            |path| {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into(),
+                );
+                if self.save_editor.is_dirty() {
+                    format!("{name} *")
+                } else {
+                    name
+                }
+            },
+        );
         format!(
-            "Rust-PAL Scene Inspector - scene {}/{}",
+            "Rust-PAL Inspector - scene {}/{} - {save}",
             self.scene.number, self.scene_count
         )
     }

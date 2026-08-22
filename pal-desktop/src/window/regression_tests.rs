@@ -248,7 +248,7 @@ fn inventory_menu_uses_original_three_column_navigation_and_scrolling() {
 }
 
 #[test]
-fn main_and_target_menus_wrap_at_both_ends() {
+fn wrapping_menus_wrap_at_both_ends() {
     let mut selected = 0;
     update_wrapping_selection(&mut selected, Some(Direction::North), 4);
     assert_eq!(selected, 3);
@@ -260,7 +260,7 @@ fn main_and_target_menus_wrap_at_both_ends() {
     assert_eq!(selected, 0);
 
     let mut shop = ShopMenu {
-        mode: ShopMode::Sell,
+        mode: ShopMode::Buy { store_number: 0 },
         selected: 0,
         confirming: false,
         selected_yes: false,
@@ -269,4 +269,30 @@ fn main_and_target_menus_wrap_at_both_ends() {
     assert_eq!(shop.selected, 2);
     shop.update_selection(Some(Direction::South), 3);
     assert_eq!(shop.selected, 0);
+}
+
+#[test]
+fn sell_menu_uses_inventory_grid_navigation_and_scrolling() {
+    let mut shop = ShopMenu {
+        mode: ShopMode::Sell,
+        selected: 20,
+        confirming: false,
+        selected_yes: false,
+    };
+
+    shop.update_selection(Some(Direction::South), 30);
+    assert_eq!(shop.selected, 23);
+    assert_eq!(shop.first_visible(30), 9);
+
+    shop.update_selection(Some(Direction::East), 30);
+    assert_eq!(shop.selected, 24);
+    shop.selected = 29;
+    shop.update_selection(Some(Direction::South), 30);
+    assert_eq!(shop.selected, 29);
+    shop.update_selection(Some(Direction::East), 30);
+    assert_eq!(shop.selected, 29);
+
+    shop.update_selection(None, 0);
+    assert_eq!(shop.selected, 0);
+    assert_eq!(shop.first_visible(0), 0);
 }

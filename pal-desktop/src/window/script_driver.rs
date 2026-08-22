@@ -100,9 +100,12 @@ where
     }
 
     let mut flow = match event {
-        Some(ScriptEvent::Action(_) | ScriptEvent::Condition(_) | ScriptEvent::Teleport { .. }) => {
-            ScriptAdvanceFlow::ContinueImmediately
-        }
+        Some(
+            ScriptEvent::Action(_)
+            | ScriptEvent::Condition(_)
+            | ScriptEvent::Teleport { .. }
+            | ScriptEvent::Visual(ScriptVisual::Shake { .. }),
+        ) => ScriptAdvanceFlow::ContinueImmediately,
         _ => ScriptAdvanceFlow::StopForFrame,
     };
 
@@ -514,6 +517,11 @@ where
             game.apply_script_action(action);
             if (x != 0 || y != 0) && frames != -1 {
                 update_trigger_world(scripts, game, resources, load_scene, services, set_title);
+                // Classic redraws every viewport-movement frame through
+                // PAL_MakeScene, which also consumes a pending scene fade-in.
+                // The trigger remains active across these frames, so the
+                // app-level idle check cannot start this fade for us.
+                let _ = services.visual.queue_automatic_scene_fade_in();
                 scripts.delay_next_advance();
                 flow = ScriptAdvanceFlow::StopForFrame;
             }
@@ -1657,6 +1665,52 @@ mod tests {
     }
 
     #[test]
+    fn shake_allows_following_rng_to_queue_in_the_same_host_frame() {
+        let table = script_table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::ShakeScreen.raw(), 999, 4, 0],
+            [ScriptOpcode::SelectRngAnimation.raw(), 5, 0, 0],
+            [ScriptOpcode::PlayRngAnimation.raw(), 0, 0, 7],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]);
+        let mut scripts = ScriptRuntime::new(table.clone());
+        assert!(scripts.start(TriggerRequest {
+            object_id: u16::MAX,
+            script_entry: 1,
+            kind: TriggerKind::Touch,
+        }));
+        let mut game = game_with_objects(0);
+        let sprites = role_sprites();
+        let text = text_library(&[b"x"]);
+        let mut services = desktop_session(table);
+        let mut dialog = None;
+        let mut load_scene = |_, _, _: &RoleSprites| None;
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        );
+
+        assert!(services.visual.is_blocking());
+        assert_eq!(
+            scripts.debug_snapshot().last_instruction.unwrap().opcode,
+            ScriptOpcode::PlayRngAnimation.raw()
+        );
+        assert_eq!(
+            scripts.debug_snapshot().next_instruction.unwrap().opcode,
+            ScriptOpcode::Stop.raw()
+        );
+    }
+
+    #[test]
     fn explicit_redraw_still_stops_before_a_following_fade() {
         let table = script_table(&[
             [ScriptOpcode::Stop.raw(), 0, 0, 0],
@@ -1730,6 +1784,47 @@ mod tests {
             scripts.debug_snapshot().last_instruction.unwrap().opcode,
             ScriptOpcode::FadeOut.raw()
         );
+    }
+
+    #[test]
+    fn pending_scene_fade_starts_on_first_viewport_movement_frame() {
+        let table = script_table(&[
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+            [ScriptOpcode::MoveViewport.raw(), 0, 4, 40],
+            [ScriptOpcode::Stop.raw(), 0, 0, 0],
+        ]);
+        let mut scripts = ScriptRuntime::new(table.clone());
+        assert!(scripts.start(TriggerRequest {
+            object_id: u16::MAX,
+            script_entry: 1,
+            kind: TriggerKind::Touch,
+        }));
+        let mut game = game_with_objects(0);
+        let camera_y = game.camera.y;
+        let sprites = role_sprites();
+        let text = text_library(&[b"x"]);
+        let mut services = desktop_session(table);
+        services.visual.prepare_scene_fade_in();
+        assert!(!services.visual.is_blocking());
+        let mut dialog = None;
+        let mut load_scene = |_, _, _: &RoleSprites| None;
+
+        advance_script(
+            &mut scripts,
+            &mut game,
+            &mut dialog,
+            ScriptRenderResources {
+                text: &text,
+                role_sprites: &sprites,
+            },
+            &mut load_scene,
+            &mut services,
+            &mut ignore_title,
+        );
+
+        assert_eq!(game.camera.y, camera_y + 4);
+        assert!(scripts.is_active());
+        assert!(services.visual.is_blocking());
     }
 
     #[test]

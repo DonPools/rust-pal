@@ -5,6 +5,8 @@ use super::original_save::OriginalSaveSlot;
 
 pub(super) const INVENTORY_COLUMNS: usize = 3;
 pub(super) const INVENTORY_VISIBLE_ROWS: usize = 7;
+pub(super) const MAGIC_COLUMNS: usize = 3;
+pub(super) const MAGIC_VISIBLE_ROWS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OpeningMenuPage {
@@ -200,32 +202,88 @@ impl ShopMenu {
     }
 
     pub(super) fn update_selection(&mut self, direction: Option<Direction>, item_count: usize) {
-        update_wrapping_selection(&mut self.selected, direction, item_count);
+        match self.mode {
+            ShopMode::Buy { .. } => {
+                update_wrapping_selection(&mut self.selected, direction, item_count)
+            }
+            ShopMode::Sell => update_inventory_selection(&mut self.selected, direction, item_count),
+        }
+    }
+
+    pub(super) fn first_visible(self, item_count: usize) -> usize {
+        first_visible_inventory_item(self.selected, item_count)
     }
 }
 
 impl InventoryMenu {
     pub(super) fn update(&mut self, direction: Option<Direction>, item_count: usize) {
-        if item_count == 0 {
-            self.selected = 0;
-            return;
-        }
-        match direction {
-            Some(Direction::North) => {
-                self.selected = self.selected.saturating_sub(INVENTORY_COLUMNS)
-            }
-            Some(Direction::South) => {
-                self.selected = (self.selected + INVENTORY_COLUMNS).min(item_count - 1)
-            }
-            Some(Direction::West) => self.selected = self.selected.saturating_sub(1),
-            Some(Direction::East) => self.selected = (self.selected + 1).min(item_count - 1),
-            _ => {}
-        }
+        update_inventory_selection(&mut self.selected, direction, item_count);
     }
 
     pub(super) fn first_visible(self, item_count: usize) -> usize {
-        let selected_row = self.selected.min(item_count.saturating_sub(1)) / INVENTORY_COLUMNS;
-        selected_row.saturating_sub(INVENTORY_VISIBLE_ROWS.div_ceil(2)) * INVENTORY_COLUMNS
+        first_visible_inventory_item(self.selected, item_count)
+    }
+}
+
+fn update_inventory_selection(
+    selected: &mut usize,
+    direction: Option<Direction>,
+    item_count: usize,
+) {
+    if item_count == 0 {
+        *selected = 0;
+        return;
+    }
+    match direction {
+        Some(Direction::North) => *selected = selected.saturating_sub(INVENTORY_COLUMNS),
+        Some(Direction::South) => *selected = (*selected + INVENTORY_COLUMNS).min(item_count - 1),
+        Some(Direction::West) => *selected = selected.saturating_sub(1),
+        Some(Direction::East) => *selected = (*selected + 1).min(item_count - 1),
+        None => {}
+    }
+}
+
+fn first_visible_inventory_item(selected: usize, item_count: usize) -> usize {
+    let selected_row = selected.min(item_count.saturating_sub(1)) / INVENTORY_COLUMNS;
+    selected_row.saturating_sub(INVENTORY_VISIBLE_ROWS.div_ceil(2)) * INVENTORY_COLUMNS
+}
+
+pub(super) fn update_magic_selection(
+    selected: &mut usize,
+    direction: Option<Direction>,
+    magic_count: usize,
+) {
+    if magic_count == 0 {
+        *selected = 0;
+        return;
+    }
+    match direction {
+        Some(Direction::North) => *selected = selected.saturating_sub(MAGIC_COLUMNS),
+        Some(Direction::South) => *selected = (*selected + MAGIC_COLUMNS).min(magic_count - 1),
+        Some(Direction::West) => *selected = selected.saturating_sub(1),
+        Some(Direction::East) => *selected = (*selected + 1).min(magic_count - 1),
+        None => {}
+    }
+}
+
+pub(super) fn first_visible_magic(selected: usize, magic_count: usize) -> usize {
+    let selected_row = selected.min(magic_count.saturating_sub(1)) / MAGIC_COLUMNS;
+    selected_row.saturating_sub(MAGIC_VISIBLE_ROWS / 2) * MAGIC_COLUMNS
+}
+
+pub(super) fn update_clamped_selection(
+    selected: &mut usize,
+    direction: Option<Direction>,
+    count: usize,
+) {
+    if count == 0 {
+        *selected = 0;
+        return;
+    }
+    match direction {
+        Some(Direction::North | Direction::West) => *selected = selected.saturating_sub(1),
+        Some(Direction::South | Direction::East) => *selected = (*selected + 1).min(count - 1),
+        None => {}
     }
 }
 
@@ -300,5 +358,44 @@ mod tests {
             menu.update(input(None, false, true)),
             OpeningMenuAction::StartNewGame
         );
+    }
+
+    #[test]
+    fn magic_grid_uses_original_directions_clamping_and_scrolling() {
+        let mut selected = 0;
+        update_magic_selection(&mut selected, Some(Direction::North), 20);
+        assert_eq!(selected, 0);
+        update_magic_selection(&mut selected, Some(Direction::South), 20);
+        assert_eq!(selected, 3);
+        update_magic_selection(&mut selected, Some(Direction::East), 20);
+        assert_eq!(selected, 4);
+        update_magic_selection(&mut selected, Some(Direction::West), 20);
+        assert_eq!(selected, 3);
+
+        selected = 18;
+        update_magic_selection(&mut selected, Some(Direction::South), 20);
+        assert_eq!(selected, 19);
+        update_magic_selection(&mut selected, Some(Direction::East), 20);
+        assert_eq!(selected, 19);
+
+        assert_eq!(first_visible_magic(0, 20), 0);
+        assert_eq!(first_visible_magic(8, 20), 0);
+        assert_eq!(first_visible_magic(9, 20), 3);
+        assert_eq!(first_visible_magic(19, 20), 12);
+    }
+
+    #[test]
+    fn field_targets_clamp_instead_of_wrapping() {
+        let mut selected = 0;
+        update_clamped_selection(&mut selected, Some(Direction::North), 3);
+        assert_eq!(selected, 0);
+        update_clamped_selection(&mut selected, Some(Direction::West), 3);
+        assert_eq!(selected, 0);
+        update_clamped_selection(&mut selected, Some(Direction::East), 3);
+        assert_eq!(selected, 1);
+        update_clamped_selection(&mut selected, Some(Direction::South), 3);
+        assert_eq!(selected, 2);
+        update_clamped_selection(&mut selected, Some(Direction::South), 3);
+        assert_eq!(selected, 2);
     }
 }

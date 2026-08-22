@@ -121,11 +121,11 @@ impl VisualState {
     }
 
     pub(super) fn queue(&mut self, command: ScriptVisual) -> bool {
-        if self.pending.is_some()
-            || self.battle_transition_pending
-            || self.effect.is_some()
-            || self.shake_remaining != 0
-        {
+        if let ScriptVisual::Shake { frames, level } = command {
+            self.set_shake(frames, level);
+            return true;
+        }
+        if self.pending.is_some() || self.battle_transition_pending || self.effect.is_some() {
             return false;
         }
         self.pending = Some(command);
@@ -133,10 +133,7 @@ impl VisualState {
     }
 
     pub(super) fn is_blocking(&self) -> bool {
-        self.pending.is_some()
-            || self.battle_transition_pending
-            || self.effect.is_some()
-            || self.shake_remaining != 0
+        self.pending.is_some() || self.battle_transition_pending || self.effect.is_some()
     }
 
     pub(super) fn queue_battle_transition(&mut self) -> bool {
@@ -154,7 +151,7 @@ impl VisualState {
     }
 
     pub(super) fn needs_update(&self) -> bool {
-        self.is_blocking() || self.screen_wave != 0
+        self.is_blocking() || self.shake_remaining != 0 || self.screen_wave != 0
     }
 
     pub(super) fn scene_update_due(&self) -> bool {
@@ -308,10 +305,7 @@ impl VisualState {
             self.fade_screen_frozen = false;
         }
         match command {
-            ScriptVisual::Shake { frames, level } => {
-                self.shake_remaining = frames;
-                self.shake_level = level;
-            }
+            ScriptVisual::Shake { frames, level } => self.set_shake(frames, level),
             ScriptVisual::PlayRng {
                 animation,
                 start_frame,
@@ -514,6 +508,13 @@ impl VisualState {
             ScriptVisual::BackupScreen => self.backup_screen = Some(current_screen.to_vec()),
         }
         Ok(())
+    }
+
+    fn set_shake(&mut self, frames: u16, level: u16) {
+        // Classic only sets VIDEO_ShakeScreen's presentation counter here.
+        // Later screen updates consume it while RNG/fades continue in parallel.
+        self.shake_remaining = frames;
+        self.shake_level = level;
     }
 
     fn start_fbp(
@@ -1383,6 +1384,42 @@ mod tests {
         }
         assert!(saw_second_frame);
         assert_eq!(&visual.indexed_screen.as_ref().unwrap()[..2], &[1, 1]);
+    }
+
+    #[test]
+    fn scene_shake_overlaps_rng_and_does_not_delay_pending_fade_in() {
+        let (palettes, fbp, rng, role_sprites) = resources();
+        let current = vec![252; RNG_FRAME_PIXELS * 4];
+        let mut visual = VisualState::new();
+        visual.prepare_scene_fade_in();
+
+        assert!(visual.queue(ScriptVisual::Shake {
+            frames: 999,
+            level: 4,
+        }));
+        assert_eq!(visual.shake_remaining, 999);
+        assert!(!visual.is_blocking());
+        assert!(visual.needs_update());
+
+        assert!(visual.queue(ScriptVisual::PlayRng {
+            animation: 0,
+            start_frame: 0,
+            end_frame: None,
+            speed: 7,
+        }));
+        assert!(visual
+            .start_pending(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap());
+        assert!(visual.is_blocking());
+        assert_eq!(visual.shake_remaining, 999);
+        assert!(!visual.needs_scene_fade_in);
+
+        visual
+            .update(&current, &palettes, &fbp, &rng, &role_sprites)
+            .unwrap();
+        assert_eq!(visual.shake_remaining, 998);
+        assert!(visual.brightness > 0);
+        assert_eq!(&visual.indexed_screen.as_ref().unwrap()[..2], &[2, 2]);
     }
 
     #[test]

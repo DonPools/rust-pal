@@ -10,8 +10,9 @@ use pal_core::game::GameState;
 
 use super::draw::{draw_number, fill_rect, stroke_rect};
 use super::menu_state::{
-    ConfirmationMenu, FieldMenu, InventoryMenu, InventoryMode, OpeningMenu, OpeningMenuPage,
-    ShopMenu, ShopMode, INVENTORY_COLUMNS, INVENTORY_VISIBLE_ROWS,
+    first_visible_magic, ConfirmationMenu, FieldMenu, InventoryMenu, InventoryMode, OpeningMenu,
+    OpeningMenuPage, ShopMenu, ShopMode, INVENTORY_COLUMNS, INVENTORY_VISIBLE_ROWS, MAGIC_COLUMNS,
+    MAGIC_VISIBLE_ROWS,
 };
 use super::original_save::OriginalSaveSlot;
 use super::text_render::{draw_dialog_ascii, DialogTextMode};
@@ -24,6 +25,12 @@ const ITEM_DESCRIPTION_X: i32 = 72;
 const ITEM_DESCRIPTION_GLYPH_HEIGHT: i32 = 15;
 const ITEM_DESCRIPTION_LINE_HEIGHT: i32 = 18;
 const EQUIP_ROLE_WORD_RANGE: std::ops::Range<usize> = 36..40;
+const FIELD_MAIN_LABELS: [usize; 4] = [3, 4, 5, 6];
+const INVENTORY_ACTION_LABELS: [usize; 2] = [22, 23];
+const MAGIC_COLUMN_WIDTH: i32 = 87;
+const MAGIC_DESCRIPTION_X: i32 = 102;
+const MAGIC_DESCRIPTION_Y: i32 = 3;
+const MAGIC_DESCRIPTION_LINE_HEIGHT: i32 = 16;
 
 fn pal_word_width(word: &[u8]) -> usize {
     let mut pixel_width = 0usize;
@@ -45,6 +52,16 @@ fn pal_word_width(word: &[u8]) -> usize {
 fn equip_role_list_columns(text: &TextLibrary) -> usize {
     EQUIP_ROLE_WORD_RANGE
         .filter_map(|word_id| text.word(word_id))
+        .map(pal_word_width)
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1)
+}
+
+fn menu_text_columns(text: &TextLibrary, labels: &[usize]) -> usize {
+    labels
+        .iter()
+        .filter_map(|&word_id| text.word(word_id))
         .map(pal_word_width)
         .max()
         .unwrap_or(1)
@@ -483,6 +500,7 @@ pub(super) fn render_field_menu(
     game: &GameState,
     text: &TextLibrary,
     font: &BitmapFont,
+    item_descriptions: &ItemDescriptions,
     faces: &[Option<RleBitmap>],
     sprites: &[RleBitmap],
     item_sprites: &[Option<RleBitmap>],
@@ -491,31 +509,25 @@ pub(super) fn render_field_menu(
     ui_ticks: u64,
 ) {
     match menu {
-        FieldMenu::Main { selected } => {
-            const LABELS: [usize; 4] = [3, 4, 5, 6];
-            draw_ui_box(renderer, sprites, 3, 37, 3, 3, 0);
-            for (index, word_id) in LABELS.into_iter().enumerate() {
-                let Some(label) = text.word(word_id) else {
-                    continue;
-                };
-                let color = if index == selected {
-                    selected_color(ui_ticks)
-                } else {
-                    0x4f
-                };
-                renderer.draw_big5_text_shadowed(font, label, 16, 50 + index as i32 * 18, color);
-            }
-
-            draw_single_line_box(renderer, sprites, 0, 0, 5);
-            if let Some(label) = text.word(21) {
-                renderer.draw_big5_text(font, label, 12, 11, 0);
-            }
-            draw_ui_number(renderer, sprites, game.cash, 6, 49, 14, NumberColor::Yellow);
-        }
+        FieldMenu::Main { selected } => render_field_main_menu(
+            renderer, game, text, font, sprites, selected, false, ui_ticks,
+        ),
         FieldMenu::InventoryAction { selected } => {
-            const LABELS: [usize; 2] = [22, 23];
-            draw_ui_box(renderer, sprites, 30, 60, 1, 3, 0);
-            for (index, word_id) in LABELS.into_iter().enumerate() {
+            // Classic keeps the cash and main-menu boxes on screen while this
+            // child menu is active. The inventory entry has already been
+            // confirmed, so it uses the fixed confirmed color rather than the
+            // animated selection palette.
+            render_field_main_menu(renderer, game, text, font, sprites, 2, true, ui_ticks);
+            draw_ui_box(
+                renderer,
+                sprites,
+                30,
+                60,
+                1,
+                menu_text_columns(text, &INVENTORY_ACTION_LABELS),
+                0,
+            );
+            for (index, word_id) in INVENTORY_ACTION_LABELS.into_iter().enumerate() {
                 let Some(label) = text.word(word_id) else {
                     continue;
                 };
@@ -539,32 +551,48 @@ pub(super) fn render_field_menu(
             selected,
             None,
         ),
-        FieldMenu::MagicCaster { selected } => render_role_selection(
-            renderer, game, text, font, sprites, selected, "Magic", ui_ticks,
-        ),
+        FieldMenu::MagicCaster { selected } => {
+            render_field_main_menu(renderer, game, text, font, sprites, 1, true, ui_ticks);
+            render_role_selection(renderer, game, text, font, sprites, selected, ui_ticks);
+        }
         FieldMenu::MagicList { caster, selected } => render_magic_list(
-            renderer, game, text, font, sprites, caster, selected, ui_ticks,
+            renderer,
+            game,
+            text,
+            font,
+            item_descriptions,
+            sprites,
+            caster,
+            selected,
+            false,
+            ui_ticks,
         ),
         FieldMenu::MagicTarget {
             caster,
             magic_id,
             selected,
         } => {
+            let magic_index = game
+                .party
+                .members()
+                .get(caster)
+                .map(|member| game.field_magics(member.role_id))
+                .and_then(|magics| magics.iter().position(|magic| magic.magic_id == magic_id))
+                .unwrap_or(0);
             render_magic_list(
                 renderer,
                 game,
                 text,
                 font,
+                item_descriptions,
                 sprites,
                 caster,
-                usize::MAX,
+                magic_index,
+                true,
                 ui_ticks,
             );
             if let Some(cursor) = sprites.get(67) {
                 renderer.blit_rle(cursor, 75 + selected as i32 * 78, 158);
-            }
-            if let Some(name) = text.word(usize::from(magic_id)) {
-                renderer.draw_big5_text_shadowed(font, name, 12, 176, 0xf9);
             }
         }
         FieldMenu::System { selected } => {
@@ -612,6 +640,48 @@ pub(super) fn render_field_menu(
     }
 }
 
+fn render_field_main_menu(
+    renderer: &mut Renderer,
+    game: &GameState,
+    text: &TextLibrary,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    selected: usize,
+    confirmed: bool,
+    ui_ticks: u64,
+) {
+    draw_single_line_box(renderer, sprites, 0, 0, 5);
+    if let Some(label) = text.word(21) {
+        renderer.draw_big5_text(font, label, 10, 10, 0);
+    }
+    draw_ui_number(renderer, sprites, game.cash, 6, 49, 14, NumberColor::Yellow);
+
+    draw_ui_box(
+        renderer,
+        sprites,
+        3,
+        37,
+        3,
+        menu_text_columns(text, &FIELD_MAIN_LABELS),
+        0,
+    );
+    for (index, word_id) in FIELD_MAIN_LABELS.into_iter().enumerate() {
+        let Some(label) = text.word(word_id) else {
+            continue;
+        };
+        let color = if index == selected {
+            if confirmed {
+                0x2c
+            } else {
+                selected_color(ui_ticks)
+            }
+        } else {
+            0x4f
+        };
+        renderer.draw_big5_text_shadowed(font, label, 16, 50 + index as i32 * 18, color);
+    }
+}
+
 fn render_system_menu(
     renderer: &mut Renderer,
     text: &TextLibrary,
@@ -641,17 +711,23 @@ pub(super) fn render_role_selection(
     font: &BitmapFont,
     sprites: &[RleBitmap],
     selected: usize,
-    _title: &str,
     ui_ticks: u64,
 ) {
     draw_player_info_boxes(renderer, game, sprites);
+    let role_name_words = game
+        .party
+        .members()
+        .iter()
+        .filter_map(|member| game.player_role(member.role_id))
+        .map(|role| usize::from(role.name_word_id))
+        .collect::<Vec<_>>();
     draw_ui_box(
         renderer,
         sprites,
         35,
         62,
         game.party.members().len().saturating_sub(1),
-        6,
+        menu_text_columns(text, &role_name_words),
         0,
     );
     for (index, member) in game.party.members().iter().enumerate() {
@@ -675,65 +751,126 @@ pub(super) fn render_magic_list(
     game: &GameState,
     text: &TextLibrary,
     font: &BitmapFont,
+    item_descriptions: &ItemDescriptions,
     sprites: &[RleBitmap],
     caster: usize,
     selected: usize,
+    confirmed: bool,
     ui_ticks: u64,
 ) {
     let Some(member) = game.party.members().get(caster) else {
         return;
     };
     let magics = game.field_magics(member.role_id);
+    let selected = selected.min(magics.len().saturating_sub(1));
+    let selected_magic = magics.get(selected);
     draw_player_info_boxes(renderer, game, sprites);
     draw_ui_box_with_shadow(renderer, sprites, 10, 42, 4, 16, 1, 0);
-    draw_single_line_box(renderer, sprites, 0, 0, 5);
-    if let Some(label) = text.word(21) {
-        renderer.draw_big5_text(font, label, 10, 10, 0);
-    }
-    draw_ui_number(renderer, sprites, game.cash, 6, 49, 14, NumberColor::Yellow);
+    if item_descriptions.is_empty() {
+        draw_single_line_box(renderer, sprites, 0, 0, 5);
+        if let Some(label) = text.word(21) {
+            renderer.draw_big5_text(font, label, 10, 10, 0);
+        }
+        draw_ui_number(renderer, sprites, game.cash, 6, 49, 14, NumberColor::Yellow);
 
-    draw_single_line_box(renderer, sprites, 215, 0, 5);
-    if let Some(magic) = magics.get(selected.min(magics.len().saturating_sub(1))) {
+        draw_single_line_box(renderer, sprites, 215, 0, 5);
+        if let Some(magic) = selected_magic {
+            draw_ui_number(
+                renderer,
+                sprites,
+                u32::from(magic.mp_cost),
+                4,
+                230,
+                14,
+                NumberColor::Yellow,
+            );
+        }
+        draw_slash(renderer, sprites, 260, 14);
         draw_ui_number(
             renderer,
             sprites,
-            u32::from(magic.mp_cost),
+            u32::from(member.attributes.mp),
             4,
-            230,
+            265,
             14,
-            NumberColor::Yellow,
+            NumberColor::Cyan,
+        );
+    } else {
+        if let Some(magic) = selected_magic {
+            render_magic_description(renderer, font, sprites, item_descriptions, magic.magic_id);
+        }
+        draw_single_line_box(renderer, sprites, 0, 0, 5);
+        if let Some(magic) = selected_magic {
+            draw_ui_number(
+                renderer,
+                sprites,
+                u32::from(magic.mp_cost),
+                4,
+                15,
+                14,
+                NumberColor::Yellow,
+            );
+        }
+        draw_slash(renderer, sprites, 45, 14);
+        draw_ui_number(
+            renderer,
+            sprites,
+            u32::from(member.attributes.mp),
+            4,
+            50,
+            14,
+            NumberColor::Cyan,
         );
     }
-    draw_slash(renderer, sprites, 260, 14);
-    draw_ui_number(
-        renderer,
-        sprites,
-        u32::from(member.attributes.mp),
-        4,
-        265,
-        14,
-        NumberColor::Cyan,
-    );
 
-    let first = selected / (INVENTORY_COLUMNS * 5) * (INVENTORY_COLUMNS * 5);
-    for (visible_index, magic) in magics.iter().skip(first).take(15).enumerate() {
+    let first = first_visible_magic(selected, magics.len());
+    for (visible_index, magic) in magics
+        .iter()
+        .skip(first)
+        .take(MAGIC_VISIBLE_ROWS * MAGIC_COLUMNS)
+        .enumerate()
+    {
         let index = first + visible_index;
-        let column = index % INVENTORY_COLUMNS;
-        let row = visible_index / INVENTORY_COLUMNS;
-        let x = 35 + column as i32 * 100;
+        let column = visible_index % MAGIC_COLUMNS;
+        let row = visible_index / MAGIC_COLUMNS;
+        let x = 35 + column as i32 * MAGIC_COLUMN_WIDTH;
         let y = 54 + row as i32 * 18;
         if let Some(name) = text.word(usize::from(magic.magic_id)) {
-            let color = match (index == selected, magic.enabled) {
-                (true, true) => selected_color(ui_ticks),
-                (true, false) => 0x1c,
-                (false, true) => 0x4f,
-                (false, false) => 0x18,
+            let color = match (index == selected, magic.enabled, confirmed) {
+                (true, _, true) => 0x2c,
+                (true, true, false) => selected_color(ui_ticks),
+                (true, false, false) => 0x1c,
+                (false, true, _) => 0x4f,
+                (false, false, _) => 0x18,
             };
             renderer.draw_big5_text_shadowed(font, name, x, y, color);
         }
         if index == selected {
             draw_cursor(renderer, sprites, x + 25, y + 10);
         }
+    }
+}
+
+fn render_magic_description(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    descriptions: &ItemDescriptions,
+    magic_id: u16,
+) {
+    let Some(lines) = descriptions.lines(magic_id) else {
+        return;
+    };
+    for (row, line) in lines.iter().enumerate() {
+        draw_description_line(
+            renderer,
+            font,
+            sprites,
+            line,
+            MAGIC_DESCRIPTION_X,
+            MAGIC_DESCRIPTION_Y + row as i32 * MAGIC_DESCRIPTION_LINE_HEIGHT,
+            0x3c,
+        );
     }
 }
 
@@ -1069,10 +1206,17 @@ fn render_shop_sell_menu(
     ui_ticks: u64,
 ) {
     let items = menu.items(game);
+    let first = menu.first_visible(items.len());
     draw_ui_box_with_shadow(renderer, sprites, 2, 0, 6, 17, 1, 0);
-    for (index, item) in items.iter().take(21).enumerate() {
-        let column = index % 3;
-        let row = index / 3;
+    for (visible_index, item) in items
+        .iter()
+        .skip(first)
+        .take(INVENTORY_VISIBLE_ROWS * INVENTORY_COLUMNS)
+        .enumerate()
+    {
+        let index = first + visible_index;
+        let column = visible_index % INVENTORY_COLUMNS;
+        let row = visible_index / INVENTORY_COLUMNS;
         let x = 15 + column as i32 * 100;
         let y = 12 + row as i32 * 18;
         if let Some(name) = text.word(usize::from(item.item_id)) {
@@ -1328,6 +1472,18 @@ fn draw_item_description_line(
     x: i32,
     y: i32,
 ) {
+    draw_description_line(renderer, font, sprites, text, x, y, 0x4f);
+}
+
+fn draw_description_line(
+    renderer: &mut Renderer,
+    font: &BitmapFont,
+    sprites: &[RleBitmap],
+    text: &[u8],
+    x: i32,
+    y: i32,
+    color: u8,
+) {
     let mut cursor_x = x;
     let mut index = 0;
     while index < text.len() {
@@ -1339,7 +1495,7 @@ fn draw_item_description_line(
                 byte,
                 cursor_x,
                 y,
-                0x4f,
+                color,
                 DialogTextMode::Normal,
             );
             cursor_x += 8;
@@ -1349,7 +1505,7 @@ fn draw_item_description_line(
         let Some(&trail) = text.get(index + 1) else {
             break;
         };
-        renderer.draw_big5_text_shadowed(font, &[byte, trail], cursor_x, y, 0x4f);
+        renderer.draw_big5_text_shadowed(font, &[byte, trail], cursor_x, y, color);
         cursor_x += 16;
         index += 2;
     }
@@ -1589,7 +1745,7 @@ fn render_equip_target_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pal_assets::palette::Palette;
+    use pal_assets::palette::{Palette, PaletteColor};
 
     fn one_pixel_font() -> BitmapFont {
         let mut data = vec![0; 0x682 + 30];
@@ -1644,5 +1800,45 @@ mod tests {
         let text = TextLibrary::parse(&words, &[], &[0; 8]).unwrap();
 
         assert_eq!(equip_role_list_columns(&text), 2);
+    }
+
+    #[test]
+    fn field_menu_boxes_match_original_two_character_width() {
+        let mut words = vec![b' '; 24 * 10];
+        let two_big5_characters = [0xa4, 0x40, 0xa4, 0x40];
+        for word_id in FIELD_MAIN_LABELS.into_iter().chain(INVENTORY_ACTION_LABELS) {
+            let start = word_id * 10;
+            words[start..start + two_big5_characters.len()].copy_from_slice(&two_big5_characters);
+        }
+        let text = TextLibrary::parse(&words, &[], &[0; 8]).unwrap();
+
+        assert_eq!(menu_text_columns(&text, &FIELD_MAIN_LABELS), 1);
+        assert_eq!(menu_text_columns(&text, &INVENTORY_ACTION_LABELS), 1);
+    }
+
+    #[test]
+    fn magic_columns_match_original_word_record_spacing() {
+        assert_eq!(35 + MAGIC_COLUMN_WIDTH, 122);
+        assert_eq!(35 + MAGIC_COLUMN_WIDTH * 2, 209);
+    }
+
+    #[test]
+    fn description_lines_use_the_requested_palette_color() {
+        let mut palette = Palette::default();
+        palette.colors[0x3c] = PaletteColor { r: 63, g: 0, b: 0 };
+        let mut renderer = Renderer::new(palette, 16, 15);
+        renderer.clear(40, 50, 60);
+
+        draw_description_line(
+            &mut renderer,
+            &one_pixel_font(),
+            &[],
+            &[0xb8, 0x67],
+            0,
+            0,
+            0x3c,
+        );
+
+        assert_eq!(&renderer.screen()[..4], &[252, 0, 0, 255]);
     }
 }

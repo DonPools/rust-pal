@@ -9,8 +9,9 @@ use crate::audio::MusicBackend;
 
 use super::dialog::ActiveDialog;
 use super::menu_state::{
-    update_wrapping_selection, ActiveMenu, EquipSession, FieldMenu, InventoryMenu, InventoryMode,
-    ItemUseSession, MagicSession, SaveSlotMode, ShopMode,
+    update_clamped_selection, update_magic_selection, update_wrapping_selection, ActiveMenu,
+    EquipSession, FieldMenu, InventoryMenu, InventoryMode, ItemUseSession, MagicSession,
+    SaveSlotMode, ShopMode,
 };
 use super::original_save::{
     next_saved_times, original_save_slots, save_original_game, SaveOriginalGameError,
@@ -132,13 +133,27 @@ where
                         (context.set_title)("Rust-PAL [Status]");
                     }
                     1 => {
-                        let selected = context
-                            .services
-                            .menus
-                            .magic_caster_selected
-                            .min(context.game.party.members().len().saturating_sub(1));
-                        menu = FieldMenu::MagicCaster { selected };
-                        (context.set_title)("Rust-PAL [Magic]");
+                        context.services.menus.magic_selected = 0;
+                        context.services.menus.magic_target_selected = 0;
+                        match context.game.party.members().len() {
+                            0 => {}
+                            1 => {
+                                menu = FieldMenu::MagicList {
+                                    caster: 0,
+                                    selected: 0,
+                                };
+                                (context.set_title)("Rust-PAL [Magic list]");
+                            }
+                            party_size => {
+                                let selected = context
+                                    .services
+                                    .menus
+                                    .magic_caster_selected
+                                    .min(party_size - 1);
+                                menu = FieldMenu::MagicCaster { selected };
+                                (context.set_title)("Rust-PAL [Magic]");
+                            }
+                        }
                     }
                     2 => {
                         menu = FieldMenu::InventoryAction {
@@ -207,9 +222,11 @@ where
                     .player_role(role_id)
                     .is_some_and(|role| role.hp > 0)
                 {
+                    context.services.menus.magic_selected = 0;
+                    context.services.menus.magic_target_selected = 0;
                     menu = FieldMenu::MagicList {
                         caster: *selected,
-                        selected: context.services.menus.magic_selected,
+                        selected: 0,
                     };
                     (context.set_title)("Rust-PAL [Magic list]");
                 }
@@ -218,7 +235,7 @@ where
         FieldMenu::MagicList { caster, selected } => {
             let role_id = context.game.party.members()[*caster].role_id;
             let magics = context.game.field_magics(role_id);
-            update_wrapping_selection(selected, context.input.direction_pressed, magics.len());
+            update_magic_selection(selected, context.input.direction_pressed, magics.len());
             context.services.menus.magic_selected = *selected;
             if context.input.cancel {
                 keep_menu = false;
@@ -243,10 +260,11 @@ where
                             }
                         }
                     } else {
+                        context.services.menus.magic_target_selected = 0;
                         menu = FieldMenu::MagicTarget {
                             caster: *caster,
                             magic_id: magic.magic_id,
-                            selected: context.services.menus.magic_target_selected,
+                            selected: 0,
                         };
                         (context.set_title)("Rust-PAL [Magic target]");
                     }
@@ -258,7 +276,7 @@ where
             magic_id,
             selected,
         } => {
-            update_wrapping_selection(
+            update_clamped_selection(
                 selected,
                 context.input.direction_pressed,
                 context.game.party.members().len(),
