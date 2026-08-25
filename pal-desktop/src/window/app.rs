@@ -140,12 +140,16 @@ where
         )
         .expect("failed to load original opening animation resources");
         let now = Instant::now();
+        let debug = DebugState {
+            ignore_map_collision: !game.map_collision_enabled(),
+            ..DebugState::default()
+        };
         Self {
             renderer,
             game,
             resources,
             load_scene,
-            debug: DebugState::default(),
+            debug,
             battle_scripts,
             scripts,
             dialog: None,
@@ -292,6 +296,13 @@ where
                 }
                 KeyCode::F7 => {
                     self.debug.show_battle = !self.debug.show_battle;
+                    set_title(self.debug.title());
+                    true
+                }
+                KeyCode::F8 => {
+                    let enabled = !self.game.map_collision_enabled();
+                    self.game.set_map_collision_enabled(enabled);
+                    self.debug.ignore_map_collision = !enabled;
                     set_title(self.debug.title());
                     true
                 }

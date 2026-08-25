@@ -113,6 +113,7 @@ pub(super) fn render_object_overlay(
     objects: &[SceneObject],
     viewport: Viewport,
     focused_object_id: Option<u16>,
+    label_all_objects: bool,
 ) {
     for object in objects {
         let x = object.world_x - viewport.x;
@@ -126,7 +127,7 @@ pub(super) fn render_object_overlay(
         let radius = if focused { 5 } else { 3 };
         draw_line(renderer, x - radius, y, x + radius, y, color);
         draw_line(renderer, x, y - radius, x, y + radius, color);
-        if focused {
+        if label_all_objects || focused {
             draw_debug_text(
                 renderer,
                 x + 4,

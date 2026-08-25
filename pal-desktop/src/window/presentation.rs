@@ -253,7 +253,13 @@ fn render_battle_or_world(
     }
     if show_objects {
         let focused_object_id = focused_debug_object(game, script).map(|object| object.id);
-        render_object_overlay(renderer, &game.scene_objects, viewport, focused_object_id);
+        render_object_overlay(
+            renderer,
+            &game.scene_objects,
+            viewport,
+            focused_object_id,
+            true,
+        );
     }
 }
 

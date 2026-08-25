@@ -167,6 +167,7 @@ where
             &self.scene.objects,
             self.viewport,
             self.selected_object,
+            false,
         );
         scale_canvas(&mut self.renderer, self.zoom);
         self.dirty = false;

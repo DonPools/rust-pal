@@ -147,6 +147,7 @@ pub struct GameState<M = Map> {
     save_experience: [[SaveExperience; SAVE_ROLE_COUNT]; SAVE_EXPERIENCE_KINDS],
     save_battle_speed: u16,
     save_layer: u16,
+    map_collision_enabled: bool,
     pub camera: Camera,
 }
 
@@ -268,6 +269,7 @@ impl<M: CollisionMap> GameState<M> {
             }; SAVE_ROLE_COUNT]; SAVE_EXPERIENCE_KINDS],
             save_battle_speed: 2,
             save_layer: 0,
+            map_collision_enabled: true,
             camera: Camera::new(viewport_width, viewport_height),
         };
         state.follow_player();
@@ -383,6 +385,18 @@ impl<M: CollisionMap> GameState<M> {
     pub fn with_battle_data(mut self, battle_data: BattleData) -> Self {
         self.battle_data = Some(battle_data);
         self
+    }
+
+    /// Enable or disable map-tile collision for player-controlled exploration.
+    ///
+    /// Event-object collision remains active when map collision is disabled.
+    pub fn set_map_collision_enabled(&mut self, enabled: bool) {
+        self.map_collision_enabled = enabled;
+    }
+
+    /// Whether player-controlled exploration currently checks map-tile collision.
+    pub fn map_collision_enabled(&self) -> bool {
+        self.map_collision_enabled
     }
 
     pub fn party_followers(&self) -> &[Role] {

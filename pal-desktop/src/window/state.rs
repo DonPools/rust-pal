@@ -15,6 +15,7 @@ pub(super) struct DebugState {
     pub(super) show_objects: bool,
     pub(super) show_script: bool,
     pub(super) show_battle: bool,
+    pub(super) ignore_map_collision: bool,
     pub(super) script_page: ScriptDebugPage,
     pub(super) trace_cursor: Option<u64>,
 }
@@ -26,12 +27,14 @@ impl DebugState {
             self.show_objects,
             self.show_script,
             self.show_battle,
+            self.ignore_map_collision,
         ) {
-            (false, false, false, false) => "Rust-PAL",
-            (true, false, false, false) => "Rust-PAL [Collision]",
-            (false, true, false, false) => "Rust-PAL [Objects]",
-            (false, false, true, false) => "Rust-PAL [Script]",
-            (false, false, false, true) => "Rust-PAL [战斗助手]",
+            (false, false, false, false, false) => "Rust-PAL",
+            (true, false, false, false, false) => "Rust-PAL [Collision]",
+            (false, true, false, false, false) => "Rust-PAL [Objects]",
+            (false, false, true, false, false) => "Rust-PAL [Script]",
+            (false, false, false, true, false) => "Rust-PAL [战斗助手]",
+            (false, false, false, false, true) => "Rust-PAL [No map collision]",
             _ => "Rust-PAL [Debug]",
         }
     }
@@ -301,6 +304,18 @@ mod tests {
             }
             .title(),
             "Rust-PAL [战斗助手]"
+        );
+    }
+
+    #[test]
+    fn disabled_map_collision_has_a_distinct_window_title() {
+        assert_eq!(
+            DebugState {
+                ignore_map_collision: true,
+                ..DebugState::default()
+            }
+            .title(),
+            "Rust-PAL [No map collision]"
         );
     }
 }

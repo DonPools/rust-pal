@@ -1,14 +1,17 @@
 use std::time::Duration;
 
+use pal_assets::palette::Palette;
 use pal_assets::text::TextLibrary;
 use pal_core::role::Direction;
 use pal_core::scene::SceneObject;
 use pal_core::script::DialogPosition;
 
+use crate::renderer::Renderer;
+
 use super::app::{elapsed_ui_ticks, update_interval_ms};
 use super::debug_render::{
-    object_debug_color, OBJECT_AUTO_COLOR, OBJECT_BOTH_COLOR, OBJECT_FOCUS_COLOR,
-    OBJECT_HIDDEN_COLOR, OBJECT_INERT_COLOR, OBJECT_TRIGGER_COLOR,
+    object_debug_color, render_object_overlay, OBJECT_AUTO_COLOR, OBJECT_BOTH_COLOR,
+    OBJECT_FOCUS_COLOR, OBJECT_HIDDEN_COLOR, OBJECT_INERT_COLOR, OBJECT_TRIGGER_COLOR,
 };
 use super::dialog::{advance_dialog_playback, ActiveDialog, DialogPlayback};
 use super::dialog_text::{
@@ -19,6 +22,7 @@ use super::menu_state::{update_wrapping_selection, InventoryMenu, ShopMenu, Shop
 use super::presentation::cycle_dialog_icon_palette;
 use super::scene_render::{cover_tile_candidate, covering_tile_y};
 use super::text_render::{dialog_color_after, DialogTextMode};
+use super::Viewport;
 
 fn text_library(messages: &[&[u8]]) -> TextLibrary {
     let word_data = [b' '; 10];
@@ -89,6 +93,47 @@ fn object_debug_colors_distinguish_script_roles_and_focus() {
     object.state = 0;
     assert_eq!(object_debug_color(&object, false), OBJECT_HIDDEN_COLOR);
     assert_eq!(object_debug_color(&object, true), OBJECT_FOCUS_COLOR);
+}
+
+#[test]
+fn object_debug_overlay_labels_every_onscreen_object() {
+    let mut visible = debug_object();
+    visible.world_x = 20;
+    visible.world_y = 20;
+
+    let mut hidden = debug_object();
+    hidden.id = 2;
+    hidden.world_x = 20;
+    hidden.world_y = 50;
+    hidden.state = 0;
+
+    let mut vanished = debug_object();
+    vanished.id = 3;
+    vanished.world_x = 20;
+    vanished.world_y = 80;
+    vanished.vanish_time = 1;
+
+    let objects = [visible, hidden, vanished];
+    let mut renderer = Renderer::new(Palette::default(), 120, 100);
+    render_object_overlay(
+        &mut renderer,
+        &objects,
+        Viewport::new(0, 0, 120, 100),
+        None,
+        true,
+    );
+
+    for object in &objects {
+        let label_pixel_x = object.world_x + 5;
+        let label_pixel_y = object.world_y - 9;
+        let index = (label_pixel_y as usize * renderer.width + label_pixel_x as usize) * 4;
+        assert_eq!(
+            &renderer.screen()[index..index + 4],
+            &object_debug_color(object, false),
+            "object #{} has no debug label",
+            object.id
+        );
+    }
 }
 
 #[test]

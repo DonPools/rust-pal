@@ -1075,6 +1075,34 @@ fn blocked_walking_resets_an_active_animation() {
 }
 
 #[test]
+fn disabled_map_collision_allows_walking_through_blocked_tiles() {
+    let mut state = state(&[(336, 248)]);
+    assert!(state.map_collision_enabled());
+    state.set_map_collision_enabled(false);
+    assert!(!state.map_collision_enabled());
+
+    assert!(state.update(GameInput {
+        direction: Some(Direction::East),
+        ..GameInput::default()
+    }));
+    assert_eq!((state.player.world_x, state.player.world_y), (336, 248));
+    assert_eq!(state.player.anim_frame, 1);
+}
+
+#[test]
+fn disabled_map_collision_keeps_event_object_collision() {
+    let mut state = state(&[]).with_scene_objects(vec![blocking_object(336, 248)]);
+    state.set_map_collision_enabled(false);
+
+    assert!(state.update(GameInput {
+        direction: Some(Direction::East),
+        ..GameInput::default()
+    }));
+    assert_eq!((state.player.world_x, state.player.world_y), (320, 240));
+    assert_eq!(state.player.direction, Direction::East);
+}
+
+#[test]
 fn event_object_blockers_prevent_walking() {
     let mut state = state(&[]).with_scene_objects(vec![blocking_object(336, 248)]);
     assert!(state.update(GameInput {

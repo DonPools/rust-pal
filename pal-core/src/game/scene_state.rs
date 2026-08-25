@@ -161,7 +161,7 @@ impl<M: CollisionMap> GameState<M> {
         self.player.direction = direction;
         let (dx, dy) = direction.step();
         let target = (self.player.world_x + dx, self.player.world_y + dy);
-        if !self.map.is_world_blocked(target.0, target.1)
+        if (!self.map_collision_enabled || !self.map.is_world_blocked(target.0, target.1))
             && !blocks_position(&self.scene_objects, target.0, target.1)
         {
             let old_position = (self.player.world_x, self.player.world_y);
